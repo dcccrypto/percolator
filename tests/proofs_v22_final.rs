@@ -498,40 +498,61 @@ fn proof_v22_s10_idle_fast_path_is_identity() {
     kani::cover!(budget0 == 2, "budget 2");
 }
 
-/// E-S10-3 share formula and the fast-path predicate, full u128 width. Mutants: rule A returns the
-/// rule-B formula; saturating_sub -> wrapping.
+/// E-S10-3 share formula and the fast-path predicate, full u128 width.
+/// weak-1020 D8 (row: "asserts restate the formula on harness expressions"). Rule B is now checked against
+/// SPEC properties, not a copy of its saturating chain: (1) never above the principal; (2) the liens are taken
+/// off the principal exactly, the three liens summed in 130 bits (no harness overflow): rb == p - min(p, liens);
+/// (3) monotone: one more atom of any lien never raises the share. Rule A == p; the compiled rule is A
+/// (`S10_PROTECT_FULL_PROVIDER_PRINCIPAL`). The fast-path half stays a RESTATED lemma: the predicate is an inline
+/// closure in `rebalance_unclaimed_backing_across_asset_domains_not_atomic` and cannot be called (report Q1).
 #[kani::proof]
 #[kani::solver(cadical)]
 fn proof_v22_s10_share_formula_and_fast_predicate() {
     let p: u128 = kani::any();
     let fresh: u128 = kani::any();
+    let (c, i, v): (u128, u128, u128) = (kani::any(), kani::any(), kani::any());
     let b = BackingBucketV16 {
-        consumed_liened_backing_num: kani::any(),
-        impaired_liened_backing_num: kani::any(),
-        valid_liened_backing_num: kani::any(),
+        consumed_liened_backing_num: c,
+        impaired_liened_backing_num: i,
+        valid_liened_backing_num: v,
         fresh_unliened_backing_num: fresh,
         ..BackingBucketV16::EMPTY
     };
     let a = View::s10_provider_fresh_by_rule_for_test(true, p, b);
     let rb = View::s10_provider_fresh_by_rule_for_test(false, p, b);
     assert_eq!(a, p, "rule A protects the full principal");
-    assert_eq!(
-        rb,
-        p.saturating_sub(b.consumed_liened_backing_num)
-            .saturating_sub(b.impaired_liened_backing_num)
-            .saturating_sub(b.valid_liened_backing_num)
-    );
+    // (1) bound
+    assert!(rb <= p, "rule B never exceeds the principal");
+    // (2) exact: liens summed without overflow as (hi, lo) carry pairs
+    let (s1, o1) = c.overflowing_add(i);
+    let (s2, o2) = s1.overflowing_add(v);
+    let liens_ge_p = o1 || o2 || s2 >= p;
+    if liens_ge_p {
+        assert_eq!(rb, 0, "liens cover the principal: nothing left");
+    } else {
+        assert_eq!(rb + s2, p, "share + liens == principal");
+    }
+    // (3) monotone in each lien
+    for k in 0..3u8 {
+        let mut b2 = b;
+        match k {
+            0 => b2.consumed_liened_backing_num = c.saturating_add(1),
+            1 => b2.impaired_liened_backing_num = i.saturating_add(1),
+            _ => b2.valid_liened_backing_num = v.saturating_add(1),
+        }
+        assert!(View::s10_provider_fresh_by_rule_for_test(false, p, b2) <= rb, "a larger lien never raises the share");
+    }
     if p == 0 {
-        assert_eq!(a, 0);
         assert_eq!(rb, 0, "a provider-less bucket is wholly movable");
     }
     assert_eq!(View::s10_provider_fresh_for_test(p, b), a, "compiled rule is A");
-    // the fast-path predicate (`:15097-15099`) skips exactly when the slow pass would `continue`
-    let fast_skip = fresh == 0 || fresh <= p;
+    // the fast-path predicate (inline closure, restated): skips exactly when the slow pass would `continue`
+    let fast_skip = fresh == 0 || (S10_PROTECT_FULL_PROVIDER_PRINCIPAL && fresh <= p);
     let slow_skip = fresh.saturating_sub(a) == 0 || fresh == 0;
     assert_eq!(fast_skip, slow_skip);
     kani::cover!(p > 0 && rb == 0, "rule B gives 0 with principal");
-    kani::cover!(rb > 0, "rule B gives > 0");
+    kani::cover!(rb > 0 && c > 0 && i > 0 && v > 0, "rule B > 0 with all three liens present");
+    kani::cover!(o1 || o2, "lien sum beyond u128 (saturating chain still 0)");
     kani::cover!(fresh > 0 && fresh <= p, "fresh below principal (idle)");
     kani::cover!(fresh > p, "loser cash present");
 }

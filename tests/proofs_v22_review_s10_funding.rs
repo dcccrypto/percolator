@@ -20,24 +20,36 @@ use percolator::{ADL_ONE, FUNDING_DEN};
 ///     => payer 3_000_000 (ceil), receiver 2_999_999 (floor)
 ///   mag 2, a = 5e14: p = 1e15 = 1_000_000 * 1e9 exactly => both 1_000_000
 ///   mag 7, a = ADL_ONE: fast path 7 * 1e6 = 7_000_000 on both sides
+/// weak-1020 D8: unchanged asserts; each witness now carries a cover (the call ran and took that path), so the
+/// PASS is not a no-cover PASS. Mutant MFU-1 (receiver rounds up) must go RED.
 #[kani::proof]
 #[kani::solver(kissat)]
 fn proof_v22_review_funding_witnesses() {
     const A1: u128 = ADL_ONE - 1;
-    // longs pay (n > 0), both sides shrunk equally
-    assert_eq!(kani_funding_index_deltas(3, A1, A1), Ok((-3_000_000, 2_999_999)));
-    // shorts pay (n < 0): mirrored
-    assert_eq!(kani_funding_index_deltas(-3, A1, A1), Ok((2_999_999, -3_000_000)));
-    // exact division: no rounding either way
-    assert_eq!(kani_funding_index_deltas(2, 500_000_000_000_000, 500_000_000_000_000), Ok((-1_000_000, 1_000_000)));
-    // fast path, balanced book
-    assert_eq!(kani_funding_index_deltas(7, ADL_ONE, ADL_ONE), Ok((-7_000_000, 7_000_000)));
-    assert_eq!(kani_funding_index_deltas(-7, ADL_ONE, ADL_ONE), Ok((7_000_000, -7_000_000)));
-    // asymmetric: payer on the fast path, receiver rounded down
-    assert_eq!(kani_funding_index_deltas(3, ADL_ONE, A1), Ok((-3_000_000, 2_999_999)));
-    // asymmetric: payer shrunk (rounded up), receiver on the fast path
-    assert_eq!(kani_funding_index_deltas(-3, ADL_ONE, A1), Ok((3_000_000, -3_000_000)));
-    assert_eq!(kani_funding_index_deltas(0, A1, A1), Ok((0, 0)));
+    let w = [
+        (kani_funding_index_deltas(3, A1, A1), Ok((-3_000_000, 2_999_999))),
+        (kani_funding_index_deltas(-3, A1, A1), Ok((2_999_999, -3_000_000))),
+        (kani_funding_index_deltas(2, 500_000_000_000_000, 500_000_000_000_000), Ok((-1_000_000, 1_000_000))),
+        (kani_funding_index_deltas(7, ADL_ONE, ADL_ONE), Ok((-7_000_000, 7_000_000))),
+        (kani_funding_index_deltas(-7, ADL_ONE, ADL_ONE), Ok((7_000_000, -7_000_000))),
+        (kani_funding_index_deltas(3, ADL_ONE, A1), Ok((-3_000_000, 2_999_999))),
+        (kani_funding_index_deltas(-3, ADL_ONE, A1), Ok((3_000_000, -3_000_000))),
+        (kani_funding_index_deltas(0, A1, A1), Ok((0, 0))),
+    ];
+    // longs pay, both shrunk; shorts pay mirrored; exact division; fast path both signs; asymmetric x2; zero
+    let mut k = 0;
+    while k < w.len() {
+        assert_eq!(w[k].0, w[k].1);
+        k += 1;
+    }
+    kani::cover!(w[0].0 == Ok((-3_000_000, 2_999_999)), "longs pay: payer ceil, receiver floor");
+    kani::cover!(w[1].0 == Ok((2_999_999, -3_000_000)), "shorts pay: mirrored");
+    kani::cover!(w[2].0 == Ok((-1_000_000, 1_000_000)), "exact division, no rounding");
+    kani::cover!(w[3].0 == Ok((-7_000_000, 7_000_000)), "fast path, longs pay");
+    kani::cover!(w[4].0 == Ok((7_000_000, -7_000_000)), "fast path, shorts pay");
+    kani::cover!(w[5].0 == Ok((-3_000_000, 2_999_999)), "asymmetric: payer fast path, receiver floor");
+    kani::cover!(w[6].0 == Ok((3_000_000, -3_000_000)), "asymmetric: payer ceil, receiver fast path");
+    kani::cover!(w[7].0 == Ok((0, 0)), "zero funding");
 }
 
 /// BOUNDED: 0 < |n| < 2^16, a_side = ADL_ONE - k_side with k_side < 2^16 (so a in

@@ -190,58 +190,107 @@ fn proof_v17_stress_envelope_activation_threshold() {
 }
 
 /// A-6.3: clear zeroes the accumulator, restores u64::MAX sentinels, clears the flag.
+/// weak-1020 D8: symbolic pre-state including the flag (0/1), a frame check (the fields clear must NOT touch),
+/// and covers on the interesting pre-states.
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v17_stress_envelope_clear_resets_fields() {
     let mut header = env_header();
     let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    let flag: bool = kani::any();
+    let acc: u128 = kani::any();
+    let s_slot: u64 = kani::any();
+    let s_epoch: u64 = kani::any();
+    let risk_epoch: u64 = kani::any();
+    let loss_stale: bool = kani::any();
+    header.risk_epoch = V16PodU64::new(risk_epoch);
+    header.loss_stale_active = loss_stale as u8;
+    let (mode0, vault0, c_tot0) = (header.mode, header.vault.get(), header.c_tot.get());
     let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    view.header.stress_consumption_bps_e9_since_envelope = V16PodU128::new(kani::any());
-    view.header.stress_envelope_start_slot = V16PodU64::new(kani::any());
-    view.header.stress_envelope_start_credit_epoch = V16PodU64::new(kani::any());
-    view.header.threshold_stress_active = 1;
+    view.header.stress_consumption_bps_e9_since_envelope = V16PodU128::new(acc);
+    view.header.stress_envelope_start_slot = V16PodU64::new(s_slot);
+    view.header.stress_envelope_start_credit_epoch = V16PodU64::new(s_epoch);
+    view.header.threshold_stress_active = flag as u8;
     view.clear_stress_envelope_v16();
-    assert_eq!(
-        view.header.stress_consumption_bps_e9_since_envelope.get(),
-        0
-    );
+    assert_eq!(view.header.stress_consumption_bps_e9_since_envelope.get(), 0);
     assert_eq!(view.header.stress_envelope_start_slot.get(), u64::MAX);
-    assert_eq!(
-        view.header.stress_envelope_start_credit_epoch.get(),
-        u64::MAX
-    );
+    assert_eq!(view.header.stress_envelope_start_credit_epoch.get(), u64::MAX);
     assert_eq!(view.header.threshold_stress_active, 0);
+    // frame: clear touches only the four envelope fields
+    assert_eq!(view.header.risk_epoch.get(), risk_epoch);
+    assert_eq!(view.header.loss_stale_active, loss_stale as u8);
+    assert_eq!(view.header.mode, mode0);
+    assert_eq!(view.header.vault.get(), vault0);
+    assert_eq!(view.header.c_tot.get(), c_tot0);
+    kani::cover!(flag && acc > 0 && s_slot != u64::MAX && s_epoch != u64::MAX, "an open envelope is cleared");
+    kani::cover!(!flag && acc == 0 && s_slot != u64::MAX, "a torn idle envelope is repaired by clear");
 }
 
 /// A-6.4: an active envelope from a PRIOR epoch is cleared (epoch advanced, different
-/// slot, not in active-close) before the new accrual — so the post-state holds only the
-/// fresh delta and the flag drops below trigger.
+/// slot, not in active-close) before the new accrual.
+/// weak-1020 D8: was one concrete vector. Now every input symbolic (flag, accumulator, start slot/epoch, risk
+/// epoch, now, consumption > 0, loss-stale, market mode); the documented reset rule and the writer's post-state
+/// are checked exactly, and each blocker of the reset is covered on its own.
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v17_stress_envelope_epoch_reset() {
     let mut header = env_header();
     let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    let flag: bool = kani::any();
+    let acc: u128 = kani::any();
+    let s_slot: u64 = kani::any();
+    let s_epoch: u64 = kani::any();
+    let re: u64 = kani::any();
+    let now: u64 = kani::any();
+    let c: u128 = kani::any();
+    let loss_stale: bool = kani::any();
+    let mode: u8 = kani::any();
+    kani::assume(c > 0);
+    kani::assume(mode <= 2); // a decodable market mode (Live / Resolved / Recovery)
+    header.threshold_stress_active = flag as u8;
+    header.stress_consumption_bps_e9_since_envelope = V16PodU128::new(acc);
+    header.stress_envelope_start_slot = V16PodU64::new(s_slot);
+    header.stress_envelope_start_credit_epoch = V16PodU64::new(s_epoch);
+    header.risk_epoch = V16PodU64::new(re);
+    header.loss_stale_active = loss_stale as u8;
+    header.mode = mode;
     let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    view.header.threshold_stress_active = 1;
-    view.header.stress_consumption_bps_e9_since_envelope =
-        V16PodU128::new(STRESS_ENVELOPE_TRIGGER_BPS_E9);
-    view.header.stress_envelope_start_slot = V16PodU64::new(10);
-    view.header.stress_envelope_start_credit_epoch = V16PodU64::new(1);
-    view.header.risk_epoch = V16PodU64::new(2);
-    // fresh header is Live mode + loss_stale_active=0 → not active-close → epoch-advance clears.
-    view.apply_stress_envelope_progress(1, 11).unwrap();
-    assert_eq!(
-        view.header.stress_consumption_bps_e9_since_envelope.get(),
-        1
-    );
-    assert_eq!(view.header.threshold_stress_active, 0);
+    let r = view.apply_stress_envelope_progress(c, now);
+    assert!(r.is_ok(), "decodable state: the writer never fails");
+    let active_close = mode == 2 || loss_stale;
+    let reset = flag && s_epoch != u64::MAX && re > s_epoch && s_slot != now && !active_close;
+    let base = if reset { 0 } else { acc };
+    let post = base.saturating_add(c);
+    assert_eq!(view.header.stress_consumption_bps_e9_since_envelope.get(), post, "reset-before-accrue, then saturating add");
+    let was_on = flag && !reset;
+    let on = was_on || post >= STRESS_ENVELOPE_TRIGGER_BPS_E9;
+    assert_eq!(view.header.threshold_stress_active, on as u8);
+    if on && !was_on {
+        assert_eq!(view.header.stress_envelope_start_slot.get(), now, "activation stamps the slot");
+        assert_eq!(view.header.stress_envelope_start_credit_epoch.get(), re, "activation stamps the epoch");
+    } else if reset {
+        assert_eq!(view.header.stress_envelope_start_slot.get(), u64::MAX);
+        assert_eq!(view.header.stress_envelope_start_credit_epoch.get(), u64::MAX);
+    } else {
+        assert_eq!(view.header.stress_envelope_start_slot.get(), s_slot);
+        assert_eq!(view.header.stress_envelope_start_credit_epoch.get(), s_epoch);
+    }
+    kani::cover!(reset && !on, "prior-epoch envelope reset, fresh delta below the trigger");
+    kani::cover!(reset && on, "reset then re-activated by a large delta");
+    let others = flag && s_epoch != u64::MAX && re > s_epoch && s_slot != now && !active_close;
+    kani::cover!(!others && flag && s_epoch != u64::MAX && s_slot != now && !active_close && re <= s_epoch, "blocked: same epoch");
+    kani::cover!(flag && s_epoch != u64::MAX && re > s_epoch && !active_close && s_slot == now, "blocked: same slot");
+    kani::cover!(flag && s_epoch != u64::MAX && re > s_epoch && s_slot != now && mode == 2 && !loss_stale, "blocked: Recovery");
+    kani::cover!(flag && s_epoch != u64::MAX && re > s_epoch && s_slot != now && mode == 0 && loss_stale, "blocked: loss-stale");
+    kani::cover!(flag && s_epoch == u64::MAX && s_slot != now && !active_close, "blocked: epoch sentinel");
+    kani::cover!(!flag && acc > 0 && post >= STRESS_ENVELOPE_TRIGGER_BPS_E9, "idle envelope activates");
 }
 
-/// A-6.5: the validate_shape sentinel-pairing invariant rejects a torn idle envelope
-/// (flag=0, acc=0, but a sentinel != u64::MAX). OPERATIVE for the shape clause
-/// (RED-before/GREEN-after): without the clause validate_shape would accept it.
+/// A-6.5: the validate_shape sentinel-pairing invariant.
+/// weak-1020 D8: was one concrete torn vector. Now flag, accumulator and both sentinels are symbolic and
+/// `validate_shape` is Err EXACTLY for a torn idle envelope (flag 0, accumulator 0, a sentinel != u64::MAX).
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
@@ -253,24 +302,34 @@ fn proof_v17_stress_envelope_validate_shape_pairing() {
         let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
     }
-    // proper idle envelope (new_dynamic set sentinels = u64::MAX) passes.
     {
         let view = MarketGroupV16View::new(&header, &markets);
-        assert!(
-            view.validate_shape().is_ok(),
-            "idle envelope (sentinels=MAX) passes"
-        );
+        assert!(view.validate_shape().is_ok(), "idle envelope (sentinels=MAX) passes");
     }
-    // torn idle envelope: flag=0, acc=0, but start_slot=0 (!= MAX) → rejected.
-    header.stress_envelope_start_slot = V16PodU64::new(0);
-    {
+    let flag: bool = kani::any();
+    let acc_zero: bool = kani::any();
+    let acc: u128 = if acc_zero { 0 } else { kani::any() };
+    let s_slot: u64 = kani::any();
+    let s_epoch: u64 = kani::any();
+    header.threshold_stress_active = flag as u8;
+    header.stress_consumption_bps_e9_since_envelope = V16PodU128::new(acc);
+    header.stress_envelope_start_slot = V16PodU64::new(s_slot);
+    header.stress_envelope_start_credit_epoch = V16PodU64::new(s_epoch);
+    let torn = !flag && acc == 0 && (s_slot != u64::MAX || s_epoch != u64::MAX);
+    let r = {
         let view = MarketGroupV16View::new(&header, &markets);
-        assert_eq!(
-            view.validate_shape(),
-            Err(V16Error::InvalidConfig),
-            "torn idle envelope rejected by the pairing invariant"
-        );
+        view.validate_shape()
+    };
+    if torn {
+        assert_eq!(r, Err(V16Error::InvalidConfig), "torn idle envelope rejected by the pairing invariant");
+    } else {
+        assert!(r.is_ok(), "every non-torn envelope state is shape-valid");
     }
+    kani::cover!(torn && s_slot != u64::MAX && s_epoch == u64::MAX, "torn by the slot sentinel only");
+    kani::cover!(torn && s_slot == u64::MAX && s_epoch != u64::MAX, "torn by the epoch sentinel only");
+    kani::cover!(!flag && acc == 0 && !torn, "proper idle envelope accepted");
+    kani::cover!(flag && s_slot != u64::MAX && s_epoch != u64::MAX, "open envelope accepted");
+    kani::cover!(!flag && acc > 0 && s_slot != u64::MAX, "idle with consumption, any sentinel, accepted");
 }
 
 // ============================================================================
@@ -897,31 +956,10 @@ fn proof_v17_header_abi_a6_fields_within_struct_and_slots_after_header() {
 // ============================================================================
 // lp_vault — NAV/share conservation (wide-math properties).
 //
-// LP-NAV-1, LP-NAV-3, LP-NAV-5 prove the floor-division MATHEMATICAL invariants
-// using direct Rust `/` arithmetic — NOT the production wide_mul_div_floor_u128.
-// This is intentional: these are scale-invariant arithmetic facts (floor(floor(x/d)*d) <= x
-// etc.) that hold for ALL inputs; CBMC with small symbolic inputs is a SOUND bounded
-// exhaustive proof because the property is an arithmetic identity.
-//
-// WIDTH LIMITATION: u8 / [1,15] modulo range. Wider ranges (u16+) OOM on CBMC's
-// propositional-reduction step for compound floor expressions. The mathematical
-// property is scale-invariant (proven exhaustively for all [1,15]^3 values = 0 failures).
-//
-// The PRODUCTION FUNCTION wide_mul_div_floor_u128 is separately certified:
-//   - u8 range: proof_v17_wide_mul_div_floor_stub_correct (stub-match, 752s, SOUND)
-//   - u16 range: proof_v17_wide_mul_div_floor_postcondition_u16 (post-condition,
-//                NO-LOOP fast path, SOUND for u16 inputs, replaces stub with direct
-//                production function call + post-condition q*d<=a*b ∧ rem<d)
-//
-// LP-NAV-2 (fee_split) and LP-NAV-4 (nav_atoms_sound) use #[kani::stub] with the
-// u8-range stub_verified stub; they exercise the REAL function structure with
-// the verified stub replacing the intractable production division loop.
-//
-// MAXIMUM CERTIFIABLE WIDTH (empirically confirmed, 64GB box):
-//   u8-range is the maximum for direct CBMC certification of wide_mul_div_floor_u128.
-//   u16+ has been attempted and found intractable (>14 min, no result). The post-condition
-//   harness (proof_v17_wide_mul_div_floor_postcondition_u16) documents the target proof
-//   structure for a larger machine.
+// (weak-1020: section notes kept from the original.) LP-NAV-3 and LP-NAV-5 prove floor-division
+// invariants on local arithmetic; LP-NAV-1 (below) now calls the PRODUCTION lp_shares_for_deposit /
+// lp_atoms_for_redemption. The production wide_mul_div_floor_u128 is certified only at u8 operands
+// (proof_v17_wide_mul_div_floor_stub_correct); the u16 post-condition harness is intractable on this box.
 //
 // Properties:
 //   LP-NAV-1: deposit→redeem round-trips with shares_out >= 1 → atoms ≤ amount (no profit).
@@ -930,49 +968,50 @@ fn proof_v17_header_abi_a6_fields_within_struct_and_slots_after_header() {
 //   LP-NAV-4: lp_vault_nav_atoms: nav >= available_principal.
 //   LP-NAV-5: floor(s*nav/ts)*ts <= s*nav (redemption round-down property).
 // ============================================================================
-/// LP-NAV-1: deposit → redeem is non-profit: redeeming the minted shares yields
-/// atoms_out <= amount_in (the vault keeps any rounding dust).
-///
-/// Sound u4-range modulo reduction: restricts inputs to [1,15] using modulo arithmetic.
-/// No kani::assume calls — avoids CBMC internal coverage property OOM.
-///
-/// Root cause of OOM for all previous attempts:
-///   - kani::assume() generates 2 CBMC internal SAT instances per call (reachability checks).
-///   - With compound divisor new_ts = ts + floor(a*ts/nav), the propositional-reduction
-///     step for the 3rd SAT instance OOMs even with u8 inputs (18 VCCs total).
-///   - Algebraic approach with kani::assume(s*nav <= a*ts) also OOMs:
-///     the non-linear u32×u8 multiplication generates a witness OOM.
-///
-/// Fix: modulo restriction to [1,15] with NO kani::assume calls.
-///   - `(x % 15) + 1` is deterministic arithmetic (no branch), CBMC encodes as 4-bit mod.
-///   - With inputs in [1,15]: max shares = 15*15/1 = 225, max new_ts = 15+225 = 240 (8-bit!).
-///   - Effective divisor range for 2nd floor-div = [2,240] — same 8-bit range as LP-NAV-3.
-///   - LP-NAV-3 with u8 inputs and 8-bit divisor verified in 239s.
-///   - Property is scale-invariant; [1,15] covers the same integer structure as [1,255].
-///   - Proven exhaustively for all [1,15]^3 values (0 failures).
+/// LP-NAV-1: deposit -> redeem is non-profit.
+/// weak-1020 D8 (row: "no production code"; it re-did the floor arithmetic on locals): now the REAL
+/// `lp_shares_for_deposit` and the REAL `lp_atoms_for_redemption` (fork-facade lp_vault, the functions the
+/// wrapper's deposit/redeem handlers call) over EVERY u8 amount, total_shares and NAV (0 included, so every
+/// production branch is reached). `wide_mul_div_floor_u128` (U256/U512 long division, intractable) is
+/// replaced by an exact u64-divider floor that ASSERTS its operands are < 2^16 (true here: shares <= 65025,
+/// ts + shares <= 65280). CONDITIONAL on the production primitive being the exact floor for operands < 2^16;
+/// Kani has proven that only for u8 operands (`proof_v17_wide_mul_div_floor_stub_correct`), the u16
+/// post-condition harness is intractable on this box (see its block). Bounded: u8.
 #[kani::proof]
 #[kani::unwind(1)]
 #[kani::solver(cadical)]
+#[kani::stub(percolator::wide_math::wide_mul_div_floor_u128, weak1020_floor_u16_domain)]
 fn proof_v17_lp_vault_deposit_redeem_no_profit() {
-    // Symbolic u8 inputs restricted to [1,15] via modulo — NO kani::assume calls.
-    let a_raw: u8 = kani::any();
-    let ts_raw: u8 = kani::any();
-    let nav_raw: u8 = kani::any();
-    // Map to [1,15]: (x % 15) + 1. All products stay within u8 range after restriction.
-    let a128 = ((a_raw % 15) + 1) as u128; // ∈ [1,15]
-    let ts128 = ((ts_raw % 15) + 1) as u128; // ∈ [1,15]
-    let nav128 = ((nav_raw % 15) + 1) as u128; // ∈ [1,15]
-                                               // shares = floor(a * ts / nav). All inputs >= 1: safe divisor.
-                                               // Max shares = 15*15/1 = 225. All fit in u16.
-    let shares = (a128 * ts128) / nav128;
-    // After deposit: new_ts = ts + shares ∈ [2, 240] (8-bit), new_nav = nav+a ∈ [2, 30].
-    let new_ts = ts128 + shares; // ∈ [2, 240]: safe divisor, 8-bit range
-    let new_nav = nav128 + a128; // ∈ [2, 30]
-                                 // atoms_out = floor(shares * new_nav / new_ts).
-                                 // Mathematical guarantee: shares*(nav+a) <= a*(ts+shares) (algebraic proof).
-                                 // => atoms_out = floor(shares*new_nav/new_ts) <= a.
-    let atoms_out = (shares * new_nav) / new_ts;
-    assert!(atoms_out <= a128, "LP-NAV-1: deposit→redeem is non-profit");
+    let a = kani::any::<u8>() as u128;
+    let ts = kani::any::<u8>() as u128;
+    let nav = kani::any::<u8>() as u128;
+    let minted = lp_shares_for_deposit(a, ts, nav);
+    if ts == 0 {
+        assert_eq!(minted, Ok(a), "fresh vault / drain reset prices 1:1");
+        kani::cover!(true, "genesis branch");
+        return;
+    }
+    if nav == 0 {
+        assert_eq!(minted, Err(V16Error::InvalidConfig), "zero NAV with shares outstanding cannot price a deposit");
+        kani::cover!(true, "zero-NAV refusal");
+        return;
+    }
+    let s = match minted {
+        Ok(s) => s,
+        Err(e) => {
+            assert_eq!(e, V16Error::LpVaultZeroSharesMinted, "the only other refusal is a zero-share mint");
+            assert!(a * ts < nav, "refused only when floor(a * ts / nav) == 0");
+            kani::cover!(a > 0, "dust deposit refused instead of minting 0 shares");
+            return;
+        }
+    };
+    assert!(s >= 1 && s * nav <= a * ts, "mint rounds down");
+    let back = lp_atoms_for_redemption(s, ts + s, nav + a);
+    assert!(back.is_ok(), "redeeming exactly the minted shares is always accepted");
+    let back = back.unwrap();
+    assert!(back <= a, "LP-NAV-1: deposit -> redeem never profits");
+    kani::cover!(back < a, "strict rounding loss kept by the vault");
+    kani::cover!(back == a && a > 0, "exact round trip");
 }
 
 // ============================================================================
@@ -1644,4 +1683,40 @@ fn proof_v17_lien1_counterparty_terminal_release_impaired_aware() {
     } else {
         assert_eq!(result, Err(V16Error::CounterUnderflow));
     }
+}
+
+
+/// weak-1020: exact floor(a*b/d) for operands < 2^16 (u64 divider). Asserts its domain (never an assumption),
+/// so a call outside it FAILS the proof instead of narrowing it.
+fn weak1020_floor_u16_domain(a: u128, b: u128, d: u128) -> u128 {
+    assert!(d > 0, "wide_mul_div_floor_u128: division by zero");
+    assert!(a < (1 << 16) && b < (1 << 16) && d < (1 << 16), "stub domain: operands < 2^16");
+    ((a as u64 * b as u64) / d as u64) as u128
+}
+
+/// weak-1020 D8 pre-planned twin of LP-NAV-1 (fallback if the u8 domain does not finish): same harness body,
+/// inputs in [0, 15] (`x % 16`, no assume).
+#[kani::proof]
+#[kani::unwind(1)]
+#[kani::solver(cadical)]
+#[kani::stub(percolator::wide_math::wide_mul_div_floor_u128, weak1020_floor_u16_domain)]
+fn proof_v17_lp_vault_deposit_redeem_no_profit_u4() {
+    let a = (kani::any::<u8>() % 16) as u128;
+    let ts = (kani::any::<u8>() % 16) as u128;
+    let nav = (kani::any::<u8>() % 16) as u128;
+    let minted = lp_shares_for_deposit(a, ts, nav);
+    if ts == 0 || nav == 0 {
+        return;
+    }
+    let s = match minted {
+        Ok(s) => s,
+        Err(e) => {
+            assert_eq!(e, V16Error::LpVaultZeroSharesMinted);
+            return;
+        }
+    };
+    let back = lp_atoms_for_redemption(s, ts + s, nav + a).unwrap();
+    assert!(back <= a, "LP-NAV-1: deposit -> redeem never profits");
+    kani::cover!(back < a, "strict rounding loss kept by the vault");
+    kani::cover!(back == a && a > 0, "exact round trip");
 }

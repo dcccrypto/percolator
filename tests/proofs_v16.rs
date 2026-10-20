@@ -7618,6 +7618,14 @@ fn proof_v16_unliened_source_support_is_capped_by_realizable_backing() {
     if backing == claim {
         assert_eq!(support, claim);
     }
+    // weak-1020 D8: LOWER bound (the row was upper-bound only; mutant MF3-a, "rate 0 for every under-backed
+    // domain", survived). Pro-rata support loses at most one atom to rounding: rate = floor(b*S/c),
+    // credited_num = floor(c*BS*rate/S) >= b*BS - c*BS/S - 1 >= b*BS - 2 (S = BS = 1e12, c <= 5), so support >= b - 1.
+    assert!(support + 1 >= backing, "under-backed support is pro-rata (at most one atom of rounding)");
+    kani::cover!(
+        backing >= 2 && backing < claim && support > 0,
+        "partial backing still yields non-zero support"
+    );
 }
 
 #[kani::proof]
@@ -16321,6 +16329,15 @@ fn proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work() {
     );
 }
 
+// weak-1020 D8: the row "hard-coded the final classification" (both summaries were literals: stale=true /
+// liquidatable=false during cleanup, stale=false / liquidatable=true at the end). Now every summary is BUILT
+// from the scanned leg flags each call, through the production refresh-required predicate
+// (`kernel_live_account_refresh_required`) and the production assembler (`actionable_summary_from_signals`),
+// with the certificate's currentness SYMBOLIC per call. The only restated formula is `liquidatable =
+// live && cert_current && deficit && open_risk && reset_obligation_asset.is_none()` (v16.rs build_actionable_summary,
+// inline there; see report question 2). Claim (unchanged in scope): while a prior-reset obligation remains the
+// plan is a Refresh (never NoAction, never a Liquidate), each refresh clears exactly one obligation, and once
+// none remain, every call with a current certificate selects Liquidate(first live leg).
 #[kani::proof]
 #[kani::unwind(18)]
 #[kani::solver(cadical)]
@@ -16347,6 +16364,7 @@ fn proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation() {
     let mut reset_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
     let mut liquidation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
     let mut refresh_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut b_stale_any = false;
     let mut slot = 0usize;
     while slot < V16_MAX_PORTFOLIO_ASSETS_N {
         let bit = 1u16 << slot;
@@ -16382,6 +16400,7 @@ fn proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation() {
         assert_eq!(liquidatable, is_live);
         assert_eq!(reset_obligation, is_reset);
         assert!(!(liquidatable && reset_obligation));
+        b_stale_any |= b_stale;
         refresh_flags[slot] = refresh;
         liquidation_flags[slot] = liquidatable;
         reset_flags[slot] = reset_obligation;
@@ -16391,14 +16410,8 @@ fn proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation() {
     let initial_reset_count = reset_mask.count_ones();
     let first_reset = kani_first_actionable_slot(reset_flags).unwrap();
     let first_live = kani_first_actionable_slot(liquidation_flags).unwrap();
-    kani::cover!(
-        initial_reset_count == 1,
-        "single reset obligation is reachable"
-    );
-    kani::cover!(
-        initial_reset_count > 1,
-        "multiple reset obligations are reachable"
-    );
+    kani::cover!(initial_reset_count == 1, "single reset obligation is reachable");
+    kani::cover!(initial_reset_count > 1, "multiple reset obligations are reachable");
     kani::cover!(first_reset < first_live, "reset can precede live risk");
     kani::cover!(first_live < first_reset, "live risk can precede reset");
     kani::cover!(
@@ -16406,48 +16419,53 @@ fn proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation() {
         "DrainOnly legs share the bounded progress classification"
     );
 
+    // the account IS below maintenance with open risk (the claim is about live liquidation not being starved)
+    let deficit = true;
+    let mut liquidated_at: Option<usize> = None;
+    let mut cleared_with_current_cert = false;
     let mut calls = 0usize;
-    while calls < V16_MAX_PORTFOLIO_ASSETS_N {
-        let mut pre_reset_count = 0u32;
-        slot = 0;
-        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            pre_reset_count += reset_flags[slot] as u32;
-            slot += 1;
-        }
-        if pre_reset_count != 0 {
-            let selected_reset = kani_first_actionable_slot(reset_flags).unwrap();
-            let refresh_asset = kani_first_actionable_slot(refresh_flags);
-            let plan = kani_select_auto_crank_plan(
-                ActionableSummaryV16 {
-                    stale: true,
-                    b_stale: false,
-                    pending_close: false,
-                    expired_close: false,
-                    liquidatable: false,
-                    source_liens_releasable: false,
-                    recovery_eligible: false,
-                    resolved_winner: false,
-                },
-                0,
-                first_live,
-                refresh_asset,
-                PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
-            );
+    while calls <= V16_MAX_PORTFOLIO_ASSETS_N && liquidated_at.is_none() {
+        let cert_current: bool = kani::any();
+        let reset_asset = kani_first_actionable_slot(reset_flags);
+        let reset_pending = reset_asset.is_some();
+        let open_risk = kani_first_actionable_slot(liquidation_flags).is_some();
+        let stale = percolator::v16::kani_weak1020_live_account_refresh_required(
+            true,
+            cert_current,
+            reset_pending,
+            false,
+            false,
+        );
+        let liquidatable = cert_current && deficit && open_risk && !reset_pending;
+        let summary = percolator::v16::kani_weak1020_actionable_summary_from_signals(
+            stale, b_stale_any, false, false, liquidatable, false, false, false,
+        );
+        let refresh_asset =
+            kani_auto_crank_refresh_asset(kani_first_actionable_slot(refresh_flags), reset_asset);
+        let plan = kani_select_auto_crank_plan(
+            summary,
+            0,
+            first_live,
+            refresh_asset,
+            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        );
+        if reset_pending {
             assert_eq!(
                 plan,
-                AutoCrankPlanV16::RefreshAccount {
-                    asset_index: refresh_asset
-                }
+                AutoCrankPlanV16::RefreshAccount { asset_index: refresh_asset },
+                "a pending prior-reset obligation is always refreshed (never NoAction, never Liquidate)"
             );
-
+            let mut pre_reset_count = 0u32;
+            slot = 0;
+            while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+                pre_reset_count += reset_flags[slot] as u32;
+                slot += 1;
+            }
+            let selected_reset = reset_asset.unwrap();
             let mut already_cleared = false;
             slot = 0;
             while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-                if kani_should_clear_prior_reset_obligation(
-                    already_cleared,
-                    reset_flags[slot],
-                    false,
-                ) {
+                if kani_should_clear_prior_reset_obligation(already_cleared, reset_flags[slot], false) {
                     assert_eq!(slot, selected_reset);
                     reset_flags[slot] = false;
                     refresh_flags[slot] = false;
@@ -16456,7 +16474,6 @@ fn proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation() {
                 slot += 1;
             }
             assert!(already_cleared);
-
             let mut post_reset_count = 0u32;
             slot = 0;
             while slot < V16_MAX_PORTFOLIO_ASSETS_N {
@@ -16464,35 +16481,33 @@ fn proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation() {
                 slot += 1;
             }
             assert_eq!(post_reset_count + 1, pre_reset_count);
+            cleared_with_current_cert |= cert_current;
+        } else if cert_current {
+            assert_eq!(
+                plan,
+                AutoCrankPlanV16::Liquidate { asset_index: first_live },
+                "no obligation left + current cert + deficit: the live leg is liquidated"
+            );
+            liquidated_at = Some(calls);
+        } else {
+            assert_eq!(
+                plan,
+                AutoCrankPlanV16::RefreshAccount { asset_index: refresh_asset },
+                "a stale certificate is refreshed first"
+            );
         }
         calls += 1;
     }
-
-    assert!(kani_first_actionable_slot(reset_flags).is_none());
-    let selected_live = kani_first_actionable_slot(liquidation_flags).unwrap();
-    assert_eq!(selected_live, first_live);
-    let final_plan = kani_select_auto_crank_plan(
-        ActionableSummaryV16 {
-            stale: false,
-            b_stale: false,
-            pending_close: false,
-            expired_close: false,
-            liquidatable: true,
-            source_liens_releasable: false,
-            recovery_eligible: false,
-            resolved_winner: false,
-        },
-        0,
-        selected_live,
-        kani_first_actionable_slot(refresh_flags),
-        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+    // every reset obligation is gone after at most initial_reset_count refresh calls
+    if calls > initial_reset_count as usize {
+        assert!(kani_first_actionable_slot(reset_flags).is_none());
+    }
+    kani::cover!(liquidated_at.is_some(), "liquidation is reached after the cleanup");
+    kani::cover!(
+        liquidated_at == Some(initial_reset_count as usize),
+        "liquidated on the first call after the last obligation clears"
     );
-    assert_eq!(
-        final_plan,
-        AutoCrankPlanV16::Liquidate {
-            asset_index: first_live
-        }
-    );
+    kani::cover!(cleared_with_current_cert, "cleanup is chosen even with a CURRENT certificate");
 
     assert!(!kani_should_clear_prior_reset_obligation(false, true, true));
     assert!(!kani_should_clear_prior_reset_obligation(true, true, false));
@@ -16504,9 +16519,11 @@ fn proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation() {
 // and the missing-reason state. The production integration test
 // v16_auto_crank_commits_recovery_for_uncovered_cross_margin_liquidation drives a
 // real cross-margin liquidation into this kernel; this theorem pins the
-// fail-closed conversion boundary itself. Note the error range is 14, not
-// upstream's 12: this fork adds InsufficientInitialMargin and
-// LpVaultZeroSharesMinted, and both must stay unswallowable.
+// fail-closed conversion boundary itself.
+// weak-1020 D8: now genuinely exhaustive: EVERY V16Error variant (21; was 14), every mode (3), every
+// recovery reason (9, incl. the v2.2 BandPinExpired that this harness and the rev all-21 harness both
+// omitted) and the missing-reason state. `weak1020_error_index` / `weak1020_reason_index` are exhaustive
+// matches with no wildcard, so a new variant breaks the build until it is enumerated here.
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
@@ -16514,9 +16531,9 @@ fn proof_v16_liquidation_error_commits_only_fully_declared_recovery() {
     let error_tag: u8 = kani::any();
     let mode_tag: u8 = kani::any();
     let reason_tag: u8 = kani::any();
-    kani::assume(error_tag < 14);
+    kani::assume(error_tag < 21);
     kani::assume(mode_tag < 3);
-    kani::assume(reason_tag <= 8);
+    kani::assume(reason_tag <= 9);
 
     let error = match error_tag {
         0 => V16Error::InvalidConfig,
@@ -16532,8 +16549,16 @@ fn proof_v16_liquidation_error_commits_only_fully_declared_recovery() {
         10 => V16Error::CounterOverflow,
         11 => V16Error::CounterUnderflow,
         12 => V16Error::InsufficientInitialMargin,
-        _ => V16Error::LpVaultZeroSharesMinted,
+        13 => V16Error::LpVaultZeroSharesMinted,
+        14 => V16Error::AdlReduceOnly,
+        15 => V16Error::LossStale,
+        16 => V16Error::BandOutOfRange,
+        17 => V16Error::BandPinned,
+        18 => V16Error::BandPositionCap,
+        19 => V16Error::BandTooNarrow,
+        _ => V16Error::BandLegBelowMinNotional,
     };
+    assert_eq!(weak1020_error_index(error) as u8, error_tag, "enumerator is a bijection onto all 21 variants");
     let mode = match mode_tag {
         0 => MarketModeV16::Live,
         1 => MarketModeV16::Resolved,
@@ -16548,8 +16573,12 @@ fn proof_v16_liquidation_error_commits_only_fully_declared_recovery() {
         5 => Some(PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow),
         6 => Some(PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy),
         7 => Some(PermissionlessRecoveryReasonV16::CounterOrEpochOverflowDeclaredRecovery),
+        8 => Some(PermissionlessRecoveryReasonV16::BandPinExpired),
         _ => None,
     };
+    if let Some(r) = reason {
+        assert_eq!(weak1020_reason_index(r) as u8, reason_tag, "enumerator is a bijection onto all 9 reasons");
+    }
 
     let result = kani_commit_declared_liquidation_recovery(error, mode, reason);
     let complete_declaration =
@@ -16571,6 +16600,10 @@ fn proof_v16_liquidation_error_commits_only_fully_declared_recovery() {
         "a fully declared liquidation terminal commits successful recovery progress"
     );
     kani::cover!(
+        complete_declaration && reason == Some(PermissionlessRecoveryReasonV16::BandPinExpired),
+        "the v2.2 BandPinExpired declaration commits progress"
+    );
+    kani::cover!(
         error == V16Error::RecoveryRequired && mode == MarketModeV16::Live,
         "a bare recovery-required error is not swallowed"
     );
@@ -16579,8 +16612,12 @@ fn proof_v16_liquidation_error_commits_only_fully_declared_recovery() {
         "an incomplete Recovery marker fails closed"
     );
     kani::cover!(
-        error != V16Error::RecoveryRequired && mode == MarketModeV16::Recovery && reason.is_some(),
-        "Recovery state cannot mask an unrelated engine error"
+        error == V16Error::LossStale && mode == MarketModeV16::Recovery && reason.is_some(),
+        "post-v16 error (LossStale, MERR-a's target) reaches the kernel in Recovery"
+    );
+    kani::cover!(
+        error == V16Error::BandLegBelowMinNotional && mode == MarketModeV16::Recovery && reason.is_some(),
+        "the last band error reaches the kernel in Recovery"
     );
 }
 
@@ -20365,4 +20402,47 @@ fn closure_expired_counterparty_lien_cannot_remain_favorable_account_credit() {
         "mixed lien retains only independently valid insurance support"
     );
     assert_eq!(support, insurance_atoms);
+}
+
+
+/// weak-1020: exhaustive (no wildcard) index of a V16Error; a new variant is a build error here.
+fn weak1020_error_index(e: V16Error) -> usize {
+    match e {
+        V16Error::InvalidConfig => 0,
+        V16Error::ArithmeticOverflow => 1,
+        V16Error::ProvenanceMismatch => 2,
+        V16Error::HiddenLeg => 3,
+        V16Error::InvalidLeg => 4,
+        V16Error::Stale => 5,
+        V16Error::BStale => 6,
+        V16Error::LockActive => 7,
+        V16Error::NonProgress => 8,
+        V16Error::RecoveryRequired => 9,
+        V16Error::CounterOverflow => 10,
+        V16Error::CounterUnderflow => 11,
+        V16Error::InsufficientInitialMargin => 12,
+        V16Error::LpVaultZeroSharesMinted => 13,
+        V16Error::AdlReduceOnly => 14,
+        V16Error::LossStale => 15,
+        V16Error::BandOutOfRange => 16,
+        V16Error::BandPinned => 17,
+        V16Error::BandPositionCap => 18,
+        V16Error::BandTooNarrow => 19,
+        V16Error::BandLegBelowMinNotional => 20,
+    }
+}
+
+/// weak-1020: exhaustive (no wildcard) index of a recovery reason.
+fn weak1020_reason_index(r: PermissionlessRecoveryReasonV16) -> usize {
+    match r {
+        PermissionlessRecoveryReasonV16::BelowProgressFloor => 0,
+        PermissionlessRecoveryReasonV16::BlockedSegmentHeadroomOrRepresentability => 1,
+        PermissionlessRecoveryReasonV16::AccountBSettlementCannotProgress => 2,
+        PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted => 3,
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress => 4,
+        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow => 5,
+        PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy => 6,
+        PermissionlessRecoveryReasonV16::CounterOrEpochOverflowDeclaredRecovery => 7,
+        PermissionlessRecoveryReasonV16::BandPinExpired => 8,
+    }
 }
