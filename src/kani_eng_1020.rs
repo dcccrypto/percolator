@@ -613,7 +613,11 @@ where
 #[kani::stub(super::MarketGroupV16ViewMut::ensure_initial_margin, w_im_rec)]
 #[kani::stub(super::MarketGroupV16ViewMut::ensure_no_positive_credit_initial_margin, w_npc_rec)]
 fn kani_eng1020_126_finish_checks_lien_and_im_wiring() {
-    let (mut header, mut markets) = k126_market_fixture();
+    // no asset activation: finish_trade_checks reads no asset state (first run NV at 900 s spent in the
+    // activation fixture's band anchor loop)
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
     let mut long_acct = k126_account(2);
     let mut short_acct = k126_account(3);
     let mut v = MarketGroupV16ViewMut::new(&mut header, &mut markets);
