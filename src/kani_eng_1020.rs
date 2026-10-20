@@ -512,7 +512,11 @@ fn g10s_validate_any(_state: SourceCreditStateV16) -> V16Result<()> {
 #[kani::unwind(70)]
 #[kani::stub(super::V16Core::validate_source_credit_state_static, g10s_validate_any)]
 fn kani_eng1020_g10_s_setter_reader_round_trip() {
-    let (mut header, mut markets) = k126_market_fixture();
+    // no asset activation (the activation fixture's band anchor loop dominated other runs); the setter and the
+    // reader read only the config (domain count), the slot and the header aggregates.
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
     let mut v = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let d: usize = kani::any();
     kani::assume(d < 2);
