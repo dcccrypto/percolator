@@ -96,11 +96,14 @@ fn one_market_view_fixture() -> (
 
 #[kani::proof]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_b_settlement_atom_budget_clears_public_scale_gap() {
     const TARGET_B: u128 = 107_486_458_947_473_684_210_526_315;
     const LOSS_WEIGHT: u128 = 19_000_000;
 
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     header.config.public_b_chunk_atoms = V16PodU128::new(MAX_VAULT_TVL);
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let leg = PortfolioLegV16 {
@@ -142,6 +145,29 @@ fn two_account_view_fixture() -> (
     let long_header = empty_account_fixture(market_id, 5);
     let short_header = empty_account_fixture(market_id, 6);
     (header, markets, long_header, short_header)
+}
+
+// v22kani ENG 2026-10-20: the activated one-market fixture as a byte snapshot of the PRODUCTION activation
+// (tests/eng1020_snapshot_gen.rs checks it equals a fresh activation), so Kani does not re-execute activation.
+#[path = "fixtures/eng1020_activated.rs"]
+mod eng1020_snap;
+fn snap_one_market_only_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
+    let h: MarketGroupV16HeaderAccount = bytemuck::pod_read_unaligned(&eng1020_snap::ACT_HEADER);
+    let e: EngineAssetSlotV16Account = bytemuck::pod_read_unaligned(&eng1020_snap::ACT_SLOT);
+    (h, [Market::new(0u64, e)])
+}
+fn snap_one_market_view_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1], PortfolioAccountV16Account) {
+    let (h, m) = snap_one_market_only_fixture();
+    (h, m, empty_account_fixture(ids().0, 2))
+}
+fn snap_two_account_view_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+) {
+    let (h, m) = snap_one_market_only_fixture();
+    (h, m, empty_account_fixture(ids().0, 5), empty_account_fixture(ids().0, 6))
 }
 
 fn one_market_only_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
@@ -430,6 +456,9 @@ fn proof_v16_public_finalize_side_reset_rejects_each_blocker_without_mutation() 
 #[kani::solver(cadical)]
 // A resolved receipt may only migrate its own claim bound from the unreceipted
 // pool to the exact pool. Any understated pool fails closed before value moves.
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_resolved_receipt_bound_migration_is_exact_or_fails_closed() {
     let exact_raw: u8 = kani::any();
     let pnl_raw: u8 = kani::any();
@@ -461,7 +490,7 @@ fn proof_v16_resolved_receipt_bound_migration_is_exact_or_fails_closed() {
         ledger_total_num
     };
 
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     header.mode = 1; // Resolved
     header.current_slot = V16PodU64::new(2);
     header.resolved_slot = V16PodU64::new(2);
@@ -804,6 +833,9 @@ fn proof_v16_public_materialized_portfolio_deregister_rejects_value_state_before
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     let target: u16 = kani::any();
     let c_tot: u128 = kani::any();
@@ -813,7 +845,7 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     kani::assume(c_tot <= MAX_VAULT_TVL);
     kani::assume(insurance <= MAX_VAULT_TVL - c_tot);
     kani::assume(surplus <= MAX_VAULT_TVL - c_tot - insurance);
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     header.vault = V16PodU128::new(c_tot + insurance + surplus);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
@@ -871,13 +903,16 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_raw_oracle_target_change_invalidates_all_prior_certificates() {
     let target: u64 = kani::any();
     let epoch: u64 = kani::any();
     kani::assume(target > 0 && target <= MAX_ORACLE_PRICE);
     kani::assume(epoch < u64::MAX);
 
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     header.oracle_epoch = V16PodU64::new(epoch);
     let old_target = markets[0].engine.asset.raw_oracle_target_price.get();
     let header_before = header;
@@ -1140,11 +1175,14 @@ fn proof_v16_sparse_source_domain_cap_full_rejects_new_domain() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_sparse_source_domain_validation_rejects_duplicate_occupied_domain() {
     let claim_raw: u8 = kani::any();
     kani::assume((1..=8).contains(&claim_raw));
     let claim_num = claim_raw as u128 * BOUND_SCALE;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     account_header.pnl = V16PodI128::new(claim_raw as i128 * 2);
     header.pnl_pos_tot = V16PodU128::new(claim_raw as u128 * 2);
     header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num * 2);
@@ -1281,6 +1319,9 @@ fn proof_v16_mutable_view_compacts_persisted_source_domain_tail() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_view_deposit_preserves_c_tot_vault_capital_sum() {
     let start_capital_raw: u8 = kani::any();
     let other_capital_raw: u8 = kani::any();
@@ -1297,7 +1338,7 @@ fn proof_v16_view_deposit_preserves_c_tot_vault_capital_sum() {
     let insurance = insurance_raw as u128;
     let surplus = surplus_raw as u128;
     let amount = amount_raw as u128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     let c_tot_before = start_capital + other_capital;
     let vault_before = c_tot_before + insurance + surplus;
     header.c_tot = V16PodU128::new(c_tot_before);
@@ -2075,6 +2116,9 @@ fn assert_v16_public_restart_two_slot_selected_only<const SELECTED_INDEX: usize>
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_restart_asset_zero_preserves_only_selected_slot_in_two_slot_view() {
     assert_v16_public_restart_two_slot_selected_only::<0>();
 }
@@ -2082,6 +2126,9 @@ fn proof_v16_public_restart_asset_zero_preserves_only_selected_slot_in_two_slot_
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_restart_nonzero_asset_preserves_only_selected_slot_in_two_slot_view() {
     assert_v16_public_restart_two_slot_selected_only::<1>();
 }
@@ -2400,6 +2447,9 @@ fn proof_v16_terminal_spent_domain_cleanup_is_value_neutral_and_remaining_budget
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_terminal_restart_normalizes_inert_history_preserves_value() {
     let restart_retired: bool = kani::any();
     let long_spent_raw: u8 = kani::any();
@@ -2899,6 +2949,9 @@ fn proof_v16_insurance_domain_mapping_is_in_bounds_unique_and_roundtrips() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_view_overwithdraw_rejects() {
     let start_capital_raw: u8 = kani::any();
     let other_capital_raw: u8 = kani::any();
@@ -2915,7 +2968,7 @@ fn proof_v16_view_overwithdraw_rejects() {
     let insurance = insurance_raw as u128;
     let surplus = surplus_raw as u128;
     let withdraw = start_capital + extra_raw as u128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     let c_tot_before = start_capital + other_capital;
     let vault_before = c_tot_before + insurance + surplus;
     header.c_tot = V16PodU128::new(c_tot_before);
@@ -2951,6 +3004,9 @@ fn proof_v16_view_overwithdraw_rejects() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_view_withdraw_reduces_vault_ctot_and_capital_equally() {
     let start_capital_raw: u8 = kani::any();
     let other_capital_raw: u8 = kani::any();
@@ -2967,7 +3023,7 @@ fn proof_v16_view_withdraw_reduces_vault_ctot_and_capital_equally() {
     let insurance = insurance_raw as u128;
     let surplus = surplus_raw as u128;
     let amount = amount_raw as u128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     let c_tot_before = start_capital + other_capital;
     let vault_before = c_tot_before + insurance + surplus;
     header.c_tot = V16PodU128::new(c_tot_before);
@@ -3010,6 +3066,9 @@ fn proof_v16_view_withdraw_reduces_vault_ctot_and_capital_equally() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
     let start_capital_raw: u8 = kani::any();
     let other_capital_raw: u8 = kani::any();
@@ -3026,7 +3085,7 @@ fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
     let insurance = insurance_raw as u128;
     let surplus = surplus_raw as u128;
     let amount = amount_raw as u128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     let c_tot_before = start_capital + other_capital;
     let vault_before = c_tot_before + insurance + surplus;
     header.vault = V16PodU128::new(vault_before);
@@ -3088,6 +3147,9 @@ fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_withdraw_settles_flat_negative_pnl_before_value_exit() {
     let start_capital_raw: u8 = kani::any();
     let other_capital_raw: u8 = kani::any();
@@ -3110,7 +3172,7 @@ fn proof_v16_withdraw_settles_flat_negative_pnl_before_value_exit() {
     kani::assume(loss <= start_capital);
     kani::assume(amount <= start_capital - loss);
 
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     let c_tot_before = start_capital + other_capital;
     let vault_before = c_tot_before + insurance + surplus;
     header.vault = V16PodU128::new(vault_before);
@@ -3202,6 +3264,9 @@ fn proof_v16_recovery_mode_blocks_withdraw() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() {
     let capital: u128 = kani::any();
     let other_capital: u128 = kani::any();
@@ -3224,7 +3289,7 @@ fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() 
     let reserved = reserved_raw as u128;
     let now_slot = now_slot_raw as u64;
     let fee_rate = fee_rate_raw as u128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     header.mode = 2;
     header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
         PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
@@ -3434,6 +3499,9 @@ fn proof_v16_auto_crank_pending_close_priority_is_total() {
 #[kani::proof]
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
     let start_in_recovery: bool = kani::any();
     let current_slot_raw: u8 = kani::any();
@@ -3451,7 +3519,7 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
     let current_slot = current_slot_raw as u64;
     let slot_last = current_slot - stale_lag_raw as u64;
     let resolved_slot = current_slot + resolved_delta_raw as u64;
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     header.vault = V16PodU128::new(c_tot + insurance + surplus);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
@@ -3520,11 +3588,14 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_open_source_claim_exposure_blocks_convert() {
     let claim_raw: u8 = kani::any();
     kani::assume(claim_raw > 0);
     let claim = claim_raw as u128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     let face_num = claim * BOUND_SCALE;
     let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
@@ -4693,6 +4764,9 @@ fn proof_v16_liquidation_fee_rejects_subminimum_partial_chunks() {
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_liquidation_selector_is_healthy_locally_minimal_or_full_close() {
     let equity_raw: u8 = kani::any();
     let position_q = 1_000u128;
@@ -5794,6 +5868,9 @@ fn proof_v16_backing_utilization_collection_negative_pnl_never_draws_capital() {
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_account_backing_fee_split_preserves_senior_stock() {
     let provider_fee_raw: u8 = kani::any();
     let insurance_fee_raw: u8 = kani::any();
@@ -5806,7 +5883,7 @@ fn proof_v16_public_account_backing_fee_split_preserves_senior_stock() {
     let insurance_fee = insurance_fee_raw as u128;
     let total_fee = provider_fee + insurance_fee;
     let capital = total_fee + margin_slack_raw as u128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.vault = V16PodU128::new(capital + 1);
     header.c_tot = V16PodU128::new(capital);
@@ -5938,6 +6015,9 @@ fn proof_v16_backing_provider_earnings_withdraw_cannot_exceed_earnings() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_backing_provider_earnings_withdraw_debits_only_earned_vault() {
     let earnings_raw: u8 = kani::any();
     let withdraw_raw: u8 = kani::any();
@@ -5946,7 +6026,7 @@ fn proof_v16_public_backing_provider_earnings_withdraw_debits_only_earned_vault(
     kani::assume(withdraw_raw <= earnings_raw);
     let earnings = earnings_raw as u128;
     let withdraw = withdraw_raw as u128;
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.vault = V16PodU128::new(earnings);
     markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
@@ -6168,6 +6248,9 @@ fn proof_v16_public_backing_provider_earnings_credit_uses_only_vault_slack() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_counterparty_backing_deposit_moves_vault_and_scaled_source_state() {
     let existing_raw: u8 = kani::any();
     let amount_raw: u8 = kani::any();
@@ -6177,7 +6260,7 @@ fn proof_v16_public_counterparty_backing_deposit_moves_vault_and_scaled_source_s
     let amount = amount_raw as u128;
     let existing_num = existing * BOUND_SCALE;
     let amount_num = amount * BOUND_SCALE;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.vault = V16PodU128::new(existing);
     if existing != 0 {
@@ -6245,6 +6328,9 @@ fn proof_v16_public_counterparty_backing_deposit_moves_vault_and_scaled_source_s
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_counterparty_backing_deposit_refills_expired_receivable_bucket() {
     let amount_raw: u8 = kani::any();
     let receivable_raw: u8 = kani::any();
@@ -6255,7 +6341,7 @@ fn proof_v16_public_counterparty_backing_deposit_refills_expired_receivable_buck
     let amount_num = amount * BOUND_SCALE;
     let receivable_num = receivable * BOUND_SCALE;
     let refill_num = core::cmp::min(amount_num, receivable_num);
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
         market_id,
@@ -6328,6 +6414,9 @@ fn proof_v16_public_counterparty_backing_deposit_refills_expired_receivable_buck
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_liened_backing() {
     let fresh_raw: u8 = kani::any();
     let liened_raw: u8 = kani::any();
@@ -6338,7 +6427,7 @@ fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_lie
     let liened_atoms = liened_raw as u128;
     let fresh_num = fresh_atoms * BOUND_SCALE;
     let liened_num = liened_atoms * BOUND_SCALE;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.vault = V16PodU128::new(fresh_atoms + liened_atoms);
     header.source_fresh_backing_total_num = V16PodU128::new(fresh_num + liened_num);
@@ -6414,6 +6503,9 @@ fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_lie
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state() {
     let backing_raw: u8 = kani::any();
     let withdraw_raw: u8 = kani::any();
@@ -6425,7 +6517,7 @@ fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source
     let backing_num = backing * BOUND_SCALE;
     let withdraw_num = withdraw * BOUND_SCALE;
     let remaining_num = backing_num - withdraw_num;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.vault = V16PodU128::new(backing);
     header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
@@ -6500,6 +6592,9 @@ fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_counterparty_backing_withdraw_rejects_underbacking_source_claims() {
     let backing_raw: u8 = kani::any();
     let withdraw_raw: u8 = kani::any();
@@ -6509,7 +6604,7 @@ fn proof_v16_public_counterparty_backing_withdraw_rejects_underbacking_source_cl
     let backing = backing_raw as u128;
     let withdraw = withdraw_raw as u128;
     let backing_num = backing * BOUND_SCALE;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.vault = V16PodU128::new(backing);
     header.pnl_pos_bound_tot = V16PodU128::new(backing);
@@ -6893,6 +6988,9 @@ fn proof_v16_health_cert_capital_debit_preserves_im_or_rejects() {
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
     // CLEAN-ROOM FIX (was vacuous w.r.t. its named property): on master the leg
     // carried loss_weight = POS_SCALE while basis = units*POS_SCALE and
@@ -6912,7 +7010,7 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
     kani::assume((1..=4).contains(&units_raw));
     let units = units_raw as i128;
     let basis = units * POS_SCALE as i128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     let current_market_id = markets[0].engine.asset.market_id.get();
     // the "stale" id must genuinely differ from the live asset's id
     kani::assume(stale_market_id_raw as u64 != current_market_id);
@@ -7042,6 +7140,9 @@ fn proof_v16_duplicate_asset_legs_reject_before_double_counting_support() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_mark_asset_drain_only_is_value_neutral_and_epoch_scoped() {
     let c_tot_raw: u8 = kani::any();
     let insurance_raw: u8 = kani::any();
@@ -7049,7 +7150,7 @@ fn proof_v16_mark_asset_drain_only_is_value_neutral_and_epoch_scoped() {
     kani::assume(insurance_raw <= 8);
     let c_tot = c_tot_raw as u128;
     let insurance = insurance_raw as u128;
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     header.vault = V16PodU128::new(c_tot + insurance);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
@@ -7086,12 +7187,15 @@ fn proof_v16_mark_asset_drain_only_is_value_neutral_and_epoch_scoped() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_retire_nonempty_asset_rejects() {
     let units_raw: u8 = kani::any();
     let retire_slot_raw: u16 = kani::any();
     kani::assume(units_raw > 0);
     kani::assume(retire_slot_raw > 0);
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.oi_eff_long_q = units_raw as u128 * POS_SCALE;
     asset.stored_pos_count_long = 1;
@@ -7111,6 +7215,9 @@ fn proof_v16_retire_nonempty_asset_rejects() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let with_senior_balances: bool = kani::any();
     let retire_slot_raw: u8 = kani::any();
@@ -7130,7 +7237,7 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let c_tot = if with_senior_balances { 7 } else { 0 };
     let insurance = if with_senior_balances { 3 } else { 0 };
     let retire_slot = retire_slot_raw as u64;
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     header.vault = V16PodU128::new(c_tot + insurance);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
@@ -7249,13 +7356,16 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_retire_live_provider_receivable_rejects_without_mutation() {
     let receivable_raw: u8 = kani::any();
     let retire_slot_raw: u8 = kani::any();
     kani::assume(receivable_raw > 0);
     kani::assume(retire_slot_raw > 0);
     let receivable_num = receivable_raw as u128;
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     markets[0].engine.source_credit_long =
         SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
             spent_backing_num: receivable_num,
@@ -7449,12 +7559,15 @@ fn proof_v16_available_source_support_excludes_liened_and_encumbered_amounts() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_positive_kf_delta_creates_source_claim_bound() {
     let delta_raw: u8 = kani::any();
     kani::assume((1..=10).contains(&delta_raw));
     let delta = delta_raw as i128;
     let delta_num = delta_raw as u128 * BOUND_SCALE;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     account_header.pnl = V16PodI128::new(0);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -7776,6 +7889,9 @@ fn proof_v16_validate_shape_rejects_global_junior_bound_below_domain_claims() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped() {
     let capital_raw: u8 = kani::any();
     let loss_raw: u8 = kani::any();
@@ -7786,13 +7902,9 @@ fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped
 
     // Inline market (no account fixture -> no 16-leg loop), valid activated domain 0.
     let (market_id, _, _) = ids();
-    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
-    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
-    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    {
-        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
-    }
+    let _ = market_id;
+    // v22kani ENG: identical activated state from the native-checked byte snapshot
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     // Single undercapitalized loser holding `loss` of realized loss as negative pnl.
     header.vault = V16PodU128::new(capital);
     header.c_tot = V16PodU128::new(capital);
@@ -7852,6 +7964,9 @@ fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_resolved_impaired_capital_backed_loss_routes_to_residual() {
     let capital_raw: u8 = kani::any();
     let loss_raw: u8 = kani::any();
@@ -7869,13 +7984,9 @@ fn proof_v16_resolved_impaired_capital_backed_loss_routes_to_residual() {
     let claim_num = claim * BOUND_SCALE;
 
     let (market_id, _, _) = ids();
-    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
-    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
-    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    {
-        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
-    }
+    let _ = market_id;
+    // v22kani ENG: identical activated state from the native-checked byte snapshot
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     let engine_market_id = markets[0].engine.asset.market_id.get();
     let impaired_num = BOUND_SCALE;
     markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
@@ -8330,6 +8441,9 @@ fn proof_v16_insurance_lien_terminal_release_delta_handles_mixed_and_rejects_inv
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_residual_reconciles_with_senior_stock() {
     let c_tot_raw: u8 = kani::any();
     let insurance_raw: u8 = kani::any();
@@ -8343,7 +8457,7 @@ fn proof_v16_residual_reconciles_with_senior_stock() {
     let surplus = surplus_raw as u128;
     let vault = c_tot + insurance + earnings + backing + surplus;
 
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.vault = V16PodU128::new(vault);
     header.c_tot = V16PodU128::new(c_tot);
@@ -9336,6 +9450,9 @@ fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_value_movement() {
     let c_tot_raw: u16 = kani::any();
     let insurance_raw: u16 = kani::any();
@@ -9352,7 +9469,7 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
     let surplus = surplus_raw as u128;
     let now_slot = now_slot_raw as u64;
     let effective_price = price_raw as u64;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     header.vault = V16PodU128::new(c_tot + insurance + surplus);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
@@ -9580,10 +9697,13 @@ fn proof_v16_price_move_cap_rejects_before_accrual_mutation() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_funding_rate_cap_rejects_before_accrual_mutation() {
     let funding_raw: u8 = kani::any();
     kani::assume(funding_raw > 0);
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.oi_eff_long_q = POS_SCALE;
     asset.oi_eff_short_q = POS_SCALE;
@@ -9743,11 +9863,14 @@ fn proof_v16_bankruptcy_residual_capacity_is_nonzero_and_bounded_with_headroom()
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_liquidation_preflight_accepts_only_fully_durable_residual() {
     let residual_raw: u8 = kani::any();
     kani::assume((1..=8).contains(&residual_raw));
     let residual = residual_raw as u128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     header.config.public_b_chunk_atoms = V16PodU128::new(residual);
     header.vault = V16PodU128::new(0);
     header.insurance = V16PodU128::new(0);
@@ -9785,11 +9908,14 @@ fn proof_v16_liquidation_preflight_accepts_only_fully_durable_residual() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_recovery() {
     let residual_raw: u8 = kani::any();
     kani::assume((2..=8).contains(&residual_raw));
     let residual = residual_raw as u128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     header.config.public_b_chunk_atoms = V16PodU128::new(residual - 1);
     header.vault = V16PodU128::new(0);
     header.insurance = V16PodU128::new(0);
@@ -9830,6 +9956,9 @@ fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_reco
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_view_fee_sync_settles_negative_pnl_before_fee() {
     let capital_raw: u8 = kani::any();
     let loss_raw: u8 = kani::any();
@@ -9842,7 +9971,7 @@ fn proof_v16_view_fee_sync_settles_negative_pnl_before_fee() {
     let loss = loss_raw as u128;
     let fee_rate = fee_rate_raw as u128;
     let expected_fee = (capital - loss).min(fee_rate * 10);
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     header.vault = V16PodU128::new(capital);
     header.c_tot = V16PodU128::new(capital);
     header.negative_pnl_account_count = V16PodU64::new(1);
@@ -9947,6 +10076,9 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
     let budget_raw: u8 = kani::any();
     let other_budget_raw: u8 = kani::any();
@@ -9962,7 +10094,7 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
     let insurance = insurance_raw as u128;
     let loss = loss_raw as u128;
     let expected_used = budget.min(loss);
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     header.vault = V16PodU128::new(insurance);
     header.insurance = V16PodU128::new(insurance);
     header.negative_pnl_account_count = V16PodU64::new(1);
@@ -10037,6 +10169,9 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
     let budget_raw: u8 = kani::any();
     let insurance_raw: u8 = kani::any();
@@ -10054,7 +10189,7 @@ fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
     let reserved = reserved_raw as u128;
     let unreserved_budget = budget - reserved;
     let expected_used = unreserved_budget.min(loss);
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     header.vault = V16PodU128::new(insurance);
     header.insurance = V16PodU128::new(insurance);
     header.negative_pnl_account_count = V16PodU64::new(1);
@@ -10341,6 +10476,9 @@ fn run_funding_target_sign_case(positive_funding: bool, units: i128) -> (i128, i
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_view_positive_funding_charges_long_side() {
     let units_raw: u16 = kani::any();
     kani::assume(units_raw > 0);
@@ -10359,6 +10497,9 @@ fn proof_v16_view_positive_funding_charges_long_side() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_view_negative_funding_pays_long_side() {
     let units_raw: u16 = kani::any();
     kani::assume(units_raw > 0);
@@ -10446,12 +10587,15 @@ fn proof_v16_view_initial_margin_source_lien_creation_is_backed() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_counterparty_lien_create_moves_fresh_to_valid_without_value_movement() {
     let amount_raw: u8 = kani::any();
     kani::assume((1..=5).contains(&amount_raw));
     let atoms = amount_raw as u128;
     let amount = atoms * BOUND_SCALE;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.vault = V16PodU128::new(atoms);
     header.source_fresh_backing_total_num = V16PodU128::new(amount);
@@ -10598,11 +10742,14 @@ fn proof_v16_counterparty_lien_create_delta_is_expiry_gated_and_exact() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_counterparty_lien_release_restores_unliened_backing_without_value_movement() {
     let amount_raw: u8 = kani::any();
     kani::assume((1..=5).contains(&amount_raw));
     let amount = amount_raw as u128 * BOUND_SCALE;
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.vault = V16PodU128::new(amount_raw as u128 * 2);
     header.source_fresh_backing_total_num = V16PodU128::new(amount * 2);
@@ -10660,11 +10807,14 @@ fn proof_v16_public_counterparty_lien_release_restores_unliened_backing_without_
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_counterparty_lien_consume_creates_receivable_without_value_movement() {
     let amount_raw: u8 = kani::any();
     kani::assume((1..=5).contains(&amount_raw));
     let amount = amount_raw as u128 * BOUND_SCALE;
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.vault = V16PodU128::new(amount_raw as u128);
     header.source_fresh_backing_total_num = V16PodU128::new(amount);
@@ -10847,12 +10997,15 @@ fn proof_v16_counterparty_lien_consume_delta_is_receivable_exact_and_fail_closed
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_counterparty_lien_impair_moves_valid_to_impaired_without_value_movement() {
     let amount_raw: u8 = kani::any();
     kani::assume((1..=5).contains(&amount_raw));
     let atoms = amount_raw as u128;
     let amount = atoms * BOUND_SCALE;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.vault = V16PodU128::new(atoms);
     header.source_fresh_backing_total_num = V16PodU128::new(amount);
@@ -10915,6 +11068,9 @@ fn proof_v16_public_counterparty_lien_impair_moves_valid_to_impaired_without_val
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
     // CLEAN-ROOM FIX: master drove kani_apply_insurance_lien_consume_domain_delta,
     // a cfg(kani)/fuzz-only MODEL wrapper that OMITTED the
@@ -10937,7 +11093,7 @@ fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
     let amount_short = atoms_short * BOUND_SCALE;
     let total_atoms = atoms_long + atoms_short;
 
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     // de-saturated pool: the insurance pool funds BOTH domains' reservations, so
     // consuming the Long lien is not an all-or-nothing drain of the whole pool.
     header.vault = V16PodU128::new(total_atoms);
@@ -11190,12 +11346,15 @@ fn proof_v16_insurance_lien_consume_delta_is_aligned_and_atom_exact() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_insurance_lien_consume_debits_only_domain_insurance() {
     let atom_raw: u8 = kani::any();
     kani::assume((1..=8).contains(&atom_raw));
     let atoms = atom_raw as u128;
     let amount = atoms * BOUND_SCALE;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     header.vault = V16PodU128::new(atoms);
     header.insurance = V16PodU128::new(atoms);
     header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(atoms);
@@ -11274,6 +11433,9 @@ fn proof_v16_public_insurance_lien_consume_debits_only_domain_insurance() {
 #[kani::proof]
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_insurance_reserve_rejects_unfunded_domain() {
     let amount_raw: u8 = kani::any();
     let c_tot_raw: u8 = kani::any();
@@ -11287,7 +11449,7 @@ fn proof_v16_public_insurance_reserve_rejects_unfunded_domain() {
     let c_tot = c_tot_raw as u128;
     let insurance = insurance_raw as u128;
     let surplus = surplus_raw as u128;
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     header.vault = V16PodU128::new(c_tot + insurance + surplus);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
@@ -11326,11 +11488,14 @@ fn proof_v16_public_insurance_reserve_rejects_unfunded_domain() {
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_domain_insurance_deposit_updates_o1_remaining_total() {
     let budget_raw: u8 = kani::any();
     kani::assume(budget_raw > 0);
     let budget = budget_raw as u128;
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     let vault_before = header.vault.get();
     let c_tot_before = header.c_tot.get();
     let insurance_before = header.insurance.get();
@@ -11440,6 +11605,9 @@ fn proof_v16_public_credit_domain_insurance_budget_is_value_neutral_and_backed()
 #[kani::proof]
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_bulk_domain_budget_credit_conserves_value_and_exact_deltas() {
     let long_raw: u8 = kani::any();
     let short_raw: u8 = kani::any();
@@ -11447,7 +11615,7 @@ fn proof_v16_public_bulk_domain_budget_credit_conserves_value_and_exact_deltas()
     let long = long_raw as u128;
     let short = short_raw as u128;
     let total = long + short;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     header.vault = V16PodU128::new(total);
     header.insurance = V16PodU128::new(total);
     let vault_before = header.vault.get();
@@ -11619,6 +11787,9 @@ fn proof_v16_public_domain_insurance_withdraw_capacity_matches_budget_reserved_a
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_domain_insurance_withdraw_is_budget_scoped_and_value_conserving() {
     let budget_raw: u16 = kani::any();
     let withdraw_raw: u8 = kani::any();
@@ -11628,7 +11799,7 @@ fn proof_v16_public_domain_insurance_withdraw_is_budget_scoped_and_value_conserv
     let budget = budget_raw as u128;
     let withdraw = withdraw_raw as u128;
     let surplus = surplus_raw as u128;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     header.vault = V16PodU128::new(budget + surplus);
     header.insurance = V16PodU128::new(budget + surplus);
     header.insurance_domain_budget_remaining_total = V16PodU128::new(budget);
@@ -11811,6 +11982,9 @@ fn proof_v16_public_domain_insurance_spent_setter_preserves_budget_total_and_val
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_domain_insurance_spent_setter_rejects_invalid_without_mutation() {
     let budget_raw: u8 = kani::any();
     let old_spent_raw: u8 = kani::any();
@@ -11824,7 +11998,7 @@ fn proof_v16_public_domain_insurance_spent_setter_rejects_invalid_without_mutati
     let spent = budget + 1;
     let domain = if invalid_domain { 2 } else { 0 };
 
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     header.vault = V16PodU128::new(budget + surplus);
     header.insurance = V16PodU128::new(budget + surplus);
     header.insurance_domain_budget_remaining_total = V16PodU128::new(budget - old_spent);
@@ -11933,12 +12107,15 @@ fn proof_v16_domain_insurance_budget_delta_cannot_overallocate_pooled_insurance(
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() {
     let atoms_raw: u8 = kani::any();
     kani::assume((1..=8).contains(&atoms_raw));
     let atoms = atoms_raw as u128;
     let amount = atoms * BOUND_SCALE;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     header.vault = V16PodU128::new(atoms);
     header.insurance = V16PodU128::new(atoms);
     header.insurance_domain_budget_remaining_total = V16PodU128::new(atoms);
@@ -11988,6 +12165,9 @@ fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() 
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_insurance_lien_create_moves_reserved_credit_to_valid_lien() {
     // `atoms` is now symbolic (was a hard-coded 3 — the proof asserted facts about a
     // single concrete lien size). The market is built inline rather than via
@@ -12067,12 +12247,15 @@ fn proof_v16_public_insurance_lien_create_moves_reserved_credit_to_valid_lien() 
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_insurance_lien_release_restores_reserved_credit_without_value_movement() {
     let atoms_raw: u8 = kani::any();
     kani::assume((1..=8).contains(&atoms_raw));
     let atoms = atoms_raw as u128;
     let amount = atoms * BOUND_SCALE;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     header.vault = V16PodU128::new(atoms);
     header.insurance = V16PodU128::new(atoms);
     header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(atoms);
@@ -12151,12 +12334,15 @@ fn proof_v16_public_insurance_lien_release_restores_reserved_credit_without_valu
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_insurance_lien_impair_moves_valid_to_impaired_without_value_movement() {
     let atoms_raw: u8 = kani::any();
     kani::assume((1..=8).contains(&atoms_raw));
     let atoms = atoms_raw as u128;
     let amount = atoms * BOUND_SCALE;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     header.vault = V16PodU128::new(atoms);
     header.insurance = V16PodU128::new(atoms);
     header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(atoms);
@@ -13568,12 +13754,15 @@ fn proof_v16_inductive_fee_core_preserves_senior_solvency_and_never_debits_insur
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_withdraw_allowed_after_canceled_close() {
     let amount_raw: u8 = kani::any();
     kani::assume((1..=4).contains(&amount_raw));
     let amount = amount_raw as u128;
 
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     market.deposit_not_atomic(&mut account, 5).unwrap(); // flat, solvent, capital 5
@@ -13617,6 +13806,9 @@ fn proof_v16_withdraw_allowed_after_canceled_close() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_insolvent_resolved_receipt_clears_at_terminal_rate() {
     let face_raw: u8 = kani::any();
     let residual_raw: u8 = kani::any();
@@ -13627,7 +13819,7 @@ fn proof_v16_insolvent_resolved_receipt_clears_at_terminal_rate() {
     let residual = residual_raw as u128; // payout rate < 1 (insolvent haircut)
     let total_bound_num = face * BOUND_SCALE;
 
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     header.mode = 1; // Resolved
     header.vault = V16PodU128::new(residual);
     header.payout_snapshot_captured = 1;
@@ -13768,6 +13960,9 @@ fn proof_v16_final_impaired_source_claim_burn_clears_account_occupancy_counters(
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_residual_excludes_recoverable_counterparty_backing_principal() {
     let deposit_raw: u8 = kani::any();
     let surplus_raw: u8 = kani::any();
@@ -13775,7 +13970,7 @@ fn proof_v16_residual_excludes_recoverable_counterparty_backing_principal() {
     kani::assume(surplus_raw <= 8);
     let deposit = deposit_raw as u128;
     let surplus = surplus_raw as u128;
-    let (mut header, mut markets) = one_market_only_fixture();
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     header.vault = V16PodU128::new(7 + surplus);
     header.c_tot = V16PodU128::new(7);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -13815,13 +14010,16 @@ fn proof_v16_residual_excludes_recoverable_counterparty_backing_principal() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_terminal_realization_floored_rate_pays_zero_and_moves_nothing() {
     let pnl = 3u128;
     let backing = 1u128;
     let rate = backing * BOUND_SCALE * CREDIT_RATE_SCALE / (pnl * BOUND_SCALE);
     let claim_num = pnl * BOUND_SCALE;
     let backing_num = backing * BOUND_SCALE;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.mode = 1; // Resolved
     header.resolved_slot = V16PodU64::new(1);
@@ -13897,6 +14095,9 @@ fn proof_v16_terminal_realization_floored_rate_pays_zero_and_moves_nothing() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
     let backing_raw: u8 = kani::any();
     let claim_raw: u8 = kani::any();
@@ -13909,7 +14110,7 @@ fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
     let expiry_slot = 5u64;
     let current_slot = 20u64; // strictly past expiry
 
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
     header.current_slot = V16PodU64::new(current_slot);
     header.slot_last = V16PodU64::new(current_slot);
@@ -14004,9 +14205,12 @@ fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_grant_source_positive_pnl_rejects_non_live() {
     let resolved: bool = kani::any();
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     header.mode = if resolved { 1 } else { 2 }; // Resolved | Recovery
     header.resolved_slot = V16PodU64::new(1);
     if !resolved {
@@ -14129,6 +14333,9 @@ fn proof_v16_credit_account_from_insurance_is_value_neutral_and_pool_isolated() 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_reset_empty_asset_oracle_anchor_is_value_neutral_and_idle_gated() {
     let new_price_raw: u16 = kani::any();
     let c_tot_raw: u8 = kani::any();
@@ -14145,10 +14352,10 @@ fn proof_v16_reset_empty_asset_oracle_anchor_is_value_neutral_and_idle_gated() {
     // this operation RETURNS `self.validate_shape()` as its result — so with that fixture
     // it errors on every path. The old `kani::assume(validate_shape() == Ok(()))` was
     // therefore unsatisfiable and killed the harness, which then reported SUCCESSFUL with
-    // 0 of 2 covers reachable. `one_market_view_fixture()` IS shape-valid — it is what
+    // 0 of 2 covers reachable. `snap_one_market_view_fixture()` IS shape-valid — it is what
     // `proof_v16_expired_backing_yields_zero_realizable_support_after_expiry` assumes
     // shape-validity on, with 2 of 2 covers satisfied.
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = snap_one_market_view_fixture();
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
     header.vault = V16PodU128::new(c_tot + insurance + surplus);
@@ -14235,6 +14442,9 @@ fn proof_v16_reset_empty_asset_oracle_anchor_rejects_when_pnl_present() {
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_backing_fee_charges_only_selected_domain() {
     let provider_fee_raw: u8 = kani::any();
     let insurance_fee_raw: u8 = kani::any();
@@ -16707,6 +16917,9 @@ fn install_flat_pending_obligation(
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_released_flat_pending_obligation_is_publicly_actionable() {
     let is_short: bool = kani::any();
     let barrier_active: bool = kani::any();
@@ -16719,7 +16932,7 @@ fn proof_v16_released_flat_pending_obligation_is_publicly_actionable() {
         SideV16::Long
     };
 
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     install_flat_pending_obligation(
         &mut header,
         &mut markets,
@@ -16756,6 +16969,9 @@ fn proof_v16_released_flat_pending_obligation_is_publicly_actionable() {
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_released_flat_pending_obligation_detach_is_value_neutral_progress() {
     let is_short: bool = kani::any();
     let weight_units: u8 = kani::any();
@@ -16767,7 +16983,7 @@ fn proof_v16_released_flat_pending_obligation_detach_is_value_neutral_progress()
         SideV16::Long
     };
 
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     install_flat_pending_obligation(
         &mut header,
         &mut markets,
@@ -16842,6 +17058,9 @@ fn proof_v16_released_flat_pending_obligation_detach_is_value_neutral_progress()
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_canonical_accrual_path_is_partition_invariant() {
     let target_raw: u8 = kani::any();
     let cap_raw: u8 = kani::any();
@@ -16874,7 +17093,7 @@ fn proof_v16_canonical_accrual_path_is_partition_invariant() {
         },
     ];
 
-    let (mut delayed_header, mut delayed_markets, _) = one_market_view_fixture();
+    let (mut delayed_header, mut delayed_markets, _) = snap_one_market_view_fixture();
     delayed_header.config.max_accrual_dt_slots = V16PodU64::new(2);
     delayed_header.config.min_funding_lifetime_slots = V16PodU64::new(2);
     delayed_header.config.max_abs_funding_e9_per_slot = V16PodU64::new(10);
@@ -18896,6 +19115,9 @@ fn proof_v16_public_terminal_insurance_retirement_rejects_account_capital() {
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_terminal_insurance_retirement_rejects_positive_source_claim() {
     let amount = symbolic_terminal_claim_amount();
     kani::cover!(amount == 1, "source-claim blocker covers the minimum atom");
@@ -18931,6 +19153,9 @@ fn proof_v16_public_terminal_insurance_retirement_rejects_backing_principal() {
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_public_terminal_insurance_retirement_rejects_every_live_reservation_class() {
     let blocker: u8 = kani::any();
     let amount_raw: u8 = kani::any();
@@ -19569,6 +19794,9 @@ fn proof_v16_kernel_settle_close_ledger_principal_rank_witness() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn proof_v16_kernel_settle_close_ledger_principal_preserves_the_ledger_validator() {
     let gross_raw: u8 = kani::any();
     let drift_raw: u8 = kani::any();
@@ -19591,7 +19819,7 @@ fn proof_v16_kernel_settle_close_ledger_principal_preserves_the_ledger_validator
     kani::assume(progress <= total_loss);
     let residual = total_loss - progress;
 
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = snap_one_market_view_fixture();
     let base = CloseProgressLedgerV16 {
         active: true,
         finalized: residual == 0,
@@ -20292,6 +20520,9 @@ fn two_asset_kf_mapping_fixture() -> (
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+// v22kani ENG 2026-10-20: PF stubs (kani/test/audit-scan-only validators absent in the deployed SBF build)
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape_full_audit_scan, percolator::v16::kani_eng_1020::pf_full_audit_scan_absent)]
+#[kani::stub(percolator::v16::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, percolator::v16::kani_eng_1020::pf_slots_shape_absent)]
 fn closure_expired_counterparty_lien_cannot_remain_favorable_account_credit() {
     let counterparty_atoms_raw: u8 = kani::any();
     let insurance_atoms_raw: u8 = kani::any();
