@@ -660,3 +660,92 @@ fn kani_eng1020_126_finish_checks_lien_and_im_wiring() {
         assert!(ld(&W_IM_L));
     }
 }
+
+// ------------------------------------------------------------------------------------------------------------
+// ENG-126-V2 / ENG-126-IM2: ENG-126-V / -IM with the opened world loaded from a byte snapshot of the PRODUCTION
+// fixture (tests/eng1020_flip_native.rs::eng1020_opened_snapshot_is_current keeps it equal to `opened(1e12, None)`),
+// so Kani executes only the flip trade itself. First design NV at 2400 s inside the fixture + trade symex.
+// ------------------------------------------------------------------------------------------------------------
+mod opened_snap {
+    include!("../tests/fixtures/eng1020_opened.rs");
+}
+
+fn k126_opened_snap(
+    a_capital: Option<u128>,
+) -> (PortfolioAccountV16Account, PortfolioAccountV16Account, MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
+    let mut h: MarketGroupV16HeaderAccount = bytemuck::pod_read_unaligned(&opened_snap::OPEN_HEADER);
+    let e: EngineAssetSlotV16Account = bytemuck::pod_read_unaligned(&opened_snap::OPEN_SLOT);
+    let mut a: PortfolioAccountV16Account = bytemuck::pod_read_unaligned(&opened_snap::OPEN_A);
+    let b: PortfolioAccountV16Account = bytemuck::pod_read_unaligned(&opened_snap::OPEN_B);
+    if let Some(c) = a_capital {
+        let d = a.capital.get() - c;
+        a.capital = V16PodU128::new(c);
+        h.c_tot = V16PodU128::new(h.c_tot.get() - d);
+        h.vault = V16PodU128::new(h.vault.get() - d);
+    }
+    (a, b, h, [Market::new(0u64, e)])
+}
+
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::stub(super::MarketGroupV16View::validate_shape_full_audit_scan, pf_full_audit_scan_absent)]
+#[kani::stub(super::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, pf_slots_shape_absent)]
+fn kani_eng1020_126_flip_is_value_neutral_end_to_end_snap() {
+    let (mut a, mut b, mut h, mut m) = k126_opened_snap(None);
+    let k: u128 = kani::any();
+    let fee_bps: u64 = kani::any();
+    kani::assume((1..=8).contains(&k));
+    kani::assume(fee_bps <= 100);
+    let cap_sum = a.capital.get() + b.capital.get();
+    let (c_tot, vault, ins) = (h.c_tot.get(), h.vault.get(), h.insurance.get());
+    let (pnl_a, pnl_b) = (a.pnl.get(), b.pnl.get());
+    let r = MarketGroupV16ViewMut::new(&mut h, &mut m).execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        &mut PortfolioV16ViewMut::new(&mut b),
+        &mut PortfolioV16ViewMut::new(&mut a),
+        TradeRequestV16 { asset_index: 0, size_q: (k * POS_SCALE) as i128, exec_price: K126_PRICE, fee_bps },
+        true,
+    );
+    assert!(r.is_ok());
+    let out = r.unwrap();
+    let fee = out.fee_a + out.fee_b;
+    assert_eq!(h.vault.get(), vault);
+    assert_eq!(a.capital.get() + b.capital.get() + fee, cap_sum);
+    assert_eq!(h.c_tot.get() + fee, c_tot);
+    assert_eq!(h.insurance.get(), ins + fee);
+    assert_eq!(a.pnl.get(), pnl_a);
+    assert_eq!(b.pnl.get(), pnl_b);
+    let open_units = if k >= 4 { k - 4 } else { 4 - k };
+    assert_eq!(m[0].engine.asset.oi_eff_long_q.get(), open_units * POS_SCALE);
+    assert_eq!(m[0].engine.asset.oi_eff_short_q.get(), open_units * POS_SCALE);
+    assert!(h.c_tot.get() + h.insurance.get() <= h.vault.get());
+    kani::cover!(k == 8 && fee > 0, "equal-size flip with a fee: value-neutral");
+    kani::cover!(k == 6, "smaller flip: value-neutral");
+    kani::cover!(k == 4, "close to flat: value-neutral");
+    kani::cover!(k == 2, "pure reduce: value-neutral");
+}
+
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::stub(super::MarketGroupV16View::validate_shape_full_audit_scan, pf_full_audit_scan_absent)]
+#[kani::stub(super::MarketGroupV16HeaderAccount::validate_dynamic_market_slots_shape, pf_slots_shape_absent)]
+fn kani_eng1020_126_flip_below_im_refused_reduce_not_snap() {
+    let (mut a, mut b, mut h, mut m) = k126_opened_snap(Some(210_000));
+    let k: u128 = kani::any();
+    kani::assume((1..=8).contains(&k));
+    let r = MarketGroupV16ViewMut::new(&mut h, &mut m).execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        &mut PortfolioV16ViewMut::new(&mut b),
+        &mut PortfolioV16ViewMut::new(&mut a),
+        TradeRequestV16 { asset_index: 0, size_q: (k * POS_SCALE) as i128, exec_price: K126_PRICE, fee_bps: 0 },
+        true,
+    );
+    if k <= 6 {
+        assert!(r.is_ok());
+    } else {
+        assert!(matches!(r, Err(V16Error::InsufficientInitialMargin)));
+    }
+    kani::cover!(k == 3 && r.is_ok(), "reduce below IM admitted");
+    kani::cover!(k == 4 && r.is_ok(), "close below IM admitted");
+    kani::cover!(k == 6 && r.is_ok(), "flip within IM admitted");
+    kani::cover!(k == 7 && r.is_err(), "smaller flip beyond IM refused (#126)");
+    kani::cover!(k == 8 && r.is_err(), "equal flip beyond IM refused");
+}
