@@ -5749,6 +5749,95 @@ fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
     account.validate_with_market(&market.as_view()).unwrap();
 }
 
+/// Boundary pin for spec.md section 7 / section 10: an account is liquidatable iff
+/// `equity < MM` (strict). Equity exactly at maintenance is healthy; one atom below is not.
+/// MM here is 1_000 (10% of a 10_000 notional, above the 800 floor), so capital 1_000 is the
+/// exact boundary and there is no PnL, fee or haircut term to blur it.
+fn maintenance_boundary_liquidation(capital: u128) -> (Result<percolator::LiquidationOutcomeV16, V16Error>, u128) {
+    const PRICE: u64 = POS_SCALE as u64;
+    const POSITION_Q: u128 = 10_000;
+
+    let (mut header, mut markets) = market_fixture(1, PRICE);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(1_000);
+    header.config.min_nonzero_mm_req = V16PodU128::new(800);
+    header.config.min_nonzero_im_req = V16PodU128::new(801);
+    header.config.liquidation_fee_bps = V16PodU64::new(800);
+    header.config.min_liquidation_abs = V16PodU128::new(0);
+    header.config.liquidation_fee_cap = V16PodU128::new(1_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(1);
+    header
+        .config
+        .try_to_runtime_shape()
+        .unwrap()
+        .validate_public_user_fund()
+        .unwrap();
+    header.vault = V16PodU128::new(capital * 2);
+    header.c_tot = V16PodU128::new(capital * 2);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.effective_price = PRICE;
+    asset.raw_oracle_target_price = PRICE;
+    asset.oi_eff_long_q = POSITION_Q * 2;
+    asset.oi_eff_short_q = POSITION_Q * 2;
+    asset.loss_weight_sum_long = POSITION_Q * 2;
+    asset.loss_weight_sum_short = POSITION_Q * 2;
+    asset.stored_pos_count_long = 2;
+    asset.stored_pos_count_short = 2;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(4);
+
+    let mut account_header = account_fixture(1, 14);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: i128::try_from(POSITION_Q).unwrap(),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POSITION_Q,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let out = market.liquidate_account_not_atomic(&mut account, LiquidationRequestV16 { asset_index: 0 });
+    (out, account.header.capital.get())
+}
+
+#[test]
+fn v16_equity_exactly_at_maintenance_is_not_liquidatable() {
+    // equity == MM == 1_000: healthy, the liquidation is refused and nothing is charged.
+    let (out, capital_after) = maintenance_boundary_liquidation(1_000);
+    assert!(
+        out.is_err(),
+        "equity == MM must NOT be liquidatable (spec.md section 7: liquidatable iff Eq < MM): {out:?}"
+    );
+    assert_eq!(capital_after, 1_000, "a refused liquidation charges nothing");
+
+    // negative control, same fixture one atom lower: equity 999 < MM 1_000 is liquidated.
+    let (out, capital_after) = maintenance_boundary_liquidation(999);
+    let out = out.expect("equity == MM - 1 must be liquidatable");
+    assert!(out.closed_q > 0, "the boundary-1 account actually closed risk");
+    assert!(capital_after < 999, "and paid a liquidation fee");
+}
+
 #[test]
 fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale() {
     let (mut header, mut markets) = market_fixture(2, 100);

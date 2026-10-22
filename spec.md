@@ -1210,11 +1210,11 @@ IM_req_i = 0 if flat else max(ceil(RiskNotional_i * cfg_initial_bps / 10_000), c
 
 Both requirements round UP. Rounding down let one notional be split across two portfolios for a strictly lower aggregate requirement, which is fractional-atom collateral credit; `margin_requirement` therefore uses `mul_div_ceil_u128_or_wide` for the initial and the maintenance leg alike.
 
-Maintenance healthy iff `Eq_net_i > MM_req_i`. Withdrawal healthy iff `Eq_withdraw_raw_i >= IM_req_i`. Risk-increasing trade approval healthy iff `Eq_trade_open_raw_i >= IM_req_post_i`.
+Maintenance healthy iff `Eq_net_i >= MM_req_i` (equity exactly at maintenance is healthy). Withdrawal healthy iff `Eq_withdraw_raw_i >= IM_req_i`. Risk-increasing trade approval healthy iff `Eq_trade_open_raw_i >= IM_req_post_i`.
 
 A trade is risk-increasing if it increases absolute effective position, flips sign, or opens from flat. It is strictly risk-reducing if same sign, nonzero before/after, and absolute position decreases.
 
-An account is liquidatable iff after full authoritative live touch it has nonzero effective position and `Eq_net_i <= MM_req_i`. If recurring fees are enabled, the account MUST be fee-current first.
+An account is liquidatable iff after full authoritative live touch it has nonzero effective position and `Eq_net_i < MM_req_i` (equity exactly at maintenance is NOT liquidatable; this matches `certified_equity_maint < certified_maintenance_req` in section 10 and the engine's `maintenance_req.saturating_sub(equity)` deficit). If recurring fees are enabled, the account MUST be fee-current first.
 
 Partial liquidation requires `0 < q_close_q < abs(old_eff_pos_q_i)`. It closes synthetically at oracle price, attaches the remaining position, settles losses from principal, charges liquidation fee, invokes `enqueue_adl(ctx, liq_side, q_close_q, 0)`, and requires the remaining nonzero position to be maintenance healthy after the step.
 
