@@ -13167,7 +13167,8 @@ fn v16_liquidation_of_unattributed_deficit_resolves_in_the_live_market_when_the_
     assert_eq!(outcome.insurance_used + outcome.residual_booked, 250);
     assert_eq!(market.header.insurance.get() + outcome.insurance_used, insurance_before + outcome.fee_charged);
     assert_eq!(market.header.vault.get(), vault_before, "no token moved");
-    assert!(outcome.residual_booked == 0 || outcome.insurance_used == insurance_before.min(250));
+    assert_eq!(outcome.insurance_used, insurance_before.min(250), "insurance is used first");
+    assert_eq!(outcome.residual_booked, 250 - outcome.insurance_used);
     assert_eq!(market.header.mode, 0, "the market stays Live");
     assert_eq!(short.header.liquidation_lock, 0, "the lock clears with the deficit");
     assert_eq!(short.header.pnl.get(), 0);
