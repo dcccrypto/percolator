@@ -2643,6 +2643,27 @@ impl V16Core {
         None
     }
 
+    /// PRODUCTION KERNEL (F-LIVE-1, v22live): the auto-crank's liquidation leg. The FIRST
+    /// liquidatable leg that is not behind a pending domain-loss barrier on its own side, else
+    /// the FIRST liquidatable leg (whose liquidation the kernel then refuses with `LockActive`,
+    /// exactly as before). `unblocked` is masked by `liquidatable` here, so the kernel is total
+    /// and the result is `Some` iff some leg is liquidatable: the summary's `has_open_risk` and
+    /// the plan priority are unchanged, and an account with no barrier leg gets the same slot as
+    /// before. Deterministic, O(legs). Proof: tests/proofs_v22_livefix.rs.
+    pub(crate) fn kernel_auto_crank_liquidation_slot(
+        unblocked: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
+        liquidatable: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
+    ) -> Option<usize> {
+        let mut preferred = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            preferred[slot] = unblocked[slot] && liquidatable[slot];
+            slot += 1;
+        }
+        Self::first_actionable_slot(preferred).or(Self::first_actionable_slot(liquidatable))
+    }
+
+
     /// PRODUCTION KERNEL: ordinary refresh accrual and liquidation can target
     /// only a live or draining asset. Recovery uses a separate committed-state
     /// refresh fallback and can never be selected for accrual or liquidation.
@@ -4189,6 +4210,14 @@ pub fn kani_auto_crank_lifecycle_dispatchable(lifecycle: AssetLifecycleV16) -> b
 #[cfg(kani)]
 pub fn kani_first_actionable_slot(flags: [bool; V16_MAX_PORTFOLIO_ASSETS_N]) -> Option<usize> {
     V16Core::first_actionable_slot(flags)
+}
+
+#[cfg(kani)]
+pub fn kani_auto_crank_liquidation_slot(
+    unblocked: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
+    liquidatable: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
+) -> Option<usize> {
+    V16Core::kernel_auto_crank_liquidation_slot(unblocked, liquidatable)
 }
 
 #[cfg(kani)]
@@ -10236,6 +10265,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.backing_bucket_for_domain(domain)
     }
 
+    /// Raw `(status, expiry_slot)` of a domain's backing bucket without a full decode; for
+    /// hot-path gating only (any transition re-reads the decoded bucket). (upstream 1a700253)
+    fn backing_bucket_raw_status_expiry_for_domain(&self, domain: usize) -> V16Result<(u8, u64)> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot();
+        let bucket = match side {
+            SideV16::Long => &slot.backing_long,
+            SideV16::Short => &slot.backing_short,
+        };
+        Ok((bucket.status, bucket.expiry_slot.get()))
+    }
+
     fn set_backing_bucket_for_domain(
         &mut self,
         domain: usize,
@@ -12421,6 +12462,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .get(),
         );
         let mut remaining = target;
+        // A lien on lapsed/impaired backing is impaired by bucket status; reconcile it before
+        // burning so the burn never returns forfeited backing to the bucket's valid lane.
+        // (upstream 6d73f1bb, #230)
+        self.reconcile_account_impaired_counterparty_lien_at_slot_not_atomic(account, slot)?;
 
         let burn = Self::source_claim_unliened_num(&account.as_view(), domain)?.min(remaining);
         if burn != 0 {
@@ -15491,6 +15536,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // (upstream 0b861efb)
             self.credit_post_snapshot_residual_not_atomic(amount)?;
         } else {
+            // F-LIVE-2 (v22live; upstream 13ebf86b / #216, narrowed): in Live, an Impaired bucket
+            // (a lapsed one that still carries liens) cannot take new backing. The loss then stays
+            // as junior support (the capital debit and its value-flow proof are already done; the
+            // value remains in the vault outside the senior stack) instead of reverting the
+            // refresh / liquidation / crank of every losing account on that side with LockActive.
+            // The bucket returns to Expired, and losses back the domain again, as soon as its last
+            // lien holder settles (`reconcile_account_impaired_counterparty_liens_not_atomic`).
+            // NOT taken from 13ebf86b: expiring a lapsed-but-still-Fresh bucket here. On this line
+            // that moves value: it forfeits the lapsed bucket's backing to the junior pool at the
+            // first loss instead of when a keeper expires it (tests/livefix_rollback_walk.rs:
+            // vault atoms left after every close 22,537 -> 211,820 over 5,633 scenarios); the
+            // lapsed case keeps its permissionless escape (wrapper tag 89 ExpireBackingBucket, or
+            // any claim holder's crank), after which this Impaired arm or a normal add applies. Resolved
+            // is unaffected by this arm (its Impaired case is the terminal-residual branch above)
+            // and takes the v22med creditor-final split below.
+            if decode_market_mode(self.header.mode)? == MarketModeV16::Live
+                && self.backing_bucket_raw_status_expiry_for_domain(domain)?.0
+                    == encode_backing_bucket_status(BackingBucketStatusV16::Impaired)
+            {
+                return Ok(());
+            }
             // upstream 94979ede (a), narrowed for v22 (AUD-S1-6, 2026-10-20): in Resolved, a late
             // loss larger than the domain's support gap (positive claim bound minus available
             // backing) would leave source backing that no claim can ever consume. That excess
@@ -16041,6 +16107,92 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(charged)
     }
 
+    /// Reconcile an open account's counterparty liens against the bucket state they reference
+    /// (spec: "Individual liens referencing an impaired bucket become impaired by bucket status
+    /// and settle later through bounded cranks"). Bounded by `PORTFOLIO_SOURCE_DOMAIN_CAP`; a
+    /// slot without a counterparty lien, or whose bucket is still current, costs only a few
+    /// field reads. See `reconcile_account_impaired_counterparty_lien_at_slot_not_atomic`.
+    /// (upstream 6d73f1bb + fee5f863, aeyakovenko/percolator#230 / PR #242)
+    fn reconcile_account_impaired_counterparty_liens_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<()> {
+        if self.header.mode != MarketModeV16::Live as u8 {
+            return Ok(());
+        }
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = &account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.source_lien_counterparty_backing_num.get() != 0 {
+                self.reconcile_account_impaired_counterparty_lien_at_slot_not_atomic(
+                    account, slot,
+                )?;
+            }
+            slot += 1;
+        }
+        Ok(())
+    }
+
+    /// Live-mode, one source slot: if the account holds a counterparty lien on a bucket that is
+    /// Impaired (or a lapsed Fresh bucket, which first goes through the canonical expiry
+    /// transition), move the account-local lien into the impaired-claim lane and retire its share
+    /// of the bucket's impaired encumbrance, exactly as the flat-account release
+    /// (`release_account_source_credit_liens_if_unneeded_core_not_atomic`) and the resolved-close
+    /// preparation already do on this line. Expiry already forfeited the liened principal to the
+    /// junior pool at the bucket/domain level, so no quote value moves here except the accrued
+    /// utilization fee, collected first as on those paths. The claim face itself is kept (as an
+    /// impaired, unbacked claim), so later losses still burn it before touching capital.
+    /// Once the last holder has reconciled, the bucket returns to Expired and new losses back
+    /// the domain normally again. (upstream 6d73f1bb + 1a700253, #230)
+    fn reconcile_account_impaired_counterparty_lien_at_slot_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        slot: usize,
+    ) -> V16Result<()> {
+        if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP {
+            return Err(V16Error::InvalidLeg);
+        }
+        let source = &account.header.source_domains[slot];
+        let counterparty_backing = source.source_lien_counterparty_backing_num.get();
+        if counterparty_backing == 0
+            || !source.is_occupied()
+            || self.header.mode != MarketModeV16::Live as u8
+        {
+            return Ok(());
+        }
+        let domain = source.domain.get() as usize;
+        let now_slot = self.header.current_slot.get();
+        let (raw_status, raw_expiry) = self.backing_bucket_raw_status_expiry_for_domain(domain)?;
+        let lapsed_fresh = raw_status
+            == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
+            && raw_expiry <= now_slot;
+        if !lapsed_fresh
+            && raw_status != encode_backing_bucket_status(BackingBucketStatusV16::Impaired)
+        {
+            return Ok(());
+        }
+        if lapsed_fresh {
+            self.expire_source_backing_bucket_not_atomic(domain, now_slot)?;
+        }
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status != BackingBucketStatusV16::Impaired {
+            return Ok(());
+        }
+        if bucket.impaired_liened_backing_num < counterparty_backing {
+            return Err(V16Error::CounterUnderflow);
+        }
+        self.collect_account_backing_utilization_fee_for_domain_not_atomic(account, domain)?;
+        self.retire_source_credit_lien_from_counterparty_impaired_not_atomic(
+            domain,
+            counterparty_backing,
+        )?;
+        Self::impair_account_source_credit_counterparty_lien_fields(account, domain)?;
+        Ok(())
+    }
+
     fn settle_account_kf_effects_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -16055,6 +16207,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if active_leg_count == 0 {
             return Ok(());
         }
+        // F-LIVE-2 / upstream #230: reconcile liens on impaired backing before any K/F burn.
+        self.reconcile_account_impaired_counterparty_liens_not_atomic(account)?;
         if active_leg_count == 1 {
             let mut slot = 0usize;
             while slot < V16_MAX_PORTFOLIO_ASSETS_N && !active_bitmap_get(active_bitmap, slot) {
@@ -18008,7 +18162,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// the FIRST active leg with pending B settlement (either a cached stale bit or
     /// a current B target above its snapshot), the FIRST accrual-dispatchable
     /// active leg (falling back to the FIRST Recovery leg for committed-state
-    /// refresh), and the FIRST live-reducible leg (liquidation). A prior-epoch
+    /// refresh), and the FIRST live-reducible leg (liquidation), preferring one whose side has
+    /// no pending domain-loss barrier (`kernel_auto_crank_liquidation_slot`). A prior-epoch
     /// ResetPending leg is still refreshable, but
     /// its effective OI was already removed by ADL; selecting it for liquidation
     /// would fail before a later current-epoch leg could make progress. Recovery
@@ -18038,6 +18193,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .has_pending_residual();
         let mut refresh_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut liquidation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut liquidation_unblocked_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut reset_obligation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut b_stale_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut recovery_refresh_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
@@ -18074,6 +18230,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 refresh_flags[slot] = refresh;
                 recovery_refresh_flags[slot] = asset.lifecycle == AssetLifecycleV16::Recovery;
                 liquidation_flags[slot] = liquidatable;
+                // F-LIVE-1 (v22live): `liquidate_account_not_atomic` refuses a leg whose own side
+                // carries a pending domain-loss barrier (LockActive). Mark the legs it would
+                // accept so the selector can prefer one of them. Read-only; the barrier and the
+                // kernel's own refusal are unchanged.
+                liquidation_unblocked_flags[slot] = liquidatable
+                    && !self.has_pending_domain_loss_barrier(leg.asset_index as usize, leg.side)?;
                 // A legacy Normal-mode leg whose effective OI is already exhausted
                 // is a reset obligation too, or it stays uncrankable after upgrade.
                 // (upstream 9ffc4749)
@@ -18111,7 +18273,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             ordinary_refresh_asset,
             recovery_refresh_asset,
         );
-        let liquidatable_asset = asset_of(V16Core::first_actionable_slot(liquidation_flags))?;
+        let liquidatable_asset = asset_of(V16Core::kernel_auto_crank_liquidation_slot(
+            liquidation_unblocked_flags,
+            liquidation_flags,
+        ))?;
         let reset_obligation_asset =
             asset_of(V16Core::first_actionable_slot(reset_obligation_flags))?;
         Ok((
