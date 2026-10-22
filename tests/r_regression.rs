@@ -413,10 +413,18 @@ fn r_regression_holder_only_two_crank_route_also_certifies_honestly() {
         .backing_long
         .try_to_runtime()
         .unwrap();
+    // F-LIVE-2 (v22live, upstream #230 / PR #242): the holder's own crank commits the
+    // market-side expiry AND reconciles its lien into the impaired lane; it was the last holder,
+    // so the bucket returns to Expired (was: left Impaired with the lien still account-side).
     assert_eq!(
         bucket.status,
-        BackingBucketStatusV16::Impaired,
-        "the holder's own crank committed the market-side expiry"
+        BackingBucketStatusV16::Expired,
+        "the holder's own crank committed the expiry and retired its impaired lien"
+    );
+    assert_eq!(
+        long.header.source_domains[0].source_lien_effective_reserved.get(),
+        0,
+        "the lien was reconciled into the impaired lane"
     );
     let cert = long.header.health_cert.try_to_runtime().unwrap();
     assert!(cert.valid);
@@ -454,13 +462,20 @@ fn r_regression_withdraw_and_convert_refusals_are_unchanged() {
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut long = PortfolioV16ViewMut::new(&mut long_header);
 
-    // Flat, still carrying the (now unsupported) lien. The certificate the
-    // closing trade left behind is already the honest one.
+    // Flat. F-LIVE-2 (v22live, upstream #230 / PR #242): the closing trade's K/F settlement
+    // already reconciled the lien on the Impaired bucket into the impaired lane (was: still
+    // carried account-side until the flat normalizer ran). The certificate the closing trade
+    // left behind is the honest one.
     assert_eq!(
         long.header.source_domains[0]
             .source_lien_effective_reserved
             .get(),
-        LIEN_EFFECTIVE
+        0
+    );
+    assert_eq!(
+        long.header.source_domains[0].source_claim_impaired_num.get(),
+        LIEN_EFFECTIVE * BOUND_SCALE,
+        "the forfeited face sits in the impaired lane"
     );
     let cert = long.header.health_cert.try_to_runtime().unwrap();
     assert!(cert.valid);
@@ -481,14 +496,17 @@ fn r_regression_withdraw_and_convert_refusals_are_unchanged() {
         market.withdraw_not_atomic(&mut long, LIEN_EFFECTIVE),
         Err(V16Error::LockActive)
     );
-    // The support -> capital conduit: unchanged. `account_has_source_liens` is
-    // still true (the fix does not zero the field), so the refusal still fires
-    // before any support is computed.
+    // The support -> capital conduit: the impaired face has no backing, so nothing converts.
+    let cap_before = long.header.capital.get();
+    let conv = market.convert_released_pnl_to_capital_not_atomic(&mut long);
+    println!("LIVEFIX convert after reconcile => {conv:?} capital={}", long.header.capital.get());
     assert_eq!(
-        market.convert_released_pnl_to_capital_not_atomic(&mut long),
+        conv,
         Err(V16Error::LockActive),
-        "convert still refuses while the lien is held"
+        "convert must not pay out the forfeited (impaired) face"
     );
+    assert_eq!(long.header.capital.get(), cap_before, "no capital minted from the impaired face");
+    assert_eq!(market.withdraw_not_atomic(&mut long, 1), Err(V16Error::LockActive));
     assert_eq!(market.header.vault.get(), 1_000 + CLAIM);
 }
 
@@ -522,14 +540,12 @@ fn r_regression_flat_normalizer_still_clears_and_valuation_is_clearer_invariant(
     let before = long.header.health_cert.try_to_runtime().unwrap();
     assert!(before.valid);
 
-    let released = market
-        .release_account_source_credit_liens_if_unneeded_not_atomic(&mut long)
-        .expect("a flat account must still reach the clearer");
-    assert_eq!(
-        released, LIEN_EFFECTIVE,
-        "the normalizer still books the full effective through the \
-         ImpairCounterparty arm"
-    );
+    // F-LIVE-2 (v22live, upstream #230 / PR #242): the closing trade's K/F settlement already
+    // moved the lien through the same ImpairCounterparty transition (Live reconcile), so the
+    // normalizer finds nothing left to book (was: LIEN_EFFECTIVE booked here).
+    let released = market.release_account_source_credit_liens_if_unneeded_not_atomic(&mut long);
+    println!("LIVEFIX normalizer after reconcile => {released:?}");
+    assert_eq!(released, Ok(0), "nothing left for the normalizer");
     assert_eq!(
         long.header.source_domains[0]
             .source_lien_effective_reserved
