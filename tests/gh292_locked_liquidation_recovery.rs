@@ -290,7 +290,9 @@ fn assert_resolved_cleanly(l: &Latched, before: &Snap, out: &LiquidationOutcomeV
     // Winners are not haircut through anything but the charged domain's B index; the long side
     // of the charged asset (the bankrupt's own side) is untouched.
     assert_eq!(b_total(w, 1).0, before.b_long);
-    let _ = before.pnl_pos_tot;
+    assert_eq!(w.header.pnl_pos_tot.get(), before.pnl_pos_tot, "no positive claim changed");
+    let ledger = w.accounts[0].close_progress.try_to_runtime().unwrap();
+    assert_eq!(ledger.residual_remaining, 0, "no close residual left pending");
 }
 
 /// Squid's reproduction (GH#292), adapted: the close that leaves the locked account flat now
@@ -367,6 +369,7 @@ fn gh292_only_the_charged_domains_holder_bears_the_booking() {
 #[test]
 fn gh292_stage_uncoverable_declares_recovery() {
     let mut l = latched(Some(1), 0);
+    let before = snap(&l.w);
     assert!(l.deficit > 1);
     let out = final_close(&mut l);
     assert!(
@@ -376,6 +379,11 @@ fn gh292_stage_uncoverable_declares_recovery() {
     );
     assert_eq!(l.w.header.mode, 2, "Recovery declared");
     assert!(l.w.header.recovery_reason.try_to_runtime().unwrap().is_some());
+    // The preflight runs before any mutation: nothing was charged on the way to Recovery.
+    assert_eq!(l.w.header.insurance.get(), before.insurance, "no insurance consumed");
+    assert_eq!(l.w.header.c_tot.get(), before.c_tot);
+    assert_eq!(l.w.accounts[0].pnl.get().unsigned_abs(), l.deficit, "deficit untouched");
+    assert_eq!(b_total(&l.w, 1), (before.b_long, before.b_short), "nothing booked");
 }
 
 /// A deficit that insurance + the chunk can cover never reaches Recovery even when the chunk is
