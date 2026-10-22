@@ -2182,6 +2182,36 @@ impl V16Core {
         Err(V16Error::InvalidLeg)
     }
 
+    /// Effective quantity a DETACH removes from the side aggregate.
+    ///
+    /// A leg's effective quantity is CEILed while the side aggregate is FLOOR-rescaled by every
+    /// unilateral close, so after a haircut the side's LAST stored leg can exceed `oi_eff_side`
+    /// by the rounding gap (GH#290, found by @0x-SquidSol). The detach subtraction would then
+    /// underflow and strand the leg (forfeit is the owner's Recovery exit, and withdraw refuses
+    /// while a leg is attached). When the leg is the side's only stored position and the gap is
+    /// at most one atom per stored position, remove exactly the aggregate instead, so the side
+    /// reaches zero with its last leg. Any wider gap, any non-last leg, and every state where
+    /// the aggregate already covers the leg (the aeyakovenko/percolator#238 direction, aggregate
+    /// above legs) are returned unchanged and keep failing closed / being owned elsewhere.
+    pub(crate) fn effective_abs_quantity_for_detach(
+        asset: AssetStateV16,
+        leg: PortfolioLegV16,
+    ) -> V16Result<u128> {
+        let effective = Self::effective_abs_quantity_for_leg(asset, leg)?;
+        let (side_oi, stored_count) = match leg.side {
+            SideV16::Long => (asset.oi_eff_long_q, asset.stored_pos_count_long),
+            SideV16::Short => (asset.oi_eff_short_q, asset.stored_pos_count_short),
+        };
+        if side_oi != 0
+            && stored_count == 1
+            && effective > side_oi
+            && effective - side_oi <= u128::from(stored_count)
+        {
+            return Ok(side_oi);
+        }
+        Ok(effective)
+    }
+
     /// Choose the largest retained raw basis whose conservative effective
     /// quantity is `effective_abs_q`. This is the inverse used after a partial
     /// reduction: `ceil(raw * current_a / a_basis) == effective` while the
@@ -20186,7 +20216,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::Stale);
         }
-        let effective_abs_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
+        let effective_abs_q = V16Core::effective_abs_quantity_for_detach(asset, leg)?;
         let (leg, asset) =
             V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
@@ -20288,7 +20318,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let clear_effective_oi_q = match clear_effective_oi_q {
             Some(value) => value,
-            None => V16Core::effective_abs_quantity_for_leg(asset, leg)?,
+            None => V16Core::effective_abs_quantity_for_detach(asset, leg)?,
         };
         let asset = V16Core::kernel_clear_leg(leg, asset, clear_effective_oi_q)?;
         account.header.legs[leg_slot] =
@@ -20412,7 +20442,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let leg = current_leg;
             if leg.active && self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
                 let asset = self.asset_state(asset_index)?;
-                let effective_abs_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
+                let effective_abs_q = V16Core::effective_abs_quantity_for_detach(asset, leg)?;
                 let (obligation, asset) =
                     V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
                 account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&obligation);
