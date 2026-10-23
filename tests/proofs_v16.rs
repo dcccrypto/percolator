@@ -6890,7 +6890,7 @@ fn proof_v16_health_cert_capital_debit_preserves_im_or_rejects() {
 }
 
 #[kani::proof]
-#[kani::unwind(64)]
+#[kani::unwind(218)]
 #[kani::solver(cadical)]
 fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
     // CLEAN-ROOM FIX (was vacuous w.r.t. its named property): on master the leg
