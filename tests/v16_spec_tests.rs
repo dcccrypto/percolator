@@ -1,6 +1,7 @@
 use percolator::active_bitmap_count_ones;
 use percolator::{
-    active_bitmap_is_empty, auto_crank_plan_requires_caller_observation,
+    active_bitmap_is_empty, auto_crank_plan_requires_caller_observation, decode_loss_provenance,
+    LossProvenanceV16,
     v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16, AssetStateV16Account,
     AutoCrankObservationV16, AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankResultV16,
     AutoCrankWorkV16, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
@@ -13134,53 +13135,67 @@ fn v16_trade_does_not_charge_prior_multi_asset_deficit_or_force_market_recovery(
     short.validate_with_market(&market.as_view()).unwrap();
 }
 
-/// GH#292 (live resolution; supersedes the original 6d8e0a48 expectation for THIS fixture).
+/// 6d8e0a48 (upstream): a deficit realized on asset 0 must never be charged to the SURVIVING
+/// asset 1's domain just because asset 1 is the leg a liquidator closes. #299 path 2b keeps that
+/// rule and adds what 6d8e0a48 could not express: the account records which loss domain realized
+/// its deficit (`loss_provenance`, here asset 0's short side), and the close that leaves the
+/// account flat charges THAT domain (spec req 5, 27) instead of stranding the deficit (GH#292).
 ///
-/// `open_unattributed_deficit` closes the asset-0 leg outright, so the liquidation below closes
-/// the account's LAST leg and leaves it flat while it still carries the -250 deficit. 6d8e0a48
-/// pinned that close as reduce-only, which stranded the deficit for ever (capital is 0, nothing
-/// writes the pnl again, `negative_pnl_account_count` never decrements, `bankruptcy_hlock_active`
-/// never clears). The flat close now resolves the deficit in the live market: principal, domain
-/// insurance, then the B-booking onto the closed leg's loss-bearing side. The reduce-only
-/// behaviour while OPEN RISK REMAINS is unchanged and is pinned by
-/// `gh292_locked_close_with_open_risk_remaining_charges_nothing` in
-/// tests/gh292_locked_liquidation_recovery.rs.
+/// `open_unattributed_deficit` closed the asset-0 leg by trade, so asset 0 has no open interest
+/// left: its winners are gone and B cannot be booked against them. Without asset-0 insurance the
+/// flat close therefore declares Recovery (no fallback onto asset 1, no pooled insurance); with
+/// enough asset-0 insurance it resolves in the live market. Asset 1 is untouched either way.
 #[test]
-fn v16_liquidation_of_unattributed_deficit_resolves_in_the_live_market_when_the_close_leaves_it_flat() {
-    let (mut header, mut markets, mut long_header, mut short_header) =
-        unattributed_deficit_fixture();
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut long = PortfolioV16ViewMut::new(&mut long_header);
-    let mut short = PortfolioV16ViewMut::new(&mut short_header);
-    open_unattributed_deficit(&mut market, &mut long, &mut short);
-    assert_eq!(market.header.negative_pnl_account_count.get(), 1);
-
-    let insurance_before = market.header.insurance.get();
-    let vault_before = market.header.vault.get();
-    let asset0_before = markets_snapshot(&market, 0);
-    let outcome = market
-        .liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 1 })
-        .expect("the flat close of a locked account resolves its deficit, it does not strand it");
-    assert!(outcome.closed_q > 0);
-    // The whole -250 is resolved: insurance first, the remainder B-booked, nothing written off.
-    assert_eq!(outcome.explicit_loss, 0);
-    assert_eq!(outcome.insurance_used + outcome.residual_booked, 250);
-    assert_eq!(market.header.insurance.get() + outcome.insurance_used, insurance_before + outcome.fee_charged);
-    assert_eq!(market.header.vault.get(), vault_before, "no token moved");
-    assert_eq!(outcome.insurance_used, insurance_before.min(250), "insurance is used first");
-    assert_eq!(outcome.residual_booked, 250 - outcome.insurance_used);
-    assert_eq!(market.header.mode, 0, "the market stays Live");
-    assert_eq!(short.header.liquidation_lock, 0, "the lock clears with the deficit");
-    assert_eq!(short.header.pnl.get(), 0);
-    assert_eq!(market.header.negative_pnl_account_count.get(), 0, "the counter is released");
-    let asset0_after = markets_snapshot(&market, 0);
-    assert_eq!(
-        asset0_after.close_ledger_side_1_touched, asset0_before.close_ledger_side_1_touched,
-        "the other asset's domain is not charged"
-    );
-    market.validate_shape().unwrap();
-    long.validate_with_market(&market.as_view()).unwrap();
-    short.validate_with_market(&market.as_view()).unwrap();
+fn v16_liquidation_of_unattributed_deficit_never_charges_the_surviving_domain() {
+    for insured in [false, true] {
+        let (mut header, mut markets, mut long_header, mut short_header) =
+            unattributed_deficit_fixture();
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        open_unattributed_deficit(&mut market, &mut long, &mut short);
+        assert_eq!(market.header.negative_pnl_account_count.get(), 1);
+        assert_eq!(short.header.liquidation_lock, 1);
+        // the short lost on asset 0: loss domain (asset 0, Short) = 1
+        assert_eq!(
+            decode_loss_provenance(short.header.loss_provenance.get()),
+            Ok(LossProvenanceV16::Domain(1))
+        );
+        if insured {
+            // the bankrupt short's insurance domain is asset 0's long side: 2 * 0 + 0
+            market.deposit_domain_insurance_not_atomic(0, 250).unwrap();
+        }
+        let insurance_before = market.header.insurance.get();
+        let vault_before = market.header.vault.get();
+        let asset1_before = markets_snapshot(&market, 1);
+        let outcome =
+            market.liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 1 });
+        let asset1_after = markets_snapshot(&market, 1);
+        assert!(
+            !asset1_after.close_ledger_side_1_touched && !asset1_before.close_ledger_side_1_touched,
+            "insured={insured}: the surviving asset's domain is never charged"
+        );
+        assert_eq!(market.header.vault.get(), vault_before, "no token moved");
+        if insured {
+            let outcome = outcome.expect("asset 0's insurance covers its own deficit");
+            assert!(outcome.closed_q > 0);
+            assert_eq!(outcome.insurance_used, 250);
+            assert_eq!((outcome.residual_booked, outcome.explicit_loss), (0, 0));
+            assert_eq!(market.header.insurance.get() + 250, insurance_before + outcome.fee_charged);
+            assert_eq!(market.header.mode, 0, "the market stays Live");
+            assert_eq!(short.header.liquidation_lock, 0, "the lock clears with the deficit");
+            assert_eq!(short.header.pnl.get(), 0);
+            assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+            market.validate_shape().unwrap();
+            long.validate_with_market(&market.as_view()).unwrap();
+            short.validate_with_market(&market.as_view()).unwrap();
+        } else {
+            assert_eq!(outcome.map(|o| o.closed_q), Err(V16Error::RecoveryRequired));
+            assert_eq!(market.header.mode, 2, "Recovery rather than charging asset 1");
+            assert_eq!(market.header.insurance.get(), insurance_before, "no insurance consumed");
+            assert_eq!(short.header.pnl.get(), -250, "deficit untouched");
+        }
+    }
 }
 
 struct AssetSnapshot {

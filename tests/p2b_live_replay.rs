@@ -111,8 +111,17 @@ fn upgrade_v21_portfolio(old: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&leg[rem_cut..]);
         out.extend_from_slice(&[0u8; V22_LEG_EXTRA]);
     }
-    out.extend_from_slice(&state[legs_off + V16_MAX_PORTFOLIO_ASSETS_N * old_leg_len..]);
-    // Provenance: discriminator 18 -> 19 (the only non-appended change).
+    // #299 (layout 20): `loss_provenance` (u32) is appended after the last v2.1 state field and
+    // before the wrapper's trailing bytes. A v2.1 account carries no record: zero (= none; a
+    // negative pnl with no record is read as unattributable, never attributed).
+    let loss_provenance_off = core::mem::offset_of!(PortfolioAccountV16Account, loss_provenance);
+    let old_tail_len = loss_provenance_off
+        - (legs_off + V16_MAX_PORTFOLIO_ASSETS_N * core::mem::size_of::<PortfolioLegV16Account>());
+    let tail = &state[legs_off + V16_MAX_PORTFOLIO_ASSETS_N * old_leg_len..];
+    out.extend_from_slice(&tail[..old_tail_len]);
+    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&tail[old_tail_len..]);
+    // Provenance: discriminator 18 -> current (the only non-appended change).
     let disc_off = PORTFOLIO_STATE_OFF
         + core::mem::offset_of!(PortfolioAccountV16Account, provenance_header)
         + core::mem::offset_of!(percolator::ProvenanceHeaderV16Account, layout_discriminator);

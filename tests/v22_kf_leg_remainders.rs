@@ -236,6 +236,7 @@ fn v22_leg_remainder_must_stay_below_its_denominator() {
 }
 
 /// Layout pin (ledger/v22-allocations.md): the remainders sit right after `f_snap`. Combined release (-rem): leg 185 + 32 = 217 B, portfolio 10459 B, ONE discriminator (19).
+/// #299 (path 2b): `loss_provenance` (u32) appended last: portfolio 10463 B, discriminator 20; no earlier offset moves.
 #[test]
 fn v22_leg_layout_is_pinned() {
     use core::mem::{offset_of, size_of};
@@ -245,6 +246,7 @@ fn v22_leg_layout_is_pinned() {
     assert_eq!(offset_of!(PortfolioLegV16Account, f_rem_num), 94);
     assert_eq!(offset_of!(PortfolioLegV16Account, kf_epoch_snap), 110);
     assert_eq!(size_of::<PortfolioLegV16Account>(), 217);
-    assert_eq!(size_of::<PortfolioAccountV16Account>(), 10459);
-    assert_eq!(V16_LAYOUT_DISCRIMINATOR, 19);
+    assert_eq!(size_of::<PortfolioAccountV16Account>(), 10463);
+    assert_eq!(offset_of!(PortfolioAccountV16Account, loss_provenance), 10459);
+    assert_eq!(V16_LAYOUT_DISCRIMINATOR, 20);
 }
