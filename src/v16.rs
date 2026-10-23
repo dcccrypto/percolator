@@ -4445,11 +4445,6 @@ pub fn kani_funding_div_rem(p: u128) -> (u128, u128) {
 }
 
 #[cfg(kani)]
-pub fn kani_funding_index_deltas(funding_num: i128, a_long: u128, a_short: u128) -> V16Result<(i128, i128)> {
-    V16Core::kernel_funding_index_deltas(funding_num, a_long, a_short)
-}
-
-#[cfg(kani)]
 pub fn kani_track_kf_side_drift(
     drift: KfDriftSideV16,
     changed: bool,
