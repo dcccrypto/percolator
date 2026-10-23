@@ -6890,7 +6890,7 @@ fn proof_v16_health_cert_capital_debit_preserves_im_or_rejects() {
 }
 
 #[kani::proof]
-#[kani::unwind(64)]
+#[kani::unwind(218)]
 #[kani::solver(cadical)]
 fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
     // CLEAN-ROOM FIX (was vacuous w.r.t. its named property): on master the leg
@@ -6946,6 +6946,10 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     };
     account_header.legs[0] = percolator::v16::PortfolioLegV16Account::from_runtime(&leg);
     let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
