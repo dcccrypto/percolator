@@ -572,7 +572,11 @@ fn e299_close_order_does_not_change_who_pays() {
         let (a0_last, d0) = attribution_after_flat_close(false, insure, 1);
         let (a1_last, d1) = attribution_after_flat_close(false, insure, 0);
         assert_eq!(d0, d1, "precondition: same deficit either way");
-        assert!(a0_last.result.is_ok(), "{insure:?}: resolves: {:?}", a0_last.result);
+        // non-vacuous: the deficit is actually resolved (two orders that both strand would compare
+        // equal too)
+        let (ins, booked, explicit) = a0_last.result.clone().expect("resolves");
+        assert_eq!((ins + booked, explicit), (d0, 0), "{insure:?}: whole deficit charged");
+        assert_eq!(a0_last.market.neg, 0, "{insure:?}: counter released");
         assert_eq!(a0_last, a1_last, "{insure:?}: close order changed the attribution");
     }
 }
