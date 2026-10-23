@@ -38,20 +38,23 @@ fn proof_e299_loss_merge_is_order_independent() {
     let p0 = any_pnl();
     let (a1, a2) = (any_loss(), any_loss());
     let (d1, d2) = (kani::any::<u8>() as usize, kani::any::<u8>() as usize);
+    let multi: bool = kani::any();
     let p2 = p0 - a1 - a2;
     let x1 = p0 - a1;
     let first = kani_loss_provenance_after_pnl(
-        kani_loss_provenance_after_pnl(old, p0, x1, Some(d1)),
+        kani_loss_provenance_after_pnl(old, p0, x1, Some(d1), multi),
         x1,
         p2,
         Some(d2),
+        multi,
     );
     let y1 = p0 - a2;
     let second = kani_loss_provenance_after_pnl(
-        kani_loss_provenance_after_pnl(old, p0, y1, Some(d2)),
+        kani_loss_provenance_after_pnl(old, p0, y1, Some(d2), multi),
         y1,
         p2,
         Some(d1),
+        multi,
     );
     assert_eq!(first, second);
 }
@@ -64,39 +67,73 @@ fn proof_e299_record_never_names_a_non_realizing_domain() {
     let p0 = any_pnl();
     let p1 = p0 - any_loss();
     let d = kani::any::<u8>() as usize;
-    if let LossProvenanceV16::Domain(x) = kani_loss_provenance_after_pnl(old, p0, p1, Some(d)) {
+    let multi: bool = kani::any();
+    if let LossProvenanceV16::Domain(x) = kani_loss_provenance_after_pnl(old, p0, p1, Some(d), multi) {
         assert_eq!(x, d);
     }
     if p1 < 0 {
         assert!(!matches!(
-            kani_loss_provenance_after_pnl(old, p0, p1, None),
+            kani_loss_provenance_after_pnl(old, p0, p1, None, multi),
             LossProvenanceV16::Domain(_)
         ));
     }
     // an unrecorded deficit is never laundered into an attribution
     if p0 < 0 && old == LossProvenanceV16::None {
         assert_eq!(
-            kani_loss_provenance_after_pnl(old, p0, p1, Some(d)),
+            kani_loss_provenance_after_pnl(old, p0, p1, Some(d), multi),
             LossProvenanceV16::Unattributable
         );
     }
 }
 
-/// A gain back to pnl >= 0 clears the record; a gain that leaves pnl negative keeps the effective
-/// record. So a resolved account (pnl == 0) always carries no record.
+/// A non-decreasing write: with at most one leg open, reaching pnl >= 0 clears the record; with
+/// several legs open the record is kept (sticky for the episode); while pnl stays negative the
+/// effective record is kept. (A loss landing exactly on 0, or a non-loss decrease, may leave a
+/// record beside pnl == 0; only a gain with <= 1 leg, or a resolving liquidation, clears it.)
 #[kani::proof]
 fn proof_e299_gain_keeps_or_clears_the_record() {
     let old = any_record();
     let p0 = any_pnl();
     let p1 = any_pnl();
     kani::assume(p1 >= p0);
+    let multi: bool = kani::any();
     let d = if kani::any() { Some(kani::any::<u8>() as usize) } else { None };
-    let r = kani_loss_provenance_after_pnl(old, p0, p1, d);
-    if p1 >= 0 {
+    let r = kani_loss_provenance_after_pnl(old, p0, p1, d, multi);
+    if p1 >= 0 && !multi {
         assert_eq!(r, LossProvenanceV16::None);
     } else {
         assert_eq!(r, effective_loss_provenance(old, p0));
     }
+}
+
+/// Req 27 across refreshes: in a multi-leg episode, a loss from d1, a gain, and a loss from d2
+/// realized in ANY of the orders a caller can produce (by accruing assets one at a time and
+/// refreshing in between) leave the same record. Before the multi-leg-sticky rule the gain could
+/// reset the record between the two losses (security review of 9dc1395c).
+#[kani::proof]
+fn proof_e299_multi_leg_record_ignores_gain_interleaving() {
+    let old = any_record();
+    let p0 = any_pnl();
+    let (a1, a2) = (any_loss(), any_loss());
+    let g: u32 = kani::any();
+    let g = g as i128;
+    let (d1, d2) = (kani::any::<u8>() as usize, kani::any::<u8>() as usize);
+    let f = |o, from: i128, to: i128, d| kani_loss_provenance_after_pnl(o, from, to, d, true);
+    // L1, G, L2
+    let x1 = p0 - a1;
+    let x2 = x1 + g;
+    let x3 = x2 - a2;
+    let r1 = f(f(f(old, p0, x1, Some(d1)), x1, x2, None), x2, x3, Some(d2));
+    // L2, G, L1
+    let y1 = p0 - a2;
+    let y2 = y1 + g;
+    let r2 = f(f(f(old, p0, y1, Some(d2)), y1, y2, None), y2, x3, Some(d1));
+    // G, L1, L2
+    let z1 = p0 + g;
+    let z2 = z1 - a1;
+    let r3 = f(f(f(old, p0, z1, None), z1, z2, Some(d1)), z2, x3, Some(d2));
+    assert_eq!(r1, r2);
+    assert_eq!(r1, r3);
 }
 
 /// The charge decision. Locked: a charge names exactly the recorded domain, never the closed leg

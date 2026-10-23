@@ -461,7 +461,15 @@ pub fn encode_loss_provenance(value: LossProvenanceV16) -> V16Result<u32> {
 
 /// #299 (2b): the provenance transition for one pnl write `old_pnl -> new_pnl`.
 /// - A write that does not lower pnl keeps the record while pnl stays negative (a gain netted
-///   against the deficit does not change who realized it) and clears it once pnl is back to `>= 0`.
+///   against the deficit does not change who realized it). It clears the record once pnl is back
+///   to `>= 0` ONLY when the account holds at most one leg (`multi_leg == false`). While several
+///   legs are open the record is sticky for the whole episode: otherwise a caller who accrues the
+///   assets one at a time and refreshes in between (or the owner timing their own touches) could
+///   choose which loser is realized after the last reset and so choose who pays (spec req 27;
+///   security review of 9dc1395c). Sticky, the record names a domain only when that domain is the
+///   ONLY one that realized any loss during the episode; every leg that is a net loser over the
+///   episode realizes a loss in every refresh partition, so a caller can push the record towards
+///   `Unattributable` (Recovery) but can never make it name a different payer.
 /// - A write that lowers pnl is a realized loss. `loss_domain` names the loss domain of the leg
 ///   that realized it; `None` (a write with no single leg) is unattributable. Records merge: the
 ///   same domain stays attributed, anything else becomes `Unattributable` (sticky until a gain
@@ -478,10 +486,11 @@ pub fn loss_provenance_after_pnl(
     old_pnl: i128,
     new_pnl: i128,
     loss_domain: Option<usize>,
+    multi_leg: bool,
 ) -> LossProvenanceV16 {
     let old = effective_loss_provenance(old, old_pnl);
     if new_pnl >= old_pnl {
-        return if new_pnl >= 0 { LossProvenanceV16::None } else { old };
+        return if new_pnl >= 0 && !multi_leg { LossProvenanceV16::None } else { old };
     }
     let source = match loss_domain {
         Some(d) => LossProvenanceV16::Domain(d),
@@ -501,8 +510,9 @@ pub fn kani_loss_provenance_after_pnl(
     old_pnl: i128,
     new_pnl: i128,
     loss_domain: Option<usize>,
+    multi_leg: bool,
 ) -> LossProvenanceV16 {
-    loss_provenance_after_pnl(old, old_pnl, new_pnl, loss_domain)
+    loss_provenance_after_pnl(old, old_pnl, new_pnl, loss_domain, multi_leg)
 }
 
 /// What a liquidation close does with the account's bankruptcy residual.
@@ -14911,9 +14921,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         loss_domain: Option<usize>,
     ) -> V16Result<()> {
         let was_locked = decode_bool(account.header.liquidation_lock)?;
+        let active_bitmap = account.header.active_bitmap.map(V16PodU64::get);
         account.header.liquidation_lock = encode_bool(unattributed_loss_lock_after_pnl(
             was_locked,
-            account.header.active_bitmap.map(V16PodU64::get),
+            active_bitmap,
             new_pnl,
         ));
         let provenance = loss_provenance_after_pnl(
@@ -14921,6 +14932,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.header.pnl.get(),
             new_pnl,
             loss_domain,
+            active_bitmap_count_ones(active_bitmap) > 1,
         );
         account.header.loss_provenance = V16PodU32::new(encode_loss_provenance(provenance)?);
         Ok(())
@@ -21766,6 +21778,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?;
             self.set_account_pnl(account, new_pnl)?;
             self.mark_bankruptcy_hlock_event(charge_asset, bankrupt_side);
+        }
+        if account.header.pnl.get() >= 0 {
+            // #299: the deficit the record described has been charged; its episode ends here
+            // (the multi-leg-sticky rule would otherwise carry it into the next one).
+            account.header.loss_provenance = V16PodU32::new(LOSS_PROVENANCE_NONE);
         }
         self.reduce_position(account, request.asset_index, close_q)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;

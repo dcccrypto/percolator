@@ -36,37 +36,53 @@ fn e299_provenance_wire_round_trips() {
 // Record rules
 // ---------------------------------------------------------------------------------------------
 
+/// A single-leg account's write (the record may clear at pnl >= 0).
+fn lp1(o: LossProvenanceV16, old: i128, new: i128, d: Option<usize>) -> LossProvenanceV16 {
+    loss_provenance_after_pnl(o, old, new, d, false)
+}
+
 #[test]
 fn e299_record_names_the_single_realizing_domain() {
-    let p = loss_provenance_after_pnl(LossProvenanceV16::None, 0, -10, Some(2));
+    let p = lp1(LossProvenanceV16::None, 0, -10, Some(2));
     assert_eq!(p, Domain(2));
     // more of the same domain keeps it
-    assert_eq!(loss_provenance_after_pnl(p, -10, -30, Some(2)), Domain(2));
+    assert_eq!(lp1(p, -10, -30, Some(2)), Domain(2));
     // a loss from another domain makes it unattributable (no invented split)
-    assert_eq!(loss_provenance_after_pnl(p, -10, -30, Some(3)), Unattributable);
+    assert_eq!(lp1(p, -10, -30, Some(3)), Unattributable);
     // a loss that names no leg is unattributable
-    assert_eq!(loss_provenance_after_pnl(p, -10, -30, None), Unattributable);
+    assert_eq!(lp1(p, -10, -30, None), Unattributable);
 }
 
 #[test]
 fn e299_gains_keep_the_record_while_negative_and_clear_it_at_zero() {
     let p = Domain(1);
-    assert_eq!(loss_provenance_after_pnl(p, -100, -40, Some(3)), Domain(1), "netting gain keeps it");
-    assert_eq!(loss_provenance_after_pnl(p, -100, -40, None), Domain(1));
-    assert_eq!(loss_provenance_after_pnl(p, -100, 0, None), LossProvenanceV16::None);
-    assert_eq!(loss_provenance_after_pnl(Unattributable, -100, 5, None), LossProvenanceV16::None);
-    assert_eq!(loss_provenance_after_pnl(Unattributable, -100, -1, None), Unattributable);
+    assert_eq!(lp1(p, -100, -40, Some(3)), Domain(1), "netting gain keeps it");
+    assert_eq!(lp1(p, -100, -40, None), Domain(1));
+    assert_eq!(lp1(p, -100, 0, None), LossProvenanceV16::None);
+    assert_eq!(lp1(Unattributable, -100, 5, None), LossProvenanceV16::None);
+    assert_eq!(lp1(Unattributable, -100, -1, None), Unattributable);
+}
+
+#[test]
+fn e299_multi_leg_record_is_sticky_until_one_leg_and_pnl_nonnegative() {
+    // multi-leg: a gain back to >= 0 does not clear; a later loss elsewhere is unattributable
+    let p = loss_provenance_after_pnl(LossProvenanceV16::None, 0, -100, Some(0), true);
+    let p = loss_provenance_after_pnl(p, -100, 50, None, true);
+    assert_eq!(p, Domain(0), "multi-leg gain keeps the record");
+    assert_eq!(loss_provenance_after_pnl(p, 50, -70, Some(4), true), Unattributable);
+    // the first write with at most one leg and pnl >= 0 clears it
+    assert_eq!(loss_provenance_after_pnl(p, 50, 60, None, false), LossProvenanceV16::None);
 }
 
 #[test]
 fn e299_a_loss_absorbed_by_positive_face_is_still_recorded() {
     // pnl +15: domain 0 loses 10 (absorbed, pnl +5), then domain 1 loses 10 (pnl -5). The
     // deficit is not "domain 1's" just because it crossed zero: both realized it.
-    let p = loss_provenance_after_pnl(LossProvenanceV16::None, 15, 5, Some(0));
+    let p = lp1(LossProvenanceV16::None, 15, 5, Some(0));
     assert_eq!(p, Domain(0));
-    assert_eq!(loss_provenance_after_pnl(p, 5, -5, Some(1)), Unattributable);
+    assert_eq!(lp1(p, 5, -5, Some(1)), Unattributable);
     // a non-loss decrease (released-pnl conversion, no leg) that leaves pnl >= 0 keeps the record
-    assert_eq!(loss_provenance_after_pnl(p, 5, 0, None), Domain(0));
+    assert_eq!(lp1(p, 5, 0, None), Domain(0));
 }
 
 #[test]
@@ -74,18 +90,28 @@ fn e299_no_record_on_a_negative_pnl_is_never_attributed() {
     assert_eq!(effective_loss_provenance(LossProvenanceV16::None, -1), Unattributable);
     assert_eq!(effective_loss_provenance(LossProvenanceV16::None, 0), LossProvenanceV16::None);
     // a later single-domain loss cannot launder an unknown earlier deficit into an attribution
-    assert_eq!(loss_provenance_after_pnl(LossProvenanceV16::None, -5, -9, Some(0)), Unattributable);
+    assert_eq!(lp1(LossProvenanceV16::None, -5, -9, Some(0)), Unattributable);
 }
 
 /// Apply a sequence of signed pnl deltas (loss domain per negative delta), returning the record.
-fn replay(start: i128, steps: &[(i128, usize)]) -> LossProvenanceV16 {
+fn replay(start: i128, steps: &[(i128, usize)], multi_leg: bool) -> LossProvenanceV16 {
     let (mut pnl, mut p) = (start, LossProvenanceV16::None);
     for &(delta, d) in steps {
         let next = pnl + delta;
-        p = loss_provenance_after_pnl(p, pnl, next, if delta < 0 { Some(d) } else { None });
+        p = loss_provenance_after_pnl(p, pnl, next, if delta < 0 { Some(d) } else { None }, multi_leg);
         pnl = next;
     }
     p
+}
+
+fn shuffle<T: Clone>(v: &[T], seed: u64) -> Vec<T> {
+    let mut out = v.to_vec();
+    let mut x = seed | 1;
+    for i in (1..out.len()).rev() {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        out.swap(i, (x % (i as u64 + 1)) as usize);
+    }
+    out
 }
 
 proptest! {
@@ -101,15 +127,9 @@ proptest! {
         seed in any::<u64>(),
     ) {
         let steps: Vec<(i128, usize)> = losses.iter().map(|&(a, d)| (-a, d)).collect();
-        let mut shuffled = steps.clone();
-        // deterministic Fisher-Yates from the seed
-        let mut x = seed | 1;
-        for i in (1..shuffled.len()).rev() {
-            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
-            shuffled.swap(i, (x % (i as u64 + 1)) as usize);
-        }
-        let a = replay(start, &steps);
-        let b = replay(start, &shuffled);
+        let shuffled = shuffle(&steps, seed);
+        let a = replay(start, &steps, false);
+        let b = replay(start, &shuffled, false);
         prop_assert_eq!(a, b);
         let first = steps[0].1;
         let single = steps.iter().all(|s| s.1 == first);
@@ -118,6 +138,30 @@ proptest! {
             prop_assert_eq!(a, Unattributable);
         } else if single {
             prop_assert_eq!(a, Domain(first));
+        } else {
+            prop_assert_eq!(a, Unattributable);
+        }
+    }
+
+    /// Req 27 across refreshes (security review of 9dc1395c): while several legs are open, a
+    /// caller can realize the legs' losses AND GAINS in any order (accrue one asset, refresh, the
+    /// next, refresh...). The record is the same for every order of a mixed loss/gain sequence:
+    /// Domain(d) iff every loss came from d, else Unattributable -- the gains (and the principal
+    /// settlements they stand in for) never reset it mid-episode.
+    #[test]
+    fn e299_multi_leg_episode_record_is_order_independent_with_gains(
+        start in 0i128..1_000,
+        moves in prop::collection::vec((-500i128..500, 0usize..4), 1..8),
+        seed in any::<u64>(),
+    ) {
+        let steps: Vec<(i128, usize)> = moves.into_iter().filter(|m| m.0 != 0).collect();
+        prop_assume!(steps.iter().any(|m| m.0 < 0));
+        let a = replay(start, &steps, true);
+        let b = replay(start, &shuffle(&steps, seed), true);
+        prop_assert_eq!(a, b);
+        let losers: Vec<usize> = steps.iter().filter(|m| m.0 < 0).map(|m| m.1).collect();
+        if losers.iter().all(|&d| d == losers[0]) {
+            prop_assert_eq!(a, Domain(losers[0]));
         } else {
             prop_assert_eq!(a, Unattributable);
         }
@@ -339,8 +383,13 @@ fn latched(drop_a1: bool) -> W2 {
         if w.accounts[0].pnl.get() < 0 && w.accounts[0].liquidation_lock != 0 {
             return w;
         }
-        // while capital covers the loss the record is reset with the pnl
-        assert_eq!(record(&w), LossProvenanceV16::None);
+        // two legs open: the record is sticky for the episode and only ever names a loser
+        let r = record(&w);
+        if drop_a1 {
+            assert!(matches!(r, LossProvenanceV16::None | Domain(0) | Domain(2) | Unattributable));
+        } else {
+            assert!(matches!(r, LossProvenanceV16::None | Domain(0)), "{r:?}");
+        }
     }
     panic!("precondition: bad debt with the lock set");
 }
@@ -375,4 +424,64 @@ fn e299_out_of_range_record_fails_closed() {
     // the in-range record is accepted again
     w.accounts[0].loss_provenance = V16PodU32::new(1 + 3);
     assert!(w.refresh(0).is_ok());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cross-refresh realization order (security review of 9dc1395c): a cranker can accrue assets one
+// at a time and refresh the account between them, so losses and gains of different legs are
+// realized in an order the CALLER picks. The record must not depend on it (spec req 27).
+// ---------------------------------------------------------------------------------------------
+
+/// Account 0: long a0 (vs 1), short a1 (vs 2), long a2 (vs 3). `targets[k]` is asset k's price
+/// target; each slot the assets are stepped and the account refreshed in `order`, one asset at a
+/// time. Returns the record once the account is in bad debt (or after 80 slots).
+fn record_after_crank_order(targets: [u64; 3], order: [usize; 3]) -> (LossProvenanceV16, i128) {
+    let mut w = W2::new(band_cfg(3), &[400_000, 50_000_000, 50_000_000, 50_000_000], 3);
+    w.trade(0, 0, 1, POS_SCALE).unwrap();
+    w.trade(1, 2, 0, POS_SCALE).unwrap();
+    w.trade(2, 0, 3, POS_SCALE).unwrap();
+    w.refresh(0).unwrap();
+    w.now = 3; // asset k is activated at slot k + 1
+    for _ in 0..80 {
+        w.now += 1;
+        for &ai in &order {
+            w.step_price(ai, targets[ai]);
+            let _ = w.refresh(0);
+        }
+        if w.accounts[0].pnl.get() < 0 && w.accounts[0].capital.get() == 0 {
+            break;
+        }
+    }
+    (record(&w), w.accounts[0].pnl.get())
+}
+
+const ORDERS: [[usize; 3]; 6] = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+
+/// Two legs lose (a0 long, a2 long fall) while one gains (a1 short, a1 falls): in EVERY crank order
+/// the record is unattributable. Before the multi-leg-sticky rule the record named whichever loser
+/// was realized after the last gain/principal reset, so the caller chose who paid.
+#[test]
+fn e299_crank_order_cannot_choose_the_payer_two_losers() {
+    let targets = [P0 / 2, P0 / 2, P0 / 2];
+    let mut seen = Vec::new();
+    for order in ORDERS {
+        let (p, pnl) = record_after_crank_order(targets, order);
+        assert!(pnl < 0, "precondition {order:?}: bad debt reached");
+        seen.push((order, p));
+    }
+    for (order, p) in &seen {
+        assert_eq!(*p, Unattributable, "order {order:?} attributed a two-domain loss: {seen:?}");
+    }
+}
+
+/// Only a0 loses (a1 short gains, a2 flat): every crank order attributes the deficit to a0's loss
+/// domain (asset 0, Long) = 0, i.e. gains interleaved with the loss never change the payer.
+#[test]
+fn e299_crank_order_cannot_choose_the_payer_one_loser() {
+    let targets = [1, P0 * 98 / 100, P0];
+    for order in ORDERS {
+        let (p, pnl) = record_after_crank_order(targets, order);
+        assert!(pnl < 0, "precondition {order:?}: bad debt reached");
+        assert_eq!(p, Domain(0), "order {order:?}");
+    }
 }
