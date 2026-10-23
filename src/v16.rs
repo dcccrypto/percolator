@@ -34,7 +34,9 @@ pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
 // snapshot; band + rent config words. Old slabs fail closed.
 // Per-leg K/F settlement remainders (`k_rem_num`, `f_rem_num`; upstream a74b81b2, #281) ride the same
 // re-seed (variant release/v22-*-rem): one discriminator covers both.
-pub const V16_LAYOUT_DISCRIMINATOR: u16 = 19;
+// 20 (#299, path 2b): `PortfolioAccountV16Account::loss_provenance` (u32, appended last; account
+// size 10459 -> 10463). Old accounts fail closed (re-seed).
+pub const V16_LAYOUT_DISCRIMINATOR: u16 = 20;
 pub const V16_ACCOUNT_VERSION: u16 = 1;
 pub const BACKING_FEE_RATE_DEN_E9: u128 = 1_000_000_000;
 pub const MAX_BACKING_FEE_RATE_E9_PER_SLOT: u64 = 1_000_000_000;
@@ -384,6 +386,199 @@ fn unattributed_loss_lock_after_pnl(
     new_pnl: i128,
 ) -> bool {
     new_pnl < 0 && (was_locked || active_bitmap_count_ones(active_bitmap) > 1)
+}
+
+/// #299 (path 2b): provenance of the account's negative PnL, stored in
+/// `PortfolioAccountV16Account::loss_provenance`. Wire encoding (u32):
+/// - `0` (`LOSS_PROVENANCE_NONE`): no loss on record since the account last gained back to `pnl >= 0`.
+/// - `1 + loss_domain`: every loss on record was realized by legs of ONE loss domain
+///   `asset_index * 2 + encode_side(loser_leg_side)`, the same index the K/F settlement plan keys a
+///   negative entry by (`insurance_domain_index(asset, leg.side)`).
+/// - `u32::MAX` (`LOSS_PROVENANCE_UNATTRIBUTABLE`): losses from more than one loss domain, or from a
+///   write that names none. The deficit is not charged to any one domain (spec req 5, 27).
+/// Account validation (`validate_loss_provenance_for_market`) rejects a domain outside the
+/// configured range, so a decoded record always names a real domain.
+pub const LOSS_PROVENANCE_NONE: u32 = 0;
+pub const LOSS_PROVENANCE_UNATTRIBUTABLE: u32 = u32::MAX;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LossProvenanceV16 {
+    None,
+    Domain(usize),
+    Unattributable,
+}
+
+#[inline]
+pub fn decode_loss_provenance(raw: u32) -> V16Result<LossProvenanceV16> {
+    match raw {
+        LOSS_PROVENANCE_NONE => Ok(LossProvenanceV16::None),
+        LOSS_PROVENANCE_UNATTRIBUTABLE => Ok(LossProvenanceV16::Unattributable),
+        // The configured-domain range is checked against the market group by
+        // `validate_loss_provenance_for_market` (account validation).
+        d => Ok(LossProvenanceV16::Domain((d - 1) as usize)),
+    }
+}
+
+/// Strict account-level check: the record decodes and an attributed record names a configured
+/// domain. `None` beside a negative pnl (an account state no engine setter produces) is not an
+/// error; it is read as `Unattributable` everywhere (`effective_loss_provenance`), so it can never
+/// invent an attribution.
+#[inline]
+fn validate_loss_provenance_for_market(raw: u32, configured_domains: usize) -> V16Result<()> {
+    match decode_loss_provenance(raw)? {
+        LossProvenanceV16::Domain(d) if d >= configured_domains => Err(V16Error::InvalidLeg),
+        _ => Ok(()),
+    }
+}
+
+/// The record as the attribution rules read it: no record on a negative pnl is `Unattributable`.
+#[inline]
+pub fn effective_loss_provenance(recorded: LossProvenanceV16, pnl: i128) -> LossProvenanceV16 {
+    if pnl < 0 && recorded == LossProvenanceV16::None {
+        LossProvenanceV16::Unattributable
+    } else {
+        recorded
+    }
+}
+
+#[inline]
+pub fn encode_loss_provenance(value: LossProvenanceV16) -> V16Result<u32> {
+    match value {
+        LossProvenanceV16::None => Ok(LOSS_PROVENANCE_NONE),
+        LossProvenanceV16::Unattributable => Ok(LOSS_PROVENANCE_UNATTRIBUTABLE),
+        LossProvenanceV16::Domain(d) => {
+            let raw = u32::try_from(d)
+                .ok()
+                .and_then(|d| d.checked_add(1))
+                .ok_or(V16Error::InvalidLeg)?;
+            if raw == LOSS_PROVENANCE_UNATTRIBUTABLE {
+                return Err(V16Error::InvalidLeg);
+            }
+            Ok(raw)
+        }
+    }
+}
+
+/// #299 (2b): the provenance transition for one pnl write `old_pnl -> new_pnl`.
+/// - A write that does not lower pnl keeps the record while pnl stays negative (a gain netted
+///   against the deficit does not change who realized it). It clears the record once pnl is back
+///   to `>= 0` ONLY when the account holds at most one leg (`multi_leg == false`). While several
+///   legs are open the record is sticky for the whole episode: otherwise a caller who accrues the
+///   assets one at a time and refreshes in between (or the owner timing their own touches) could
+///   choose which loser is realized after the last reset and so choose who pays (spec req 27;
+///   security review of 9dc1395c). Sticky, the record names a domain only when that domain is the
+///   ONLY one that realized any loss during the episode; every leg that is a net loser over the
+///   episode realizes a loss in every refresh partition, so a caller can push the record towards
+///   `Unattributable` (Recovery) but can never make it name a different payer.
+/// - A write that lowers pnl is a realized loss. `loss_domain` names the loss domain of the leg
+///   that realized it; `None` (a write with no single leg) is unattributable. Records merge: the
+///   same domain stays attributed, anything else becomes `Unattributable` (sticky until a gain
+///   restores `pnl >= 0`). A loss absorbed by positive face (pnl still `>= 0`) is recorded too, so
+///   two legs losing in one refresh never attribute the deficit to whichever one crossed zero.
+/// - A non-loss write that lowers pnl (released-pnl conversion) passes `None` but only reaches this
+///   rule if it lowers pnl below zero; while pnl stays `>= 0` it keeps the record.
+/// The merge is commutative and idempotent, so the result over one K/F refresh does not depend on
+/// the order of its negative entries (spec req 27), and it never names a domain that did not
+/// realize part of the loss (spec req 5).
+#[inline]
+pub fn loss_provenance_after_pnl(
+    old: LossProvenanceV16,
+    old_pnl: i128,
+    new_pnl: i128,
+    loss_domain: Option<usize>,
+    multi_leg: bool,
+) -> LossProvenanceV16 {
+    let old = effective_loss_provenance(old, old_pnl);
+    if new_pnl >= old_pnl {
+        return if new_pnl >= 0 && !multi_leg { LossProvenanceV16::None } else { old };
+    }
+    let source = match loss_domain {
+        Some(d) => LossProvenanceV16::Domain(d),
+        None if new_pnl >= 0 => return old,
+        None => LossProvenanceV16::Unattributable,
+    };
+    match old {
+        LossProvenanceV16::None => source,
+        o if o == source => o,
+        _ => LossProvenanceV16::Unattributable,
+    }
+}
+
+#[cfg(kani)]
+pub fn kani_loss_provenance_after_pnl(
+    old: LossProvenanceV16,
+    old_pnl: i128,
+    new_pnl: i128,
+    loss_domain: Option<usize>,
+    multi_leg: bool,
+) -> LossProvenanceV16 {
+    loss_provenance_after_pnl(old, old_pnl, new_pnl, loss_domain, multi_leg)
+}
+
+/// What a liquidation close does with the account's bankruptcy residual.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiquidationResidualChargeV16 {
+    /// Close risk only: no fee, no insurance, no B-booking (the deficit stays on the account).
+    ReduceOnly,
+    /// Run the waterfall (principal -> this loss domain's insurance -> B on its winners' side).
+    Charge(usize),
+    /// No single domain may be charged and no risk is left to reduce: declare Recovery.
+    Recovery,
+}
+
+/// GH#292 + #299 (path 2b): who pays a liquidation's bankruptcy residual. Pure, a Kani target.
+/// - Unlocked: the closed leg's own loss domain (the unchanged single-asset path).
+/// - Locked, the loss on record was realized by ONE loss domain `d`: the close that fully closes
+///   `d`'s own leg charges `d`, whatever other legs remain (its winners are still present, so the
+///   charge cannot depend on whether the caller closed that leg first or last). A close that
+///   leaves the account flat after `d`'s leg is already gone charges `d` too. Every other close
+///   is reduce-only.
+/// - Locked, unattributable (or no record): reduce-only while risk remains; the close that leaves
+///   the account flat declares Recovery (no invented attribution, no pooled insurance).
+/// The charged domain is never chosen by the caller: it is the recorded `d` or the unlocked
+/// account's single leg (spec req 5, 27).
+#[inline]
+pub fn liquidation_residual_charge(
+    locked: bool,
+    provenance: LossProvenanceV16,
+    closed_leg_loss_domain: usize,
+    closes_leg_fully: bool,
+    flat_after_close: bool,
+) -> LiquidationResidualChargeV16 {
+    if !locked {
+        return LiquidationResidualChargeV16::Charge(closed_leg_loss_domain);
+    }
+    match provenance {
+        LossProvenanceV16::Domain(d)
+            if flat_after_close || (closes_leg_fully && d == closed_leg_loss_domain) =>
+        {
+            LiquidationResidualChargeV16::Charge(d)
+        }
+        LossProvenanceV16::Domain(_) => LiquidationResidualChargeV16::ReduceOnly,
+        LossProvenanceV16::None | LossProvenanceV16::Unattributable if flat_after_close => {
+            LiquidationResidualChargeV16::Recovery
+        }
+        LossProvenanceV16::None | LossProvenanceV16::Unattributable => {
+            LiquidationResidualChargeV16::ReduceOnly
+        }
+    }
+}
+
+#[cfg(kani)]
+pub fn kani_liquidation_residual_charge(
+    locked: bool,
+    provenance: LossProvenanceV16,
+    closed_leg_loss_domain: usize,
+    closes_leg_fully: bool,
+    flat_after_close: bool,
+) -> LiquidationResidualChargeV16 {
+    liquidation_residual_charge(
+        locked,
+        provenance,
+        closed_leg_loss_domain,
+        closes_leg_fully,
+        flat_after_close,
+    )
 }
 
 #[cfg(kani)]
@@ -6048,6 +6243,10 @@ impl<'a> PortfolioV16View<'a> {
         if liquidation_lock && pnl >= 0 {
             return Err(V16Error::InvalidLeg);
         }
+        validate_loss_provenance_for_market(
+            self.header.loss_provenance.get(),
+            v16_domain_count_for_market_slots(market.header.config.max_market_slots.get())?,
+        )?;
         if self.header.reserved_pnl.get() > pnl.max(0) as u128 {
             return Err(V16Error::InvalidLeg);
         }
@@ -10016,6 +10215,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if liquidation_lock && pnl >= 0 {
             return Err(V16Error::InvalidLeg);
         }
+        validate_loss_provenance_for_market(
+            account.header.loss_provenance.get(),
+            self.configured_domain_count()?,
+        )?;
         if account.header.reserved_pnl.get() > pnl.max(0) as u128 {
             return Err(V16Error::InvalidLeg);
         }
@@ -14622,7 +14825,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         new_pnl: i128,
     ) -> V16Result<()> {
-        self.set_account_pnl_inner(account, new_pnl, None, 0)
+        self.set_account_pnl_inner(account, new_pnl, None, 0, None)
+    }
+
+    /// A pnl write that books a single leg's realized loss: `loss_domain` is that leg's loss
+    /// domain (`insurance_domain_index(asset, leg.side)`), recorded as the loss provenance (#299).
+    fn set_account_pnl_for_loss(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        new_pnl: i128,
+        loss_domain: Option<usize>,
+    ) -> V16Result<()> {
+        self.set_account_pnl_inner(account, new_pnl, None, 0, loss_domain)
     }
 
     fn set_account_pnl_with_source(
@@ -14632,7 +14846,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         source_domain: usize,
     ) -> V16Result<()> {
         self.domain_asset_side(source_domain)?;
-        self.set_account_pnl_inner(account, new_pnl, Some(source_domain), 0)
+        self.set_account_pnl_inner(account, new_pnl, Some(source_domain), 0, None)
     }
 
     fn set_account_pnl_after_source_claim_burn(
@@ -14640,8 +14854,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         new_pnl: i128,
         source_face_burn_num: u128,
+        loss_domain: Option<usize>,
     ) -> V16Result<()> {
-        self.set_account_pnl_inner(account, new_pnl, None, source_face_burn_num)
+        self.set_account_pnl_inner(account, new_pnl, None, source_face_burn_num, loss_domain)
     }
 
     fn set_account_pnl_after_domain_first_source_claim_burn(
@@ -14649,6 +14864,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         new_pnl: i128,
         source_domain: usize,
+        loss_domain: Option<usize>,
     ) -> V16Result<()> {
         let old_pos = account.header.pnl.get().max(0) as u128;
         let new_pos = new_pnl.max(0) as u128;
@@ -14661,7 +14877,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             source_domain,
             decrease_num,
         )?;
-        self.set_account_pnl_after_source_claim_burn(account, new_pnl, decrease_num)
+        self.set_account_pnl_after_source_claim_burn(account, new_pnl, decrease_num, loss_domain)
     }
 
     /// Grants source-attributed positive PnL to an account — the first-class
@@ -14701,16 +14917,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account.validate_with_market(&self.as_view())
     }
 
+    /// Runs on every pnl write, before `pnl` is stored: maintains the unattributed-loss lock and
+    /// (#299, 2b) the loss provenance. `loss_domain` is the loss domain of the leg whose realized
+    /// loss this write books, `None` when the write is not a single leg's loss.
     fn sync_unattributed_loss_lock(
         account: &mut PortfolioV16ViewMut<'_>,
         new_pnl: i128,
+        loss_domain: Option<usize>,
     ) -> V16Result<()> {
         let was_locked = decode_bool(account.header.liquidation_lock)?;
+        let active_bitmap = account.header.active_bitmap.map(V16PodU64::get);
         account.header.liquidation_lock = encode_bool(unattributed_loss_lock_after_pnl(
             was_locked,
-            account.header.active_bitmap.map(V16PodU64::get),
+            active_bitmap,
             new_pnl,
         ));
+        let provenance = loss_provenance_after_pnl(
+            decode_loss_provenance(account.header.loss_provenance.get())?,
+            account.header.pnl.get(),
+            new_pnl,
+            loss_domain,
+            active_bitmap_count_ones(active_bitmap) > 1,
+        );
+        account.header.loss_provenance = V16PodU32::new(encode_loss_provenance(provenance)?);
         Ok(())
     }
 
@@ -14720,6 +14949,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         new_pnl: i128,
         source_domain: Option<usize>,
         preburned_source_claim_num: u128,
+        loss_domain: Option<usize>,
     ) -> V16Result<()> {
         validate_non_min_i128(new_pnl)?;
         let old_pos = account.header.pnl.get().max(0) as u128;
@@ -14836,7 +15066,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             _ => {}
         }
-        Self::sync_unattributed_loss_lock(account, new_pnl)?;
+        Self::sync_unattributed_loss_lock(account, new_pnl, loss_domain)?;
         account.header.pnl = V16PodI128::new(new_pnl);
         account.header.health_cert.valid = 0;
         Ok(())
@@ -14870,8 +15100,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         loss_abs: u128,
+        realized_by: Option<usize>,
     ) -> V16Result<SupportLossApplicationV16> {
-        self.apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(account, loss_abs, None)
+        self.apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(
+            account,
+            loss_abs,
+            None,
+            realized_by,
+        )
     }
 
     /// Atoms of the account's source-claim face that is neither liened nor impaired, summed over
@@ -14976,12 +15212,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// `loss_domain` is the source domain the caller books the settled loss into afterwards
     /// (`reserve_new_capital_backed_loss_for_source_domain_not_atomic`); `None` for callers that
-    /// do not book (forfeit, kani shims).
+    /// do not book (forfeit, kani shims). `realized_by` is the loss domain of the leg that realized
+    /// the loss, recorded as the account's loss provenance (#299); `None` only for shims with no leg.
     fn apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         loss_abs: u128,
         loss_domain: Option<usize>,
+        realized_by: Option<usize>,
     ) -> V16Result<SupportLossApplicationV16> {
         if loss_abs == 0 {
             return Ok(SupportLossApplicationV16 {
@@ -14998,7 +15236,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .get()
                 .checked_sub(loss_i128)
                 .ok_or(V16Error::ArithmeticOverflow)?;
-            self.set_account_pnl(account, new_pnl)?;
+            self.set_account_pnl_for_loss(account, new_pnl, realized_by)?;
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
                 junior_face_burned: 0,
@@ -15089,7 +15327,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .get()
                 .min(new_pnl.max(0) as u128),
         );
-        self.set_account_pnl_after_source_claim_burn(account, new_pnl, preburned_source_claim_num)?;
+        self.set_account_pnl_after_source_claim_burn(
+            account,
+            new_pnl,
+            preburned_source_claim_num,
+            realized_by,
+        )?;
         Ok(SupportLossApplicationV16 {
             support_consumed,
             junior_face_burned,
@@ -15110,7 +15353,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             });
         }
         if delta < 0 {
-            return self.apply_haircut_bounded_close_loss_to_pnl(account, delta.unsigned_abs());
+            // Only the kani/fuzz shim applies a negative delta here (no leg): unattributable.
+            return self.apply_haircut_bounded_close_loss_to_pnl(account, delta.unsigned_abs(), None);
         }
         if account.header.pnl.get() >= 0 {
             if source_domain.is_none()
@@ -15954,6 +16198,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let support = self.apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(
                     account,
                     prepared.net.unsigned_abs(),
+                    Some(source_domain),
                     Some(source_domain),
                 )?;
                 let negative_after = account.header.pnl.get().min(0).unsigned_abs();
@@ -16911,7 +17156,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         let source_domain = self.insurance_domain_index(asset_index, opposite_side(leg.side))?;
-        self.set_account_pnl_after_domain_first_source_claim_burn(account, new_pnl, source_domain)?;
+        // the B loss is realized by this leg: its own loss domain is the provenance (#299)
+        let loss_domain = self.insurance_domain_index(asset_index, leg.side)?;
+        self.set_account_pnl_after_domain_first_source_claim_burn(
+            account,
+            new_pnl,
+            source_domain,
+            Some(loss_domain),
+        )?;
         if chunk.remaining_after != 0 {
             self.mark_account_b_stale(account)?;
         } else if !Self::has_b_stale_leg(&account.as_view())? {
@@ -21353,44 +21605,109 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )? {
             return Err(V16Error::LockActive);
         }
-        // A multi-asset deficit has no safe per-domain attribution in the
-        // account-global PnL scalar. Permissionless liquidation can still remove
-        // bounded risk, but it must not consume insurance or book B against the
-        // selected surviving asset.
-        if decode_bool(account.header.liquidation_lock)? {
-            self.reduce_position(account, request.asset_index, close_q)?;
-            self.certify_account_after_local_settlement_with_price_override(account, None)?;
-            self.begin_zero_oi_residue_resets(request.asset_index)?;
-            self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
-            self.validate_shape_audit_scan()?;
-            self.validate_account_audit_scan(&account.as_view())?;
-            return Ok(LiquidationOutcomeV16 {
-                closed_q: close_q,
-                insurance_used: 0,
-                residual_booked: 0,
-                explicit_loss: 0,
-                fee_charged: 0,
-            });
-        }
         let remaining_active_bitmap = liquidation_remaining_active_bitmap_after_close(
             account.header.active_bitmap.map(V16PodU64::get),
             leg_slot,
             close_q,
             account_effective_q,
         )?;
-        if uncovered_loss_remains_with_open_risk(
-            account.header.pnl.get(),
-            account.header.capital.get(),
-            remaining_active_bitmap,
-        ) {
+        // A multi-asset deficit has no safe per-domain attribution in the
+        // account-global PnL scalar. While the account still holds open risk after
+        // this close, permissionless liquidation only removes bounded risk: it must
+        // not consume insurance or book B against the selected surviving asset
+        // (pinned by `v16_liquidation_of_unattributed_deficit_reduces_risk_without_
+        // charging_the_surviving_domain`, 6d8e0a48).
+        //
+        // GH#292: the close that leaves the account FLAT is different. There is no
+        // risk left to protect, and returning early here stranded the deficit for
+        // ever (nothing writes the pnl again, so `negative_pnl_account_count` never
+        // decrements and `bankruptcy_hlock_active`, a group-wide withdrawal gate,
+        // never clears). That close therefore falls through to the unlocked body
+        // below and is RESOLVED IN THE LIVE MARKET: principal, then domain
+        // insurance, then the B-booking onto the loss-bearing side (in a vault-LP
+        // market that side is the vault LP, so the loss lands on the junior then the
+        // Earn seniors). Recovery is declared only when that cannot cover the deficit
+        // in one step (`preflight_liquidation_residual_durability`). The pnl reaches
+        // 0, which also clears the lock.
+        //
+        // #299 (path 2b, spec req 5 + 27): the domain charged is the LOSS DOMAIN ON
+        // RECORD (`loss_provenance`, written by the pnl write that realized each
+        // loss), never the leg the caller happens to close last, so a loss realized
+        // on asset A cannot be moved onto asset B's insurance or B-index. The charge
+        // runs at the full close of that domain's own leg, while its winners are
+        // still there to book against (closing it reduce-only first would remove
+        // them and turn the later flat close into Recovery: the close order would
+        // decide the outcome). A deficit realized by more than one loss domain has
+        // no single domain to charge: reduce-only until flat, then Recovery (no
+        // invented attribution, no pooled-insurance fallback). See
+        // `liquidation_residual_charge`.
+        let locked = decode_bool(account.header.liquidation_lock)?;
+        let closed_leg_loss_domain = self.insurance_domain_index(request.asset_index, leg.side)?;
+        let charge = liquidation_residual_charge(
+            locked,
+            effective_loss_provenance(
+                decode_loss_provenance(account.header.loss_provenance.get())?,
+                account.header.pnl.get(),
+            ),
+            closed_leg_loss_domain,
+            close_q == account_effective_q,
+            active_bitmap_is_empty(remaining_active_bitmap),
+        );
+        let charge_domain = match charge {
+            LiquidationResidualChargeV16::ReduceOnly => {
+                self.reduce_position(account, request.asset_index, close_q)?;
+                self.certify_account_after_local_settlement_with_price_override(account, None)?;
+                self.begin_zero_oi_residue_resets(request.asset_index)?;
+                self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
+                self.validate_shape_audit_scan()?;
+                self.validate_account_audit_scan(&account.as_view())?;
+                return Ok(LiquidationOutcomeV16 {
+                    closed_q: close_q,
+                    insurance_used: 0,
+                    residual_booked: 0,
+                    explicit_loss: 0,
+                    fee_charged: 0,
+                });
+            }
+            LiquidationResidualChargeV16::Recovery => {
+                self.declare_permissionless_recovery(
+                    PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+                )?;
+                return Err(V16Error::RecoveryRequired);
+            }
+            LiquidationResidualChargeV16::Charge(domain) => domain,
+        };
+        // Unlocked: a close that leaves uncovered loss beside open risk cannot progress. A locked
+        // account's charge of its recorded loss domain may leave other legs open by design.
+        if !locked
+            && uncovered_loss_remains_with_open_risk(
+                account.header.pnl.get(),
+                account.header.capital.get(),
+                remaining_active_bitmap,
+            )
+        {
+            self.declare_permissionless_recovery(
+                PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+            )?;
+            return Err(V16Error::RecoveryRequired);
+        }
+        // `(charge_asset, bankrupt_side)` replaces `(request.asset_index, leg.side)` for every
+        // charging step below (preflight, ledger, insurance, B-booking, h-lock event). Unlocked it
+        // IS the closed leg; locked it is the recorded loss domain's asset and loser side.
+        let (charge_asset, bankrupt_side) = self.domain_asset_side(charge_domain)?;
+        if charge_asset != request.asset_index
+            && self.require_asset_live_reducible(charge_asset).is_err()
+        {
+            // The loss domain's asset is terminal: it can no longer be charged in the live
+            // market, and no other domain may be charged instead.
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
             )?;
             return Err(V16Error::RecoveryRequired);
         }
         self.preflight_liquidation_residual_durability(
-            request.asset_index,
-            leg.side,
+            charge_asset,
+            bankrupt_side,
             &account.as_view(),
         )?;
         let fee_notional = liquidation_risk_notional_ceil(close_q, asset.effective_price)?;
@@ -21420,13 +21737,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if gross_bankruptcy_residual != 0 {
             self.begin_close_progress_ledger(
                 account,
-                request.asset_index,
-                opposite_side(leg.side),
+                charge_asset,
+                opposite_side(bankrupt_side),
                 gross_bankruptcy_residual,
             )?;
         }
         let insurance_used =
-            self.consume_domain_insurance_for_negative_pnl(request.asset_index, leg.side, account)?;
+            self.consume_domain_insurance_for_negative_pnl(charge_asset, bankrupt_side, account)?;
         if insurance_used != 0 {
             self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
         }
@@ -21447,8 +21764,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if residual != 0 {
             let outcome = self.book_bankruptcy_residual_chunk_for_account_core(
                 account,
-                request.asset_index,
-                leg.side,
+                charge_asset,
+                bankrupt_side,
                 residual,
             )?;
             booked = outcome.booked_loss;
@@ -21465,12 +21782,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .checked_add(cleared_i128)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             self.set_account_pnl(account, new_pnl)?;
-            self.mark_bankruptcy_hlock_event(request.asset_index, leg.side);
+            self.mark_bankruptcy_hlock_event(charge_asset, bankrupt_side);
+        }
+        if account.header.pnl.get() >= 0 {
+            // #299: the deficit the record described has been charged; its episode ends here
+            // (the multi-leg-sticky rule would otherwise carry it into the next one).
+            account.header.loss_provenance = V16PodU32::new(LOSS_PROVENANCE_NONE);
         }
         self.reduce_position(account, request.asset_index, close_q)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
         self.begin_zero_oi_residue_resets(request.asset_index)?;
-        self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
+        if locked && !active_bitmap_is_empty(remaining_active_bitmap) {
+            // #299: a locked account's charge of its loss domain at that leg's full close, with
+            // other legs still open. The risk score cannot express this progress: its first key
+            // is `|equity|` while equity < 0 but the maintenance shortfall once equity is >= 0,
+            // so resolving a small deficit beside an open leg reads as a larger "deficit". The
+            // progress is explicit instead: the bankrupt leg is gone and the deficit resolved.
+            let leg_removed = active_bitmap_count_ones(account.header.active_bitmap.map(V16PodU64::get))
+                < before_score.active_leg_count;
+            if !leg_removed || account.header.pnl.get() < 0 {
+                return Err(V16Error::NonProgress);
+            }
+        } else {
+            self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
+        }
         self.validate_shape_audit_scan()?;
         self.validate_account_audit_scan(&account.as_view())?;
         Ok(LiquidationOutcomeV16 {
@@ -22949,7 +23284,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .ok_or(V16Error::CounterUnderflow)?,
             );
         }
-        Self::sync_unattributed_loss_lock(account, new_pnl)?;
+        // principal settlement only raises pnl toward 0: never a loss, so no loss domain
+        Self::sync_unattributed_loss_lock(account, new_pnl, None)?;
         account.header.pnl = V16PodI128::new(new_pnl);
         Ok(())
     }
@@ -23898,6 +24234,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     account,
                     new_pnl,
                     preburned_source_claim_num,
+                    None,
                 )?;
             }
             ReleasedPnlConversionDispositionV16::RetainHaircutFaceForTerminalDomain {
@@ -23919,6 +24256,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     account,
                     new_pnl,
                     V16Core::bound_num_from_amount(pnl_debit)?,
+                    None,
                 )?;
             }
         }
@@ -25759,9 +26097,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if net < 0 {
             loss_settled = net.unsigned_abs();
             let negative_before = account.header.pnl.get().min(0).unsigned_abs();
-            let support = self.apply_haircut_bounded_close_loss_to_pnl(account, loss_settled)?;
-            // realized without booking (forfeit): the winners' credits no longer wait on it
             let leg_domain = self.insurance_domain_index(asset_index, leg.side)?;
+            let support =
+                self.apply_haircut_bounded_close_loss_to_pnl(account, loss_settled, Some(leg_domain))?;
+            // realized without booking (forfeit): the winners' credits no longer wait on it
             let realized_num = i128::try_from(
                 loss_settled
                     .checked_mul(BOUND_SCALE)
@@ -26642,6 +26981,11 @@ pub struct PortfolioAccountV16Account {
     pub liquidation_lock: u8,
     pub close_progress: CloseProgressLedgerV16Account,
     pub resolved_payout_receipt: ResolvedPayoutReceiptV16Account,
+    // #299 (2b): which loss domain realized the account's negative PnL (see
+    // `LOSS_PROVENANCE_NONE` / `LOSS_PROVENANCE_UNATTRIBUTABLE` for the u32 encoding). Read only
+    // by a locked account's flat liquidation close, which charges this domain instead of the
+    // closed leg's. Appended last so no earlier field offset moves.
+    pub loss_provenance: V16PodU32,
 }
 
 // Compile-time layout guard: any change to the PortfolioAccountV16Account Pod
@@ -26650,7 +26994,7 @@ pub struct PortfolioAccountV16Account {
 // Gated to non-kani: under `cfg(kani)` PORTFOLIO_SOURCE_DOMAIN_CAP is reduced for
 // proof tractability, so the production on-chain layout is the non-kani one.
 #[cfg(not(kani))]
-const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 10459);
+const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 10463);
 
 impl Default for PortfolioAccountV16Account {
     fn default() -> Self {
@@ -26697,6 +27041,7 @@ impl PortfolioAccountV16Account {
         self.liquidation_lock = encode_bool(false);
         self.close_progress = CloseProgressLedgerV16Account::default();
         self.resolved_payout_receipt = ResolvedPayoutReceiptV16Account::default();
+        self.loss_provenance = V16PodU32::new(LOSS_PROVENANCE_NONE);
         Ok(())
     }
 
