@@ -68,6 +68,10 @@ pub use v16::{
     bankruptcy_hlock_mark_unattributed, canonical_accrual_price_step_v16,
     canonical_band_accrual_price_step_v16, repay_pnl_postconditions_hold, v16_domain_count_for_market_slots,
     v16_domain_pair_for_asset_index, validate_bankruptcy_hlock_wire, AccrualStepV16,
+    // #299 (2b) loss provenance wire + attribution rules
+    decode_loss_provenance, effective_loss_provenance, encode_loss_provenance,
+    liquidation_residual_charge, loss_provenance_after_pnl, LiquidationResidualChargeV16,
+    LossProvenanceV16, LOSS_PROVENANCE_NONE, LOSS_PROVENANCE_UNATTRIBUTABLE,
     AccrueAssetOutcomeV16, ActionableSummaryV16, AdlWindDownBoundV16, AdlWindDownOutcomeV16,
     AdlWindDownRequestV16, KfDriftSideV16, KfDriftSideV16Account, AssetLifecycleV16, AssetStateV16, AssetStateV16Account,
     AutoCrankObservationV16, AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankResultV16,
