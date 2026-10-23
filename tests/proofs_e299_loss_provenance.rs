@@ -57,6 +57,8 @@ fn proof_e299_loss_merge_is_order_independent() {
         multi,
     );
     assert_eq!(first, second);
+    kani::cover!(matches!(first, LossProvenanceV16::Domain(_)), "attributed after two losses");
+    kani::cover!(first == LossProvenanceV16::Unattributable && d1 != d2, "two domains merge");
 }
 
 /// Req 5: a loss write never makes the record name a domain other than the one that realized it,
@@ -70,6 +72,7 @@ fn proof_e299_record_never_names_a_non_realizing_domain() {
     let multi: bool = kani::any();
     if let LossProvenanceV16::Domain(x) = kani_loss_provenance_after_pnl(old, p0, p1, Some(d), multi) {
         assert_eq!(x, d);
+        kani::cover!(true, "a loss write attributes");
     }
     if p1 < 0 {
         assert!(!matches!(
@@ -101,7 +104,9 @@ fn proof_e299_gain_keeps_or_clears_the_record() {
     let r = kani_loss_provenance_after_pnl(old, p0, p1, d, multi);
     if p1 >= 0 && !multi {
         assert_eq!(r, LossProvenanceV16::None);
+        kani::cover!(old != LossProvenanceV16::None, "single-leg gain clears a record");
     } else {
+        kani::cover!(p1 >= 0 && multi && matches!(old, LossProvenanceV16::Domain(_)), "multi-leg gain keeps a record");
         assert_eq!(r, effective_loss_provenance(old, p0));
     }
 }
@@ -134,6 +139,8 @@ fn proof_e299_multi_leg_record_ignores_gain_interleaving() {
     let r3 = f(f(f(old, p0, z1, None), z1, z2, Some(d1)), z2, x3, Some(d2));
     assert_eq!(r1, r2);
     assert_eq!(r1, r3);
+    kani::cover!(matches!(r1, LossProvenanceV16::Domain(_)) && x2 >= 0, "gain crossed zero, still attributed");
+    kani::cover!(r1 == LossProvenanceV16::Unattributable && x2 >= 0 && old == LossProvenanceV16::None, "gain crossed zero, two losers");
 }
 
 /// The charge decision. Locked: a charge names exactly the recorded domain, never the closed leg
@@ -156,6 +163,7 @@ fn proof_e299_locked_charge_is_the_record_or_nothing() {
     match (p, r1) {
         (_, LiquidationResidualChargeV16::Charge(c)) => {
             assert_eq!(p, LossProvenanceV16::Domain(c));
+            kani::cover!(c != c1 || !full1, "locked charge of a domain other than the closed full leg");
         }
         (LossProvenanceV16::Domain(_), LiquidationResidualChargeV16::Recovery) => {
             panic!("an attributed deficit never routes to Recovery from the decision");
@@ -178,4 +186,5 @@ fn proof_e299_provenance_wire_round_trip() {
     let raw: u32 = kani::any();
     let p = decode_loss_provenance(raw).unwrap();
     assert_eq!(encode_loss_provenance(p), Ok(raw));
+    kani::cover!(matches!(p, LossProvenanceV16::Domain(_)), "attributed raw");
 }
