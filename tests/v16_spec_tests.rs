@@ -15933,23 +15933,6 @@ fn gh292_drive<R>(
     f(&mut market, &short, cleared)
 }
 
-/// BAD-STATE REPRO (green on fd654cec + #301, red on any fix): the account ends flat with
-/// capital 0 and pnl < 0, the lock and the counter never release, the market stays Live, and no
-/// public step clears the group-wide h-lock.
-#[test]
-fn gh292_repro_flat_locked_deficit_latches_hlock_in_live_market() {
-    gh292_drive(|market, short, cleared| {
-        assert!(active_bitmap_is_empty(short.header.active_bitmap.map(V16PodU64::get)), "flat");
-        assert_eq!(short.header.capital.get(), 0);
-        assert_eq!(short.header.pnl.get(), -250);
-        assert_eq!(short.header.liquidation_lock, 1);
-        assert_eq!(market.header.negative_pnl_account_count.get(), 1);
-        assert_eq!(market.header.bankruptcy_hlock_active, 1);
-        assert_eq!(market.header.mode, 0, "still Live: no Recovery was declared");
-        assert!(!cleared, "try_clear refuses: negative_pnl_account_count != 0");
-    });
-}
-
 /// PROPERTY (red on fd654cec + #301, green on a fix): in a Live market the locked flat deficit
 /// does not latch. Either the deficit was resolved (pnl >= 0, counter 0, h-lock clearable) or the
 /// market transitioned to Recovery with a recorded reason.
