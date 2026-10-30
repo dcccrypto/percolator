@@ -21359,6 +21359,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
             self.validate_shape_audit_scan()?;
             self.validate_account_audit_scan(&account.as_view())?;
+            // GH#292 variant (d): the close may have left the account flat with the deficit
+            // unresolved; recognise it account-locally (no domain is charged).
+            if self.resolve_flat_unattributed_deficit_locally(account)? {
+                self.validate_account_audit_scan(&account.as_view())?;
+            }
             return Ok(LiquidationOutcomeV16 {
                 closed_q: close_q,
                 insurance_used: 0,
@@ -23067,6 +23072,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// GH#292 variant (d). A LIVE account that is flat, holds no capital, carries a negative PnL
+    /// under the unattributed-loss lock and has no open close ledger can no longer be liquidated
+    /// and cannot be attributed to any asset domain. Its deficit is recognised ACCOUNT-LOCALLY:
+    /// the PnL is set to zero (the same wind-down `clear_resolved_unattributed_negative_pnl`
+    /// applies at resolution, upstream 228d9b3f), which releases `negative_pnl_account_count` and
+    /// the lock. No value moves: vault, `C_tot`, insurance and every domain's B/K/F are untouched,
+    /// so no domain, LP or insurer is charged; the winners' positive claims are exactly as before
+    /// and stay bounded by realizable backing (they absorb the shortfall as an unrealized claim,
+    /// as at resolution). The group h-lock stays armed (unattributed) and clears through the
+    /// ordinary `try_clear_bankruptcy_hlock_if_healthy` once the other conjuncts hold.
+    fn resolve_flat_unattributed_deficit_locally(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<bool> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live
+            || account.header.pnl.get() >= 0
+            || account.header.capital.get() != 0
+            || !decode_bool(account.header.liquidation_lock)?
+            || !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
+            || account
+                .header
+                .close_progress
+                .try_to_runtime()?
+                .has_pending_residual()
+        {
+            return Ok(false);
+        }
+        self.mark_bankruptcy_hlock_unattributed();
+        self.set_account_pnl(account, 0)?;
+        account.header.health_cert.valid = 0;
+        self.try_clear_bankruptcy_hlock_if_healthy()?;
+        Ok(true)
+    }
+
     fn settle_negative_pnl_from_principal_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -23093,6 +23132,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             pnl,
         )?;
         if paid == 0 {
+            // GH#292 variant (d): a flat, zero-capital account whose deficit is unattributed
+            // (locked, no open close ledger) has no domain to charge and nothing to liquidate.
+            // Recognise the deficit account-locally instead of leaving the counter armed forever.
+            if self.resolve_flat_unattributed_deficit_locally(account)? {
+                return Ok(0);
+            }
             self.mark_bankruptcy_hlock_for_account(&account.as_view())?;
             return Ok(0);
         }
