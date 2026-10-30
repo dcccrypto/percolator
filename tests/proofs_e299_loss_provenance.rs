@@ -165,8 +165,8 @@ fn proof_e299_locked_charge_is_the_record_or_nothing() {
             assert_eq!(p, LossProvenanceV16::Domain(c));
             kani::cover!(c != c1 || !full1, "locked charge of a domain other than the closed full leg");
         }
-        (LossProvenanceV16::Domain(_), LiquidationResidualChargeV16::Recovery) => {
-            panic!("an attributed deficit never routes to Recovery from the decision");
+        (LossProvenanceV16::Domain(_), LiquidationResidualChargeV16::WriteOff) => {
+            panic!("an attributed deficit never routes to a write-off from the decision");
         }
         _ => {}
     }
@@ -187,4 +187,41 @@ fn proof_e299_provenance_wire_round_trip() {
     let p = decode_loss_provenance(raw).unwrap();
     assert_eq!(encode_loss_provenance(p), Ok(raw));
     kani::cover!(matches!(p, LossProvenanceV16::Domain(_)), "attributed raw");
+}
+
+/// GH#292: the latch cannot be CREATED by the decision. Whatever the record, a locked close that
+/// leaves the account flat is never `ReduceOnly` (the branch that used to return Ok with the
+/// deficit untouched): it is `Charge(d)` (recorded domain only) or `WriteOff` (b-prime; never Recovery).
+#[kani::proof]
+fn proof_gh292_locked_flat_close_never_reduce_only() {
+    let rec = any_record();
+    let closed_domain = kani::any::<u8>() as usize;
+    let full: bool = kani::any();
+    let out = kani_liquidation_residual_charge(true, rec, closed_domain, full, true);
+    assert!(out != LiquidationResidualChargeV16::ReduceOnly);
+    match (rec, out) {
+        (LossProvenanceV16::Domain(d), LiquidationResidualChargeV16::Charge(c)) => assert_eq!(c, d),
+        (LossProvenanceV16::Domain(_), _) => assert!(false),
+        (_, o) => assert_eq!(o, LiquidationResidualChargeV16::WriteOff),
+    }
+    kani::cover!(matches!(out, LiquidationResidualChargeV16::Charge(_)), "flat close charges recorded domain");
+    kani::cover!(out == LiquidationResidualChargeV16::WriteOff, "flat close with no attribution is written off (no Recovery)");
+}
+
+/// b-prime: the decision never declares Recovery for ANY input (the enum has no such arm), and a
+/// write-off is only ever chosen for a locked close that leaves the account flat with no single
+/// recorded domain.
+#[kani::proof]
+fn proof_gh292_bprime_writeoff_only_for_locked_flat_unattributable() {
+    let rec = any_record();
+    let locked: bool = kani::any();
+    let flat: bool = kani::any();
+    let full: bool = kani::any();
+    let closed_domain = kani::any::<u8>() as usize;
+    let out = kani_liquidation_residual_charge(locked, rec, closed_domain, full, flat);
+    if out == LiquidationResidualChargeV16::WriteOff {
+        assert!(locked && flat);
+        assert!(!matches!(rec, LossProvenanceV16::Domain(_)));
+    }
+    kani::cover!(out == LiquidationResidualChargeV16::WriteOff, "write-off reachable");
 }

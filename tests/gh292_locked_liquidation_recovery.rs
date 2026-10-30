@@ -599,12 +599,13 @@ fn e299_liquidator_cannot_steer_a0_loss_onto_a1_insurance() {
 }
 
 /// Squid's original fixture: both assets fall, so the deficit was realized by two loss domains.
-/// There is no single domain to charge; in either order the first close is reduce-only and the
-/// flat close declares Recovery, consuming no insurance (even with both domains insured) and
-/// booking nothing (no invented attribution, no pooled insurance). #293's own test asserted
-/// Recovery for this state.
+/// There is no single domain to charge; in either order the first close is reduce-only. b-prime:
+/// the flat close does NOT declare Recovery (that is what Toly's 4bf0a98f removed: a permissionless
+/// asset could force market-wide Recovery). It reduces the last leg and recognises the deficit
+/// account-locally: no insurance consumed (even with both domains insured), nothing booked to any
+/// B index, pnl -> 0, counter and lock released, market stays Live.
 #[test]
-fn e299_two_domain_deficit_is_unattributable_and_declares_recovery() {
+fn e299_two_domain_deficit_is_unattributable_and_is_written_off_not_recovered() {
     for first in [0usize, 1] {
         let mut l = latch(
             260_000,
@@ -618,16 +619,14 @@ fn e299_two_domain_deficit_is_unattributable_and_declares_recovery() {
         let reduce = close(&mut l, first).expect("first close is reduce-only");
         assert_eq!((reduce.insurance_used, reduce.residual_booked, reduce.fee_charged), (0, 0, 0));
         assert_eq!(l.w.header.mode, 0, "no Recovery while risk remains");
-        let out = close(&mut l, 1 - first);
-        assert!(
-            matches!(out, Err(V16Error::RecoveryRequired)),
-            "first={first}: unattributable deficit must escalate, got {:?}",
-            out.as_ref().map(|o| (o.insurance_used, o.residual_booked)).map_err(|e| format!("{e:?}"))
-        );
-        assert_eq!(l.w.header.mode, 2, "Recovery declared");
+        let out = close(&mut l, 1 - first).expect("b-prime: the flat close succeeds, no Recovery");
+        assert_eq!((out.insurance_used, out.residual_booked, out.fee_charged), (0, 0, 0));
+        assert_eq!(l.w.header.mode, 0, "market stays Live");
         assert_eq!(l.w.header.insurance.get(), before.insurance, "no insurance consumed");
         assert_eq!((b_total(&l.w, 0), b_total(&l.w, 1)), (before.a0_b, before.a1_b), "nothing booked");
-        assert_eq!(l.w.accounts[0].pnl.get().unsigned_abs(), l.deficit, "deficit untouched");
+        assert_eq!(l.w.accounts[0].pnl.get(), 0, "deficit recognised account-locally");
+        assert_eq!(l.w.accounts[0].liquidation_lock, 0);
+        assert_eq!(l.w.header.negative_pnl_account_count.get(), 0, "counter released: no latch");
     }
 }
 
