@@ -1,109 +1,91 @@
-//! GH#292 formal evidence (Kani). Scope is deliberately narrow and honest:
+//! GH#292 formal evidence (Kani), kernel level. Scope is deliberately narrow and honest.
 //!
-//! * `proof_gh292_stuck_state_is_absorbing_under_every_permissionless_step` shows that the
-//!   latched state (Live, flat account, capital 0, pnl < 0, `liquidation_lock`, counter 1,
-//!   hlock active) is a FIXED POINT of every public permissionless step: `try_clear` refuses and
-//!   no step moves the account pnl, the counter, the lock or the hlock. Only the owner funding
-//!   the account (deposit) or an explicit market resolution leaves the state; both are excluded
-//!   from the op set on purpose and named in the report.
-//! * `proof_gh292_locked_liquidation_leaves_flat_deficit_without_resolution` shows the step INTO
-//!   the state: from a locked cross-margin account with one leg left, the locked liquidation
-//!   branch returns Ok and leaves it flat with the deficit untouched.
-//! * Reachability from an empty market is the native test
-//!   `gh292_repro_flat_locked_deficit_latches_hlock_in_live_market` (real trades and accruals).
+//! Whole-engine harnesses (the stuck state under every public step) were attempted and do not
+//! finish: CBMC needs unwinding of the memcmp/copies over the ~10 KB account and header structs
+//! (unwinding-assertion failures at unwind 4, 10, 40; 25 min timeouts at unwind 260). The proof
+//! therefore covers the two kernels that CREATE and HOLD the bad state; the whole-engine
+//! reachability is the native test `gh292_repro_flat_locked_deficit_latches_hlock_in_live_market`
+//! (real trades and accruals, green on the buggy base, red on every fix).
+//!
+//! 1. `proof_gh292_locked_flat_close_is_not_flagged_by_any_escalation_predicate`: a liquidation
+//!    close that removes the account's last leg leaves an uncovered loss (pnl < 0 after principal)
+//!    WITHOUT being flagged by `uncovered_loss_remains_with_open_risk`, the only predicate the
+//!    liquidation path uses to escalate. The locked branch returns before the waterfall, so a
+//!    flat close with a deficit has no exit through that function (cover: capital 0, pnl < 0).
+//! 2. `proof_gh292_lock_is_held_on_a_flat_deficit_and_released_only_by_repayment`: once locked, a
+//!    flat account keeps `liquidation_lock` for every pnl < 0 and releases it only at pnl >= 0
+//!    (exactness + stickiness of 9b737fdc, specialised to the flat case), so the account-local
+//!    half of the latch (lock + `negative_pnl_account_count`, which counts pnl < 0 accounts) has no
+//!    kernel that resets it without the owner depositing or an explicit resolution.
 #![cfg(kani)]
 
 use percolator::{
-    active_bitmap_is_empty, AutoCrankWorkV16, EngineAssetSlotV16Account, LiquidationRequestV16,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, V16Config, V16PodI128,
-    V16PodU128, V16PodU64,
+    kani_active_bitmap_set as active_bitmap_set, kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
+    kani_uncovered_loss_strands_a_flat_account, kani_unattributed_loss_lock_after_pnl,
+    V16_EMPTY_ACTIVE_BITMAP,
 };
 
-fn stuck_fixture(
-    deficit: u128,
-) -> (
-    MarketGroupV16HeaderAccount,
-    [Market<u64>; 1],
-    PortfolioAccountV16Account,
-) {
-    let market_id = [1u8; 32];
-    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
-    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
-    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    {
-        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
-    }
-    let mut id = [0u8; 32];
-    id[0] = 2;
-    let mut account = PortfolioAccountV16Account::try_empty(ProvenanceHeaderV16Account::from_runtime(
-        &ProvenanceHeaderV16::new(market_id, id, id),
-    ))
+#[kani::proof]
+#[kani::unwind(8)]
+fn proof_gh292_locked_flat_close_is_not_flagged_by_any_escalation_predicate() {
+    let pnl: i128 = kani::any();
+    let capital: u128 = kani::any();
+    let leg_abs_q: u128 = kani::any();
+    kani::assume(pnl < 0 && pnl > i128::MIN);
+    kani::assume(leg_abs_q > 0);
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    active_bitmap_set(&mut bitmap, 0).unwrap();
+    // Close the only leg fully: the account is flat afterwards.
+    let flagged = kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
+        pnl, capital, bitmap, 0, leg_abs_q, leg_abs_q,
+    )
     .unwrap();
-    // The state the #292 liquidation leaves behind.
-    account.pnl = V16PodI128::new(-(deficit as i128));
-    account.liquidation_lock = 1;
-    header.negative_pnl_account_count = V16PodU64::new(1);
-    header.bankruptcy_hlock_active = 1;
-    (header, markets, account)
+    assert!(!flagged);
+    kani::cover!(capital == 0, "zero capital, pnl < 0, flat after the close: deficit stranded");
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
-fn proof_gh292_stuck_state_is_absorbing_under_every_permissionless_step() {
-    let deficit: u128 = kani::any();
-    kani::assume(deficit >= 1 && deficit <= 1_000_000_000);
-    let (mut header, mut markets, mut account_h) = stuck_fixture(deficit);
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_h);
-    // Precondition: it is a valid reachable-shape state (the native test reaches it by trades).
-    kani::assume(account.as_view().validate_with_market(&market.as_view()).is_ok());
-    assert!(active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get)));
-    assert_eq!(account.header.capital.get(), 0);
+#[kani::unwind(8)]
+fn proof_gh292_lock_is_held_on_a_flat_deficit_and_released_only_by_repayment() {
+    let new_pnl: i128 = kani::any();
+    let flat = V16_EMPTY_ACTIVE_BITMAP;
+    let locked_after = kani_unattributed_loss_lock_after_pnl(true, flat, new_pnl);
+    assert_eq!(locked_after, new_pnl < 0);
+    kani::cover!(new_pnl < 0 && locked_after, "flat locked deficit keeps the lock");
+    kani::cover!(new_pnl >= 0 && !locked_after, "repayment releases it");
+}
 
-    let op: u8 = kani::any();
-    let slot = market.header.current_slot.get();
-    let mut ok = false;
-    match op % 5 {
-        0 => {
-            // try_clear alone: must refuse (counter != 0).
-            ok = true;
-            assert_eq!(market.try_clear_bankruptcy_hlock_not_atomic(), Ok(false));
-        }
-        1 => ok = market.full_account_refresh_not_atomic(&mut account).is_ok(),
-        2 => {
-            ok = market
-                .permissionless_auto_crank_not_atomic(
-                    &mut account,
-                    AutoCrankWorkV16 {
-                        now_slot: slot,
-                        observations: &[],
-                        resolved_close_fee_rate_per_slot: 0,
-                    },
-                )
-                .is_ok()
-        }
-        3 => {
-            ok = market
-                .liquidate_account_not_atomic(&mut account, LiquidationRequestV16 { asset_index: 0 })
-                .is_ok()
-        }
-        _ => {
-            let amount: u128 = kani::any();
-            ok = market.withdraw_not_atomic(&mut account, amount).is_ok()
-        }
+/// Variant (a): the two predicates partition "uncovered loss after a liquidation close": with open
+/// risk left it is `uncovered_loss_remains_with_open_risk` (-> Recovery), flat it is
+/// `uncovered_loss_strands_a_flat_account` (-> Recovery). So no close outcome with an uncovered
+/// loss is left unflagged (the base leaves the flat case silent).
+#[kani::proof]
+#[kani::unwind(8)]
+fn proof_gh292_a_every_uncovered_close_outcome_is_escalated() {
+    let pnl: i128 = kani::any();
+    let capital: u128 = kani::any();
+    kani::assume(pnl > i128::MIN);
+    let leg_abs_q: u128 = kani::any();
+    kani::assume(leg_abs_q > 0);
+    let two = kani::any::<bool>();
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    active_bitmap_set(&mut bitmap, 0).unwrap();
+    if two {
+        active_bitmap_set(&mut bitmap, 1).unwrap();
     }
-    kani::cover!(ok && op % 5 == 1, "refresh succeeds on the stuck state");
-    kani::cover!(ok && op % 5 == 2, "auto-crank succeeds on the stuck state");
-    if ok {
-        // Absorbing: nothing moved.
-        assert_eq!(account.header.pnl.get(), -(deficit as i128));
-        assert_eq!(account.header.liquidation_lock, 1);
-        assert_eq!(market.header.negative_pnl_account_count.get(), 1);
-        assert_eq!(market.header.bankruptcy_hlock_active, 1);
-        assert_eq!(market.header.mode, 0);
-        // And the clear predicate still refuses.
-        assert_eq!(market.try_clear_bankruptcy_hlock_not_atomic(), Ok(false));
-    }
+    let open_risk = kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
+        pnl, capital, bitmap, 0, leg_abs_q, leg_abs_q,
+    )
+    .unwrap();
+    let flat = kani_uncovered_loss_strands_a_flat_account(
+        pnl,
+        capital,
+        if two { bitmap } else { V16_EMPTY_ACTIVE_BITMAP },
+    );
+    let uncovered = pnl < 0 && (pnl.unsigned_abs() > capital);
+    // exactly one predicate fires iff there is an uncovered loss
+    assert_eq!(open_risk || flat, uncovered);
+    assert!(!(open_risk && flat));
+    kani::cover!(flat, "flat uncovered loss is flagged");
+    kani::cover!(open_risk, "open-risk uncovered loss is flagged");
 }

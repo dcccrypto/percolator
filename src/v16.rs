@@ -390,6 +390,15 @@ fn uncovered_loss_strands_a_flat_account(
         && active_bitmap_is_empty(remaining_active_bitmap)
 }
 
+#[cfg(kani)]
+pub fn kani_uncovered_loss_strands_a_flat_account(
+    pnl: i128,
+    capital: u128,
+    remaining_active_bitmap: V16ActiveBitmap,
+) -> bool {
+    uncovered_loss_strands_a_flat_account(pnl, capital, remaining_active_bitmap)
+}
+
 #[inline]
 fn unattributed_loss_lock_after_pnl(
     was_locked: bool,
