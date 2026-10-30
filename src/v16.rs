@@ -379,6 +379,33 @@ fn uncovered_loss_remains_with_open_risk(
     uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap)
 }
 
+/// GH#292 (variants d / b-prime): the exact shape of the stranded state that is recognised
+/// account-locally: Live, flat, zero capital, negative PnL under the unattributed-loss lock, and no
+/// open bankruptcy-close ledger. Pure so Kani can prove it covers every stuck state.
+#[inline]
+fn flat_locked_deficit_is_writable_off(
+    live: bool,
+    pnl: i128,
+    capital: u128,
+    locked: bool,
+    flat: bool,
+    pending_close_residual: bool,
+) -> bool {
+    live && pnl < 0 && capital == 0 && locked && flat && !pending_close_residual
+}
+
+#[cfg(kani)]
+pub fn kani_flat_locked_deficit_is_writable_off(
+    live: bool,
+    pnl: i128,
+    capital: u128,
+    locked: bool,
+    flat: bool,
+    pending_close_residual: bool,
+) -> bool {
+    flat_locked_deficit_is_writable_off(live, pnl, capital, locked, flat, pending_close_residual)
+}
+
 #[inline]
 fn unattributed_loss_lock_after_pnl(
     was_locked: bool,
@@ -23418,17 +23445,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<bool> {
-        if decode_market_mode(self.header.mode)? != MarketModeV16::Live
-            || account.header.pnl.get() >= 0
-            || account.header.capital.get() != 0
-            || !decode_bool(account.header.liquidation_lock)?
-            || !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
-            || account
-                .header
-                .close_progress
-                .try_to_runtime()?
-                .has_pending_residual()
-        {
+        if !flat_locked_deficit_is_writable_off(
+            decode_market_mode(self.header.mode)? == MarketModeV16::Live,
+            account.header.pnl.get(),
+            account.header.capital.get(),
+            decode_bool(account.header.liquidation_lock)?,
+            active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get)),
+            account.header.close_progress.try_to_runtime()?.has_pending_residual(),
+        ) {
             return Ok(false);
         }
         self.mark_bankruptcy_hlock_unattributed();
