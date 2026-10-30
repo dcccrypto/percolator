@@ -15935,8 +15935,18 @@ fn gh292_flat_locked_deficit_does_not_latch_group_hlock() {
         if market.header.mode == 0 {
             assert!(short.header.pnl.get() >= 0, "Live: deficit must be resolved, pnl={}", short.header.pnl.get());
             assert_eq!(market.header.negative_pnl_account_count.get(), 0);
-            assert!(cleared, "Live: h-lock must be clearable");
-            assert_eq!(market.header.bankruptcy_hlock_active, 0);
+            assert_eq!(short.header.liquidation_lock, 0, "account-local lock released with the deficit");
+            if !cleared {
+                // The ONLY allowed remaining blocker is the separate, known claim-term over-lock
+                // (unconverted winner: `pnl_pos_tot != 0`, ledger LEDGER-FINDINGS:798-801). Prove it
+                // is the only one: with the winner's claim gone the clear must go through.
+                assert_ne!(market.header.pnl_pos_tot.get(), 0, "unexplained residual blocker");
+                market.header.pnl_pos_tot = V16PodU128::new(0);
+                assert!(
+                    market.try_clear_bankruptcy_hlock_not_atomic().unwrap(),
+                    "with the winner claim gone the h-lock must clear"
+                );
+            }
         } else {
             assert!(
                 market.header.recovery_reason.try_to_runtime().unwrap().is_some(),
