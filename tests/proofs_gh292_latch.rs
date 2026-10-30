@@ -107,3 +107,20 @@ fn proof_gh292_stuck_state_is_absorbing_under_every_permissionless_step() {
         assert_eq!(market.try_clear_bankruptcy_hlock_not_atomic(), Ok(false));
     }
 }
+
+#[kani::proof]
+fn proof_gh292_c_scoping_is_exact_and_never_clears() {
+    let wire: u8 = kani::any();
+    let asset: usize = kani::any();
+    kani::assume(asset < 7);
+    let g = percolator::bankruptcy_hlock_gates_asset(wire, asset);
+    assert!(!g || wire != 0);
+    if wire == 1 {
+        assert!(g); // unattributed gates every asset: the #292 latch is not narrowed
+    }
+    if wire > 1 && wire & 1 == 1 {
+        assert_eq!(g, (((wire >> 1) as u16) & (0b11u16 << (asset * 2))) != 0);
+    }
+    kani::cover!(wire == 1 && g, "unattributed gates");
+    kani::cover!(wire > 1 && wire & 1 == 1 && !g, "attributed scopes out");
+}

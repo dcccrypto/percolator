@@ -63,7 +63,7 @@ pub use v16::{
     adjust_slot_provider_principal, S10_MAX_MOVES_PER_INSTRUCTION, S10_MIN_MOVE_ATOMS, S10_PROTECT_FULL_PROVIDER_PRINCIPAL,
     active_bitmap_count_ones, active_bitmap_empty, active_bitmap_get, active_bitmap_is_empty,
     auto_crank_plan_requires_caller_observation, backing_domain_fee_split_for_lien_delta_num,
-    band_initialize_asset, bankruptcy_hlock_domain_mask, bankruptcy_hlock_is_active,
+    band_initialize_asset, bankruptcy_hlock_domain_mask, bankruptcy_hlock_gates_asset, bankruptcy_hlock_is_active,
     bankruptcy_hlock_is_unattributed, bankruptcy_hlock_mark_domain,
     bankruptcy_hlock_mark_unattributed, canonical_accrual_price_step_v16,
     canonical_band_accrual_price_step_v16, repay_pnl_postconditions_hold, v16_domain_count_for_market_slots,

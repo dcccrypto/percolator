@@ -26937,6 +26937,23 @@ pub fn bankruptcy_hlock_domain_mask(wire: u8) -> u8 {
     }
 }
 
+/// GH#292 variant (c), codex-style scoping (av/codex/fix-cross-asset-bankruptcy-hlock): does the
+/// bankruptcy h-lock gate custody/favorable actions on `asset_index`? An unattributed lock gates
+/// every asset; an attributed lock gates only the assets whose claim-source domains it names.
+/// This narrows the blast radius for a wrapper that adopts it. It does NOT clear any lock.
+#[inline]
+pub fn bankruptcy_hlock_gates_asset(wire: u8, asset_index: usize) -> bool {
+    if !bankruptcy_hlock_is_active(wire) {
+        return false;
+    }
+    if bankruptcy_hlock_is_unattributed(wire) {
+        return true;
+    }
+    let mask = bankruptcy_hlock_domain_mask(wire);
+    let pair = 0b11u16 << (asset_index.saturating_mul(2).min(15));
+    asset_index >= BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS || (mask as u16) & pair != 0
+}
+
 /// Wire value after an UNATTRIBUTED bankruptcy event: always 1, whatever came before.
 #[inline]
 pub fn bankruptcy_hlock_mark_unattributed(_wire: u8) -> u8 {

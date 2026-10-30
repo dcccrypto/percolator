@@ -15945,3 +15945,25 @@ fn gh292_flat_locked_deficit_does_not_latch_group_hlock() {
         }
     });
 }
+
+// GH#292 variant (c): scoping only. The latch itself is NOT removed (see the repro test).
+#[test]
+fn gh292_c_scoped_hlock_gates_only_named_assets_but_unattributed_gates_all() {
+    use percolator::{bankruptcy_hlock_gates_asset, bankruptcy_hlock_mark_domain, bankruptcy_hlock_mark_unattributed};
+    assert!(!bankruptcy_hlock_gates_asset(0, 0));
+    let attributed = bankruptcy_hlock_mark_domain(0, 1); // asset 0, short side
+    assert!(bankruptcy_hlock_gates_asset(attributed, 0));
+    assert!(!bankruptcy_hlock_gates_asset(attributed, 1));
+    let unattributed = bankruptcy_hlock_mark_unattributed(attributed);
+    assert!(bankruptcy_hlock_gates_asset(unattributed, 0) && bankruptcy_hlock_gates_asset(unattributed, 1));
+}
+
+/// The #292 stuck account's lock IS unattributed, so scoping does not help it: every asset stays gated.
+#[test]
+fn gh292_c_stuck_flat_deficit_hlock_still_gates_every_asset() {
+    gh292_drive(|market, _short, cleared| {
+        assert!(!cleared);
+        let w = market.header.bankruptcy_hlock_active;
+        assert!(percolator::bankruptcy_hlock_gates_asset(w, 0) && percolator::bankruptcy_hlock_gates_asset(w, 1));
+    });
+}
