@@ -15871,3 +15871,77 @@ fn v16_resolved_zero_conversion_coclaimants_on_empty_bucket_both_close() {
     loser.validate_with_market(&market.as_view()).unwrap();
 }
 
+
+// ---------------------------------------------------------------------------
+// GH#292 (dcccrypto/percolator): flat, zero-capital, negative-pnl account left behind by the
+// `liquidation_lock` branch of `liquidate_account_not_atomic`.
+// ---------------------------------------------------------------------------
+
+/// Drives the #292 fixture: two-asset cross-margin short at capital 0, pnl -250, lock 1, one
+/// leg left on asset 1; liquidates that last leg. Then runs every permissionless public step
+/// that exists for the stuck account (auto-crank x4, refresh, `try_clear`). Returns nothing;
+/// callers assert on the final state through the closure.
+fn gh292_drive<R>(
+    f: impl FnOnce(&mut MarketGroupV16ViewMut<'_, u64>, &PortfolioV16ViewMut<'_>, bool) -> R,
+) -> R {
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        unattributed_deficit_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    open_unattributed_deficit(&mut market, &mut long, &mut short);
+    assert_eq!(short.header.liquidation_lock, 1);
+    // Liquidation may legitimately return Err(RecoveryRequired) under an escalating fix.
+    let _ = market.liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 1 });
+    for _ in 0..4 {
+        let slot = market.header.current_slot.get();
+        let _ = market.permissionless_auto_crank_not_atomic(
+            &mut short,
+            AutoCrankWorkV16 {
+                now_slot: slot,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        );
+        let _ = market.full_account_refresh_not_atomic(&mut short);
+    }
+    let cleared = market.try_clear_bankruptcy_hlock_not_atomic().unwrap_or(false);
+    f(&mut market, &short, cleared)
+}
+
+/// BAD-STATE REPRO (green on fd654cec + #301, red on any fix): the account ends flat with
+/// capital 0 and pnl < 0, the lock and the counter never release, the market stays Live, and no
+/// public step clears the group-wide h-lock.
+#[test]
+fn gh292_repro_flat_locked_deficit_latches_hlock_in_live_market() {
+    gh292_drive(|market, short, cleared| {
+        assert!(active_bitmap_is_empty(short.header.active_bitmap.map(V16PodU64::get)), "flat");
+        assert_eq!(short.header.capital.get(), 0);
+        assert_eq!(short.header.pnl.get(), -250);
+        assert_eq!(short.header.liquidation_lock, 1);
+        assert_eq!(market.header.negative_pnl_account_count.get(), 1);
+        assert_eq!(market.header.bankruptcy_hlock_active, 1);
+        assert_eq!(market.header.mode, 0, "still Live: no Recovery was declared");
+        assert!(!cleared, "try_clear refuses: negative_pnl_account_count != 0");
+    });
+}
+
+/// PROPERTY (red on fd654cec + #301, green on a fix): in a Live market the locked flat deficit
+/// does not latch. Either the deficit was resolved (pnl >= 0, counter 0, h-lock clearable) or the
+/// market transitioned to Recovery with a recorded reason.
+#[test]
+fn gh292_flat_locked_deficit_does_not_latch_group_hlock() {
+    gh292_drive(|market, short, cleared| {
+        if market.header.mode == 0 {
+            assert!(short.header.pnl.get() >= 0, "Live: deficit must be resolved, pnl={}", short.header.pnl.get());
+            assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+            assert!(cleared, "Live: h-lock must be clearable");
+            assert_eq!(market.header.bankruptcy_hlock_active, 0);
+        } else {
+            assert!(
+                market.header.recovery_reason.try_to_runtime().unwrap().is_some(),
+                "non-Live without a recorded recovery reason"
+            );
+        }
+    });
+}
