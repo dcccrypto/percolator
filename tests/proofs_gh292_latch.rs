@@ -21,7 +21,8 @@
 
 use percolator::{
     kani_active_bitmap_set as active_bitmap_set, kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
-    kani_flat_locked_deficit_is_writable_off, kani_unattributed_loss_lock_after_pnl,
+    kani_flat_deficit_route, kani_flat_locked_deficit_is_writable_off,
+    kani_unattributed_loss_lock_after_pnl, FlatDeficitRouteV16, LossProvenanceV16,
     V16_EMPTY_ACTIVE_BITMAP,
 };
 
@@ -79,4 +80,30 @@ fn proof_gh292_writeoff_covers_every_stuck_state_and_releases_the_lock() {
     let mut one_leg = V16_EMPTY_ACTIVE_BITMAP;
     active_bitmap_set(&mut one_leg, 0).unwrap();
     kani::cover!(any_pnl < 0 && capital == 0 && locked && is_flat && live && !pending, "fires");
+}
+
+/// b-prime-2: the flat-deficit route charges ONLY the recorded domain (never one the caller picks),
+/// only when it is coverable, and every other input is a write-off. There is no Recovery arm.
+#[kani::proof]
+fn proof_gh292_bprime2_flat_route_charges_only_the_recorded_coverable_domain() {
+    let d = kani::any::<u8>() as usize;
+    let which: u8 = kani::any();
+    let rec = match which % 3 {
+        0 => LossProvenanceV16::None,
+        1 => LossProvenanceV16::Unattributable,
+        _ => LossProvenanceV16::Domain(d),
+    };
+    let coverable: bool = kani::any();
+    let out = kani_flat_deficit_route(rec, coverable);
+    match out {
+        FlatDeficitRouteV16::ChargeDomain(c) => {
+            assert!(coverable);
+            assert_eq!(rec, LossProvenanceV16::Domain(c));
+        }
+        FlatDeficitRouteV16::WriteOff => {
+            assert!(!coverable || !matches!(rec, LossProvenanceV16::Domain(_)));
+        }
+    }
+    kani::cover!(matches!(out, FlatDeficitRouteV16::ChargeDomain(_)), "attributed and coverable is charged");
+    kani::cover!(out == FlatDeficitRouteV16::WriteOff && coverable, "unattributable is written off even if coverable");
 }

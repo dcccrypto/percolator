@@ -593,6 +593,37 @@ pub fn liquidation_residual_charge(
     }
 }
 
+/// b-prime-2: how a flat, locked, zero-capital deficit is resolved. Pure, a Kani target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlatDeficitRouteV16 {
+    /// The record names loss domain `d` and `d` can absorb the deficit in one step: run the domain
+    /// waterfall (insurance, then B on its winners), the same as the liquidation charge.
+    ChargeDomain(usize),
+    /// No single coverable domain: recognise the deficit account-locally (never Recovery).
+    WriteOff,
+}
+
+#[inline]
+pub fn flat_deficit_route(
+    record: LossProvenanceV16,
+    domain_live_and_coverable: bool,
+) -> FlatDeficitRouteV16 {
+    match record {
+        LossProvenanceV16::Domain(d) if domain_live_and_coverable => {
+            FlatDeficitRouteV16::ChargeDomain(d)
+        }
+        _ => FlatDeficitRouteV16::WriteOff,
+    }
+}
+
+#[cfg(kani)]
+pub fn kani_flat_deficit_route(
+    record: LossProvenanceV16,
+    domain_live_and_coverable: bool,
+) -> FlatDeficitRouteV16 {
+    flat_deficit_route(record, domain_live_and_coverable)
+}
+
 #[cfg(kani)]
 pub fn kani_liquidation_residual_charge(
     locked: bool,
@@ -23455,7 +23486,97 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ) {
             return Ok(false);
         }
-        self.mark_bankruptcy_hlock_unattributed();
+        // b-prime-2 (a): an ATTRIBUTABLE deficit (the record names one loss domain `d`) is charged
+        // to `d` first: principal (capital is 0 here), then d's insurance, then B on d's winners,
+        // exactly as the liquidation body does at the full close of d's own leg (spec req 5). Only
+        // when `d` cannot absorb it in one step (insurance + B capacity short, or the asset is no
+        // longer live-reducible) is the deficit written off, whole, without touching insurance.
+        let record = effective_loss_provenance(
+            decode_loss_provenance(account.header.loss_provenance.get())?,
+            account.header.pnl.get(),
+        );
+        let route = match record {
+            LossProvenanceV16::Domain(domain) => {
+                let (charge_asset, bankrupt_side) = self.domain_asset_side(domain)?;
+                let coverable = self.require_asset_live_reducible(charge_asset).is_ok()
+                    && !self.liquidation_residual_exceeds_single_step_capacity(
+                        charge_asset,
+                        bankrupt_side,
+                        &account.as_view(),
+                    )?;
+                flat_deficit_route(record, coverable)
+            }
+            _ => flat_deficit_route(record, false),
+        };
+        if let FlatDeficitRouteV16::ChargeDomain(domain) = route {
+            let (charge_asset, bankrupt_side) = self.domain_asset_side(domain)?;
+            {
+                // capital is 0 (guard), so principal settlement would pay nothing; calling it
+                // here would re-enter this function through its paid == 0 hook.
+                let gross = if account.header.pnl.get() < 0 {
+                    account.header.pnl.get().unsigned_abs()
+                } else {
+                    0
+                };
+                if gross != 0 {
+                    self.begin_close_progress_ledger(
+                        account,
+                        charge_asset,
+                        opposite_side(bankrupt_side),
+                        gross,
+                    )?;
+                }
+                let insurance_used = self.consume_domain_insurance_for_negative_pnl(
+                    charge_asset,
+                    bankrupt_side,
+                    account,
+                )?;
+                if insurance_used != 0 {
+                    self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
+                }
+                self.try_clear_bankruptcy_hlock_if_healthy()?;
+                let residual = if account.header.pnl.get() < 0 {
+                    account.header.pnl.get().unsigned_abs()
+                } else {
+                    0
+                };
+                if residual != 0 {
+                    let outcome = self.book_bankruptcy_residual_chunk_for_account_core(
+                        account,
+                        charge_asset,
+                        bankrupt_side,
+                        residual,
+                    )?;
+                    let cleared = outcome
+                        .booked_loss
+                        .checked_add(outcome.explicit_loss)
+                        .ok_or(V16Error::ArithmeticOverflow)?
+                        .min(residual);
+                    let cleared_i128 =
+                        i128::try_from(cleared).map_err(|_| V16Error::ArithmeticOverflow)?;
+                    let new_pnl = account
+                        .header
+                        .pnl
+                        .get()
+                        .checked_add(cleared_i128)
+                        .ok_or(V16Error::ArithmeticOverflow)?;
+                    self.set_account_pnl(account, new_pnl)?;
+                    // scoped to the recorded domain (P2b L1 attribution), never the global byte
+                    self.mark_bankruptcy_hlock_event(charge_asset, bankrupt_side);
+                }
+                if account.header.pnl.get() >= 0 {
+                    account.header.loss_provenance = V16PodU32::new(LOSS_PROVENANCE_NONE);
+                    account.header.health_cert.valid = 0;
+                    self.try_clear_bankruptcy_hlock_if_healthy()?;
+                    return Ok(true);
+                }
+                // The chunk left a residual with an open ledger: not ours to write off.
+                return Ok(true);
+            }
+        }
+        // (b) Truly unattributable (or uncoverable): the deficit is recognised account-locally.
+        // Nothing new is marked on the h-lock: this moves no value and opens no new bankruptcy
+        // event, so the byte keeps exactly the scope the original loss events gave it.
         self.set_account_pnl(account, 0)?;
         account.header.health_cert.valid = 0;
         self.try_clear_bankruptcy_hlock_if_healthy()?;
