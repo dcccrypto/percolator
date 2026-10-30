@@ -15955,3 +15955,58 @@ fn gh292_flat_locked_deficit_does_not_latch_group_hlock() {
         }
     });
 }
+
+/// Trade-path variant of the #292 state: the final leg is closed by a risk-reducing TRADE (the
+/// pre-existing upstream test pins this end state), so `liquidate_account_not_atomic` is never
+/// reached. Only the permissionless account steps can resolve it.
+fn gh292_drive_trade_path<R>(
+    f: impl FnOnce(&mut MarketGroupV16ViewMut<'_, u64>, &PortfolioV16ViewMut<'_>, bool) -> R,
+) -> R {
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        unattributed_deficit_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    open_unattributed_deficit(&mut market, &mut long, &mut short);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 1,
+                size_q: -signed_q(SIZE_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .expect("the final risk-reducing close must remain available");
+    assert!(active_bitmap_is_empty(short.header.active_bitmap.map(V16PodU64::get)));
+    for _ in 0..4 {
+        let slot = market.header.current_slot.get();
+        let _ = market.permissionless_auto_crank_not_atomic(
+            &mut short,
+            AutoCrankWorkV16 { now_slot: slot, observations: &[], resolved_close_fee_rate_per_slot: 0 },
+        );
+        let _ = market.full_account_refresh_not_atomic(&mut short);
+    }
+    let cleared = market.try_clear_bankruptcy_hlock_not_atomic().unwrap_or(false);
+    f(&mut market, &short, cleared)
+}
+
+#[test]
+fn gh292_trade_path_flat_locked_deficit_does_not_latch() {
+    gh292_drive_trade_path(|market, short, cleared| {
+        if market.header.mode != 0 {
+            assert!(market.header.recovery_reason.try_to_runtime().unwrap().is_some());
+            return;
+        }
+        assert!(short.header.pnl.get() >= 0, "Live: flat locked deficit must not remain, pnl={}", short.header.pnl.get());
+        assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+        if !cleared {
+            assert_ne!(market.header.pnl_pos_tot.get(), 0, "only the claim-term over-lock may remain");
+        }
+    });
+}
+
