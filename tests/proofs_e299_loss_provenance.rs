@@ -188,3 +188,22 @@ fn proof_e299_provenance_wire_round_trip() {
     assert_eq!(encode_loss_provenance(p), Ok(raw));
     kani::cover!(matches!(p, LossProvenanceV16::Domain(_)), "attributed raw");
 }
+
+/// GH#292: the latch cannot be CREATED by the decision. Whatever the record, a locked close that
+/// leaves the account flat is never `ReduceOnly` (the branch that used to return Ok with the
+/// deficit untouched): it is `Charge(d)` (recorded domain only) or `Recovery`.
+#[kani::proof]
+fn proof_gh292_locked_flat_close_never_reduce_only() {
+    let rec = any_record();
+    let closed_domain = kani::any::<u8>() as usize;
+    let full: bool = kani::any();
+    let out = kani_liquidation_residual_charge(true, rec, closed_domain, full, true);
+    assert!(out != LiquidationResidualChargeV16::ReduceOnly);
+    match (rec, out) {
+        (LossProvenanceV16::Domain(d), LiquidationResidualChargeV16::Charge(c)) => assert_eq!(c, d),
+        (LossProvenanceV16::Domain(_), _) => assert!(false),
+        (_, o) => assert_eq!(o, LiquidationResidualChargeV16::Recovery),
+    }
+    kani::cover!(matches!(out, LiquidationResidualChargeV16::Charge(_)), "flat close charges recorded domain");
+    kani::cover!(out == LiquidationResidualChargeV16::Recovery, "flat close with no attribution declares Recovery");
+}
