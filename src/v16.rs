@@ -377,6 +377,19 @@ fn uncovered_loss_remains_with_open_risk(
     uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap)
 }
 
+/// GH#292 variant (a): an uncovered loss on an account the close leaves FLAT (the complement of
+/// `uncovered_loss_remains_with_open_risk`). The locked liquidation branch books nothing, so a flat
+/// result is a terminal stranded state; this predicate lets it escalate to Recovery.
+#[inline]
+fn uncovered_loss_strands_a_flat_account(
+    pnl: i128,
+    capital: u128,
+    remaining_active_bitmap: V16ActiveBitmap,
+) -> bool {
+    liquidation_uncovered_loss_after_principal(pnl, capital) != 0
+        && active_bitmap_is_empty(remaining_active_bitmap)
+}
+
 #[inline]
 fn unattributed_loss_lock_after_pnl(
     was_locked: bool,
@@ -18095,7 +18108,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // v2.2 band exception: an asset pinned for longer than
         // `band_max_pin_slots` is a market-level fail-closed condition (keepers
         // gone), so any account's crank may declare `BandPinExpired` recovery.
-        let recovery_eligible = live && self.band_pin_expired_at(now_slot)?;
+        // GH#292 variant (a): a flat, zero-capital, locked negative-PnL account is stranded (no
+        // public step can resolve it), so its crank may escalate to Recovery. This re-introduces
+        // exactly the derivation upstream retracted in 4bf0a98f; see the variant report.
+        let stranded_flat_deficit = live
+            && decode_bool(account.header.liquidation_lock)?
+            && uncovered_loss_strands_a_flat_account(
+                account.header.pnl.get(),
+                account.header.capital.get(),
+                account.header.active_bitmap.map(V16PodU64::get),
+            );
+        let recovery_eligible =
+            live && (self.band_pin_expired_at(now_slot)? || stranded_flat_deficit);
         // resolved_winner routes to close_resolved, which LAZILY captures the
         // payout snapshot itself (initialize_resolved_payout_ledger_if_needed is
         // reached only via close_resolved -> create_resolved_payout_receipt) — so
@@ -18376,7 +18400,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let recovery_reason = if summary.expired_close {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
         } else if summary.recovery_eligible {
-            PermissionlessRecoveryReasonV16::BandPinExpired
+            if decode_bool(account.header.liquidation_lock)?
+                && uncovered_loss_strands_a_flat_account(
+                    account.header.pnl.get(),
+                    account.header.capital.get(),
+                    account.header.active_bitmap.map(V16PodU64::get),
+                )
+            {
+                PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
+            } else {
+                PermissionlessRecoveryReasonV16::BandPinExpired
+            }
         } else {
             PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
         };
@@ -21359,6 +21393,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
             self.validate_shape_audit_scan()?;
             self.validate_account_audit_scan(&account.as_view())?;
+            // GH#292 (variant a): the close left the account flat with the deficit untouched and
+            // nothing can resolve it any more, so escalate to the permissionless Recovery route
+            // (the sole caller turns the declaration into progress, so the close still commits).
+            if uncovered_loss_strands_a_flat_account(
+                account.header.pnl.get(),
+                account.header.capital.get(),
+                account.header.active_bitmap.map(V16PodU64::get),
+            ) {
+                self.declare_permissionless_recovery(
+                    PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+                )?;
+                return Err(V16Error::RecoveryRequired);
+            }
             return Ok(LiquidationOutcomeV16 {
                 closed_q: close_q,
                 insurance_used: 0,

@@ -13100,12 +13100,14 @@ fn v16_trade_does_not_charge_prior_multi_asset_deficit_or_force_market_recovery(
     assert_eq!(short.header.liquidation_lock, 1);
     let ledger = short.header.close_progress.try_to_runtime().unwrap();
     assert_eq!(ledger.residual_remaining, 0);
+    // GH#292 variant (a) DELIBERATELY REVERSES upstream's pin here (4bf0a98f): a stranded flat
+    // locked deficit may now drive the permissionless crank to Recovery.
     assert!(
-        !market
+        market
             .build_actionable_summary(&short.as_view())
             .unwrap()
             .recovery_eligible,
-        "an unattributed account must not gain authority to recover the whole market"
+        "variant (a): a stranded flat locked deficit is recovery-eligible"
     );
     // no asset domain was charged and no market-wide recovery was declared
     assert_eq!(market.header.mode, 0);
@@ -13145,19 +13147,45 @@ fn v16_liquidation_of_unattributed_deficit_reduces_risk_without_charging_the_sur
 
     let insurance_before = market.header.insurance.get();
     let asset1_before = markets_snapshot(&market, 1);
-    let outcome = market
-        .liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 1 })
-        .expect("a locked account still liquidates, reduce-only");
+    // GH#292: `open_unattributed_deficit` closes the asset-0 leg outright, so this
+    // liquidation closes the account's LAST leg and leaves it FLAT while still
+    // carrying the unattributable -250 deficit. That state has no resolution path:
+    // capital is 0, so the principal-settlement path returns early at its
+    // `paid == 0` guard, nothing writes the PnL again, `negative_pnl_account_count`
+    // never decrements, and the group-wide `bankruptcy_hlock_active` never clears.
+    // The locked branch therefore now declares Recovery and returns RecoveryRequired;
+    // the sole caller converts that into progress once the marker is complete, so the
+    // position close still commits -- which the OI assertion below verifies.
+    //
+    // This test previously asserted `mode == 0` here, i.e. it pinned the creation of
+    // that terminal state. Its STATED purpose is unchanged and still asserted below.
+    let outcome =
+        market.liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 1 });
+    assert!(
+        matches!(outcome, Err(percolator::V16Error::RecoveryRequired)),
+        "a locked liquidation that strands a deficit on a flat account must escalate"
+    );
+    assert_eq!(
+        market.header.mode, 2,
+        "the Recovery declaration must have committed"
+    );
+    assert!(
+        market.header.recovery_reason.try_to_runtime().unwrap().is_some(),
+        "a complete Recovery marker is required, or the caller's \
+         kernel_commit_declared_liquidation_recovery propagates the error instead"
+    );
     // NEGATIVE CONTROL for 6d8e0a48: without the lock this liquidation charges the
     // asset-0 loss to asset 1 (residual booked / fee charged against the surviving
-    // domain). With it, only risk is removed.
-    assert!(outcome.closed_q > 0);
-    assert_eq!(outcome.insurance_used, 0);
-    assert_eq!(outcome.residual_booked, 0);
-    assert_eq!(outcome.explicit_loss, 0);
-    assert_eq!(outcome.fee_charged, 0);
-    assert_eq!(market.header.insurance.get(), insurance_before);
-    assert_eq!(market.header.mode, 0, "no market recovery declared");
+    // domain). With it, only risk is removed. The outcome struct is not available on
+    // the Err path, so this is now asserted on state instead, which covers the same
+    // ground: the liquidation fee is credited to insurance, so an unchanged
+    // `insurance` implies `fee_charged == 0` and `insurance_used == 0`, and an
+    // untouched close ledger on the surviving side implies nothing was booked there.
+    assert_eq!(
+        market.header.insurance.get(),
+        insurance_before,
+        "no insurance consumed and no fee charged against the surviving domain"
+    );
     assert_eq!(short.header.liquidation_lock, 1);
     assert_eq!(short.header.pnl.get(), -250);
     let asset1_after = markets_snapshot(&market, 1);
@@ -15909,23 +15937,6 @@ fn gh292_drive<R>(
     f(&mut market, &short, cleared)
 }
 
-/// BAD-STATE REPRO (green on fd654cec + #301, red on any fix): the account ends flat with
-/// capital 0 and pnl < 0, the lock and the counter never release, the market stays Live, and no
-/// public step clears the group-wide h-lock.
-#[test]
-fn gh292_repro_flat_locked_deficit_latches_hlock_in_live_market() {
-    gh292_drive(|market, short, cleared| {
-        assert!(active_bitmap_is_empty(short.header.active_bitmap.map(V16PodU64::get)), "flat");
-        assert_eq!(short.header.capital.get(), 0);
-        assert_eq!(short.header.pnl.get(), -250);
-        assert_eq!(short.header.liquidation_lock, 1);
-        assert_eq!(market.header.negative_pnl_account_count.get(), 1);
-        assert_eq!(market.header.bankruptcy_hlock_active, 1);
-        assert_eq!(market.header.mode, 0, "still Live: no Recovery was declared");
-        assert!(!cleared, "try_clear refuses: negative_pnl_account_count != 0");
-    });
-}
-
 /// PROPERTY (red on fd654cec + #301, green on a fix): in a Live market the locked flat deficit
 /// does not latch. Either the deficit was resolved (pnl >= 0, counter 0, h-lock clearable) or the
 /// market transitioned to Recovery with a recorded reason.
@@ -15954,4 +15965,83 @@ fn gh292_flat_locked_deficit_does_not_latch_group_hlock() {
             );
         }
     });
+}
+
+/// Trade-path variant of the #292 state: the final leg is closed by a risk-reducing TRADE (the
+/// pre-existing upstream test pins this end state), so `liquidate_account_not_atomic` is never
+/// reached. Only the permissionless account steps can resolve it.
+fn gh292_drive_trade_path<R>(
+    f: impl FnOnce(&mut MarketGroupV16ViewMut<'_, u64>, &PortfolioV16ViewMut<'_>, bool) -> R,
+) -> R {
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        unattributed_deficit_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    open_unattributed_deficit(&mut market, &mut long, &mut short);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 1,
+                size_q: -signed_q(SIZE_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .expect("the final risk-reducing close must remain available");
+    assert!(active_bitmap_is_empty(short.header.active_bitmap.map(V16PodU64::get)));
+    for _ in 0..4 {
+        let slot = market.header.current_slot.get();
+        let _ = market.permissionless_auto_crank_not_atomic(
+            &mut short,
+            AutoCrankWorkV16 { now_slot: slot, observations: &[], resolved_close_fee_rate_per_slot: 0 },
+        );
+        let _ = market.full_account_refresh_not_atomic(&mut short);
+    }
+    let cleared = market.try_clear_bankruptcy_hlock_not_atomic().unwrap_or(false);
+    f(&mut market, &short, cleared)
+}
+
+#[test]
+fn gh292_a_trade_path_flat_locked_deficit_escalates_via_crank() {
+    gh292_drive_trade_path(|market, short, _| {
+        assert_ne!(market.header.mode, 0, "variant (a): the crank declared Recovery (then finalized)");
+        assert!(market.header.recovery_reason.try_to_runtime().unwrap().is_some());
+        // the permissionless cranks went Recovery -> Resolved and closed the stuck account
+        assert_eq!(short.header.pnl.get(), 0, "the resolved close wound the deficit down");
+    });
+}
+
+/// Recovery is value-neutral and then the stuck account closes through the resolved path.
+#[test]
+fn gh292_a_recovery_then_resolved_close_clears_the_account() {
+    gh292_drive(|market, short, _| {
+        assert_ne!(market.header.mode, 0, "Recovery declared, then finalized to Resolved by the cranks");
+        let _ = short;
+    });
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        unattributed_deficit_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    open_unattributed_deficit(&mut market, &mut long, &mut short);
+    let vault = market.header.vault.get();
+    let _ = market.liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 1 });
+    assert_eq!(market.header.mode, 2);
+    for _ in 0..4 {
+        let slot = market.header.current_slot.get();
+        let _ = market.permissionless_auto_crank_not_atomic(
+            &mut short,
+            AutoCrankWorkV16 { now_slot: slot, observations: &[], resolved_close_fee_rate_per_slot: 0 },
+        );
+    }
+    assert_eq!(market.header.mode, 1, "public crank finalizes Recovery to Resolved");
+    assert_eq!(market.header.vault.get(), vault, "no value moved");
+    let r = market.close_resolved_account_not_atomic(&mut short, 0);
+    assert!(r.is_ok(), "resolved close of the stuck account: {r:?}");
+    assert_eq!(short.header.pnl.get(), 0);
 }
