@@ -174,7 +174,7 @@ proptest! {
 
 #[test]
 fn e299_charge_decision_table() {
-    use LiquidationResidualChargeV16::{Charge, Recovery, ReduceOnly};
+    use LiquidationResidualChargeV16::{Charge, ReduceOnly, WriteOff};
     let none = LossProvenanceV16::None;
     for full in [false, true] {
         for flat in [false, true] {
@@ -182,9 +182,9 @@ fn e299_charge_decision_table() {
             for p in [none, Unattributable, Domain(0), Domain(5)] {
                 assert_eq!(liquidation_residual_charge(false, p, 3, full, flat), Charge(3));
             }
-            // locked, unattributable or no record: never charged; Recovery only once flat
+            // locked, unattributable or no record: never charged; write-off (never Recovery) only once flat
             for p in [none, Unattributable] {
-                let want = if flat { Recovery } else { ReduceOnly };
+                let want = if flat { WriteOff } else { ReduceOnly };
                 assert_eq!(liquidation_residual_charge(true, p, 3, full, flat), want);
             }
             // locked, attributed to the closed leg's domain: charged at its full close or flat
