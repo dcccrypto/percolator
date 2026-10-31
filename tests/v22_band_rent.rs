@@ -2926,3 +2926,133 @@ fn band_lp_exemptions_are_maker_only_and_bounded_by_cap_plus_one() {
     w.assert_census();
     w.assert_conservation();
 }
+
+// ---------------------------------------------------------------------------
+// rentstale (att647 NEW-1): a rent-only index move must not restale the K/F cohort, so the
+// LossStale gate does not refuse every open on a band market whose rent rate is > 0.
+// ---------------------------------------------------------------------------
+
+fn stale_counts(w: &World) -> (u64, u64) {
+    let a = w.asset();
+    (a.stale_account_count_long, a.stale_account_count_short)
+}
+
+/// Rent-only accrual (single-segment site): no cohort, opens admitted with untouched rent-owing
+/// legs and ZERO insurance (so the fork's insured-cohort relaxation cannot be what admits it),
+/// and the untouched legs still pay exactly the rent they owe when they are next touched.
+#[test]
+fn rentstale_rent_only_accrual_keeps_the_cohort_and_admits_opens() {
+    let mut w = World::new(band_cfg(130), 4, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    let a0 = w.asset();
+    assert_eq!(stale_counts(&w), (0, 0));
+    let fe0 = w.header.funding_epoch.get();
+    let cap0 = w.accounts[0].capital.get();
+    let cap1 = w.accounts[1].capital.get();
+    for _ in 0..34 {
+        w.now += 3;
+        w.accrue(0, 20, 10).unwrap();
+        assert_eq!(stale_counts(&w), (0, 0), "rent alone must not restale the cohort");
+    }
+    let a1 = w.asset();
+    assert!(a1.rent_index_long_num > 0 && a1.rent_index_short_num > 0, "rent accrued");
+    assert_eq!(a1.k_long, a0.k_long, "no K move");
+    assert_eq!(a1.f_long_num, a0.f_long_num, "no F move");
+    assert_eq!(stale_counts(&w), (0, 0), "rent alone must not restale the cohort");
+    assert_eq!((a1.kf_epoch_long, a1.kf_epoch_short), (a0.kf_epoch_long, a0.kf_epoch_short));
+    assert!(w.header.funding_epoch.get() > fe0, "rent still invalidates certificates");
+    assert_eq!(w.header.insurance.get(), 0, "no insurance: the relaxation cannot admit");
+    // An entrant opens while legs 0/1 still owe rent (pre-fix: Err(LossStale)).
+    w.trade(2, 3, 10 * POS_SCALE).expect("open with untouched rent-owing legs");
+    // ... and the untouched legs pay exactly what they owe on their next touch.
+    w.refresh(0).unwrap();
+    w.refresh(1).unwrap();
+    let due_l = (10 * POS_SCALE) * a1.rent_index_long_num / RENT_INDEX_DEN;
+    let due_s = (10 * POS_SCALE) * a1.rent_index_short_num / RENT_INDEX_DEN;
+    assert!(due_l > 0 && due_s > 0, "non-vacuous dues");
+    assert_eq!(cap0 - w.accounts[0].capital.get(), due_l, "long pays its rent exactly");
+    assert_eq!(cap1 - w.accounts[1].capital.get(), due_s, "short pays its rent exactly");
+    assert_eq!(w.asset().rent_unrouted_atoms, due_l + due_s);
+    w.assert_conservation();
+    w.assert_census();
+}
+
+/// The gate itself is unchanged for K and F: a price move or a funding move still restales the
+/// cohort and still refuses a risk-increasing trade with LossStale (zero insurance).
+#[test]
+fn rentstale_k_and_f_moves_still_restale_and_refuse_opens() {
+    // K: price move.
+    let mut w = World::new(band_cfg(130), 4, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    w.set_target(P0 + P0 / 200);
+    w.now += 1;
+    w.accrue(0, 0, 0).unwrap();
+    assert_ne!(w.asset().k_long, 0, "K moved");
+    assert_eq!(stale_counts(&w), (1, 1), "a K move restales both sides");
+    assert_eq!(w.trade(2, 3, 10 * POS_SCALE), Err(V16Error::LossStale));
+    // F: funding only.
+    let mut w = World::new(band_cfg(130), 4, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    w.now += 3;
+    w.accrue(50, 0, 0).unwrap();
+    assert!(w.asset().f_long_num != 0 || w.asset().f_short_num != 0, "F moved");
+    assert!(stale_counts(&w) != (0, 0), "an F move restales");
+    assert_eq!(w.trade(2, 3, 10 * POS_SCALE), Err(V16Error::LossStale));
+}
+
+/// The PATH accrual site (`accrue_asset_path_with_rent_to_not_atomic`): rent-only steps leave
+/// the cohort alone and an entrant can open.
+#[test]
+fn rentstale_rent_only_path_accrual_keeps_the_cohort_and_admits_opens() {
+    let mut w = World::new(band_cfg(130), 4, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    let a0 = w.asset();
+    let price = a0.effective_price;
+    let steps: Vec<percolator::AccrualStepV16> = (0..2)
+        .map(|_| percolator::AccrualStepV16 {
+            effective_price: price,
+            funding_rate_e9: 0,
+            price_move_remainder_before_bps_num: 0,
+            price_move_remainder_after_bps_num: 0,
+        })
+        .collect();
+    let now = a0.slot_last + 2;
+    w.now = now;
+    w.market(|m| m.accrue_asset_path_with_rent_to_not_atomic(0, now, price, &steps, 20, 10, true))
+        .unwrap();
+    let a1 = w.asset();
+    assert!(a1.rent_index_long_num > a0.rent_index_long_num, "rent accrued on the path route");
+    assert_eq!(stale_counts(&w), (0, 0), "rent alone must not restale on the path route");
+    assert_eq!((a1.kf_epoch_long, a1.kf_epoch_short), (a0.kf_epoch_long, a0.kf_epoch_short));
+    assert_eq!(w.header.insurance.get(), 0);
+    w.trade(2, 3, 10 * POS_SCALE).expect("open after a rent-only path accrual");
+    w.assert_conservation();
+}
+
+/// An untouched leg's unsettled rent cannot create a deficit: a long that is deep underwater
+/// and owes more rent than its loss-free capital is charged only that loss-free capital, so the
+/// opens admitted while it was rent-stale face no hidden loss from it.
+#[test]
+fn rentstale_unsettled_rent_never_becomes_a_deficit() {
+    let mut w = World::new(band_cfg(0), 4, 1_000_000);
+    w.trade(0, 1, 9 * POS_SCALE).unwrap();
+    for i in 0..2 {
+        w.refresh(i).unwrap();
+    }
+    // Many slots of max rent on the long only, no price move: no cohort, opens stay admitted.
+    for _ in 0..200 {
+        w.now += 3;
+        w.accrue(0, 23, 0).unwrap();
+        assert_eq!(stale_counts(&w), (0, 0));
+    }
+    w.trade(2, 3, POS_SCALE).expect("open while leg 0 owes rent");
+    let cap = w.accounts[0].capital.get();
+    let owed = (9 * POS_SCALE) * w.asset().rent_index_long_num / RENT_INDEX_DEN;
+    assert!(owed > 0);
+    w.refresh(0).unwrap();
+    let acct = &w.accounts[0];
+    let pnl = acct.pnl.get();
+    assert!(pnl >= 0 || acct.capital.get() >= pnl.unsigned_abs(), "rent never eats loss-owned capital");
+    assert!(cap - acct.capital.get() <= owed);
+    w.assert_conservation();
+}

@@ -1175,6 +1175,14 @@ impl V16Core {
         }
     }
 
+    /// rentstale (att647 NEW-1): whether one accrual's index deltas start a new K/F settlement
+    /// cohort on a side. Only K and F count (spec: "Whenever a side's K or F target changes";
+    /// upstream `k_delta != 0 || funding_delta != 0`). Rent deliberately has no input here.
+    #[inline]
+    pub(crate) fn kernel_kf_cohort_moves(k_delta: i128, f_delta: i128) -> bool {
+        k_delta != 0 || f_delta != 0
+    }
+
     /// Starts a new settlement cohort whenever a side's K/F target moves.
     /// The epoch makes repeated accrual and exact index reversal unambiguous.
     pub(crate) fn kernel_mark_kf_stale_cohorts(
@@ -16011,9 +16019,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
+    /// A leg is settled to its side's current K/F cohort AND its current rent index.
+    ///
+    /// rentstale (att647 NEW-1): a rent-only index move no longer starts a K/F cohort, so the
+    /// epoch alone no longer implies "rent settled". The rent clause keeps every leg-level guard
+    /// (clear, retain, position change, terminal and recovery detach) exactly as strong as when
+    /// a rent move bumped the epoch: the side rent index only grows, strictly on every rent move,
+    /// and a settle sets `rent_snap` to it, so `rent_snap == index` iff no rent move happened
+    /// since the leg's last settle.
     #[inline]
-    fn leg_kf_epoch_is_current(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
+    fn leg_kf_and_rent_are_current(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
+        let rent_index = match leg.side {
+            SideV16::Long => asset.rent_index_long_num,
+            SideV16::Short => asset.rent_index_short_num,
+        };
         leg.kf_epoch_snap == Self::kf_epoch_for_leg_from_asset(asset, leg)
+            && leg.rent_snap == rent_index
     }
 
     fn b_target_for_leg(&self, asset_index: usize, leg: PortfolioLegV16) -> V16Result<u128> {
@@ -17736,11 +17757,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (funding_delta_long, funding_delta_short) =
             V16Core::kernel_funding_index_deltas(funding_num, old.a_long, old.a_short)?;
 
-        // v2.2 rent is the twin of F: a rent move starts a new settlement cohort
-        // on that side, so every "K/F current" guard also means "rent current".
-        let long_kf_changed = k_delta_long != 0 || funding_delta_long != 0 || rent_delta_long != 0;
-        let short_kf_changed =
-            k_delta_short != 0 || funding_delta_short != 0 || rent_delta_short != 0;
+        // rentstale (att647 NEW-1): only a K or F move starts a new settlement cohort
+        // (spec "Whenever a side's K or F target changes"; upstream `k || f`). A rent-only
+        // index move does NOT: rent is cash-basis and junior (charged on touch, capped at
+        // the capital no unsettled loss owns, credited to insurance/LP only as charged), so
+        // an unsettled rent due is never a hidden loss the LossStale gate must wait for.
+        // Leg-level "current" guards still require rent to be settled
+        // (`leg_kf_and_rent_are_current`), and a rent move still invalidates certificates
+        // through the funding epoch below.
+        let long_kf_changed = V16Core::kernel_kf_cohort_moves(k_delta_long, funding_delta_long);
+        let short_kf_changed = V16Core::kernel_kf_cohort_moves(k_delta_short, funding_delta_short);
 
         let mut asset = old;
         asset.k_long = add_non_min_i128(asset.k_long, k_delta_long)?;
@@ -17972,8 +17998,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (reanchored, band_gate) =
             self.band_prepare_accrual(asset_index, asset, &config, segment_end_slot)?;
         asset = reanchored;
-        let rent_before_long = asset.rent_index_long_num;
-        let rent_before_short = asset.rent_index_short_num;
         let target_changed = asset.raw_oracle_target_price != raw_oracle_target_price;
         let price_cap_anchor = if target_changed {
             asset.effective_price
@@ -18126,14 +18150,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             asset.fund_px_last = asset.effective_price;
         }
 
-        let long_kf_changed = asset.k_long != k_long_before
-            || asset.f_long_num != f_long_before
-            || asset.rent_index_long_num != rent_before_long;
-        let short_kf_changed = asset.k_short != k_short_before
-            || asset.f_short_num != f_short_before
-            || asset.rent_index_short_num != rent_before_short;
-        // v2.1 funding-scale tracker: rent index moves mark the cohort but add no
-        // adverse K/F travel (rent is capped at capital no unsettled loss owns).
+        // rentstale (att647 NEW-1): only K/F moves start a cohort; see the single-segment
+        // accrual above. Rent index moves neither mark the cohort nor add K/F travel.
+        let long_kf_changed = asset.k_long != k_long_before || asset.f_long_num != f_long_before;
+        let short_kf_changed =
+            asset.k_short != k_short_before || asset.f_short_num != f_short_before;
         self.track_kf_drift(
             asset_index,
             &asset,
@@ -20505,7 +20526,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::Stale);
         }
         let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
-        if !Self::leg_kf_epoch_is_current(asset, leg)
+        if !Self::leg_kf_and_rent_are_current(asset, leg)
             || k_target != leg.k_snap
             || f_target != leg.f_snap
             || self.b_target_for_leg(asset_index, leg)? != leg.b_snap
@@ -20603,7 +20624,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let asset = self.asset_state(asset_index)?;
         let (k_target, f_target) = Self::kf_target_for_leg_from_asset(asset, leg)?;
-        if !Self::leg_kf_epoch_is_current(asset, leg)
+        if !Self::leg_kf_and_rent_are_current(asset, leg)
             || k_target != leg.k_snap
             || f_target != leg.f_snap
         {
@@ -20692,7 +20713,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             let asset = self.asset_state(asset_index)?;
             let (k_target, f_target) = Self::kf_target_for_leg_from_asset(asset, leg)?;
-            if !Self::leg_kf_epoch_is_current(asset, leg)
+            if !Self::leg_kf_and_rent_are_current(asset, leg)
                 || k_target != leg.k_snap
                 || f_target != leg.f_snap
             {
@@ -25890,7 +25911,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 }
                 let asset = self.asset_state(asset_index)?;
                 let (k_target, f_target) = Self::kf_target_for_leg_from_asset(asset, leg)?;
-                if !Self::leg_kf_epoch_is_current(asset, leg)
+                if !Self::leg_kf_and_rent_are_current(asset, leg)
                     || k_target != leg.k_snap
                     || f_target != leg.f_snap
                 {
@@ -26470,6 +26491,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         leg.k_rem_num = k_rem_num;
         leg.f_rem_num = f_rem_num;
         leg.kf_epoch_snap = kf_epoch_snap;
+        // rentstale (att647 NEW-1): a forfeit settles K/F only and never charges rent. Before
+        // the fix a rent move had bumped the K/F epoch, so this settle made the leg "current"
+        // and the detach that follows dropped the unsettled rent. The leg-level guard now also
+        // checks the rent snapshot, so advance it here without a charge to keep that outcome
+        // (the forfeited leg's unsettled rent is forgone, as before).
+        leg.rent_snap = match leg.side {
+            SideV16::Long => asset.rent_index_long_num,
+            SideV16::Short => asset.rent_index_short_num,
+        };
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)?;
@@ -26695,7 +26725,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (k_target, f_target) = Self::kf_target_for_leg_from_asset(asset, leg)?;
         let b_target = self.b_target_for_leg(asset_index, leg)?;
         if account.header.pnl.get() == 0
-            && Self::leg_kf_epoch_is_current(asset, leg)
+            && Self::leg_kf_and_rent_are_current(asset, leg)
             && k_target == leg.k_snap
             && f_target == leg.f_snap
             && b_target <= leg.b_snap
@@ -30037,4 +30067,76 @@ pub fn repay_pnl_postconditions_hold(
         && capital_after <= capital_before
         && c_tot_after <= c_tot_before
         && capital_before - capital_after == c_tot_before - c_tot_after
+}
+
+#[cfg(test)]
+mod rent_not_kf_cohort_tests {
+    //! rentstale (att647 NEW-1): a rent-only index move does not start a K/F cohort, and the
+    //! leg-level "current" guard still requires the rent snapshot to be current.
+    use super::*;
+
+    #[test]
+    fn rent_only_move_does_not_mark_the_cohort_and_kf_still_do() {
+        assert!(!V16Core::kernel_kf_cohort_moves(0, 0), "rent-only: no K/F cohort");
+        assert!(V16Core::kernel_kf_cohort_moves(1, 0), "K move starts a cohort");
+        assert!(V16Core::kernel_kf_cohort_moves(0, -1), "F move starts a cohort");
+        let mut asset = AssetStateV16::default();
+        asset.stored_pos_count_long = 218;
+        asset.stored_pos_count_short = 1;
+        asset.kf_epoch_long = 5;
+        asset.kf_epoch_short = 5;
+        let unchanged = V16Core::kernel_mark_kf_stale_cohorts(
+            asset,
+            V16Core::kernel_kf_cohort_moves(0, 0),
+            V16Core::kernel_kf_cohort_moves(0, 0),
+            9,
+        )
+        .unwrap();
+        assert_eq!(
+            (unchanged.stale_account_count_long, unchanged.stale_account_count_short),
+            (0, 0)
+        );
+        assert_eq!((unchanged.kf_epoch_long, unchanged.kf_epoch_short), (5, 5));
+        let marked = V16Core::kernel_mark_kf_stale_cohorts(
+            asset,
+            V16Core::kernel_kf_cohort_moves(0, 7),
+            false,
+            9,
+        )
+        .unwrap();
+        assert_eq!(marked.stale_account_count_long, 218);
+        assert_eq!(marked.kf_epoch_long, 9);
+    }
+
+    #[test]
+    fn leg_guard_requires_both_the_kf_epoch_and_the_rent_snapshot() {
+        let mut asset = AssetStateV16::default();
+        asset.kf_epoch_long = 4;
+        asset.kf_epoch_short = 6;
+        asset.rent_index_long_num = 1_000;
+        asset.rent_index_short_num = 2_000;
+        let mut leg = PortfolioLegV16::EMPTY;
+        leg.active = true;
+        for side in [SideV16::Long, SideV16::Short] {
+            leg.side = side;
+            let (kf, rent) = match side {
+                SideV16::Long => (4, 1_000),
+                SideV16::Short => (6, 2_000),
+            };
+            leg.kf_epoch_snap = kf;
+            leg.rent_snap = rent;
+            assert!(MarketGroupV16ViewMut::<u64>::leg_kf_and_rent_are_current(asset, leg));
+            leg.rent_snap = rent - 1;
+            assert!(
+                !MarketGroupV16ViewMut::<u64>::leg_kf_and_rent_are_current(asset, leg),
+                "unsettled rent is not current"
+            );
+            leg.rent_snap = rent;
+            leg.kf_epoch_snap = kf - 1;
+            assert!(
+                !MarketGroupV16ViewMut::<u64>::leg_kf_and_rent_are_current(asset, leg),
+                "an older K/F epoch is not current"
+            );
+        }
+    }
 }

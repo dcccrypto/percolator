@@ -772,7 +772,8 @@ fn sec_adv_sweep_stats_rent_positive() {
 }
 
 
-/// Rent-ONLY accrual (no price move, no funding): the rent index alone marks the cohorts stale.
+/// Rent-ONLY accrual (no price move, no funding). rentstale (att647 NEW-1): the rent index alone
+/// no longer marks a cohort stale (only K/F do, as upstream); the tracker must stay exact.
 /// The tracker must follow (exact bookkeeping) with zero adverse travel. Discriminates the merge
 /// hunk that passes the rent-aware `changed` flags into `track_kf_drift`.
 #[test]
@@ -788,15 +789,15 @@ fn sec_adv_rent_only_accrual_keeps_the_tracker_exact() {
     }
     let a = w.asset();
     assert!(a.rent_index_long_num != 0, "rent accrued");
-    assert!(a.stale_account_count_long + a.stale_account_count_short > 0, "rent alone marked a cohort stale");
+    assert_eq!(a.stale_account_count_long + a.stale_account_count_short, 0, "rentstale: rent alone marks no cohort");
     RENT_E9.with(|c| c.set(0));
 }
 
 
 /// The PATH-accrual mark site (`accrue_asset_path_with_rent_to_not_atomic`): rent-only steps (same
-/// price, zero funding) must keep the K/F tracker exact. Discriminates the merge hunk that passes
-/// the rent-aware `changed` flags into `track_kf_drift` at that site (negative control in the
-/// ledger: dropping the rent flags there makes this test fail).
+/// price, zero funding) must keep the K/F tracker exact. rentstale (att647 NEW-1): the `changed`
+/// flags passed to `track_kf_drift` and `kernel_mark_kf_stale_cohorts` are now K/F-only at both
+/// sites (one variable each, so they cannot disagree); rent marks no cohort.
 #[test]
 fn sec_adv_rent_only_path_accrual_keeps_the_tracker_exact() {
     RENT_E9.with(|c| c.set(5_000));
@@ -808,6 +809,6 @@ fn sec_adv_rent_only_path_accrual_keeps_the_tracker_exact() {
     }
     let a = w.asset();
     assert!(a.rent_index_long_num != 0, "rent accrued on the path route");
-    assert!(a.stale_account_count_long + a.stale_account_count_short > 0, "rent alone marked a cohort stale on the path route");
+    assert_eq!(a.stale_account_count_long + a.stale_account_count_short, 0, "rentstale: rent alone marks no cohort on the path route");
     RENT_E9.with(|c| c.set(0));
 }
