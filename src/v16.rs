@@ -23645,6 +23645,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.mark_bankruptcy_hlock_event(charge_asset, bankrupt_side);
             }
         }
+        // ONE charge per bankruptcy episode (att-302 r4 F1): whatever this call could not absorb is
+        // now the account's remainder, no longer attributable to a single domain. Marking the record
+        // Unattributable stops the flat-close hook, a later close of another leg, or a refresh from
+        // charging the domain a second chunk, so the total charged to the domain is insurance up to
+        // its balance plus at most one B chunk, whatever the close order. The remainder is
+        // written off account-locally when the account is flat.
+        if account.header.pnl.get() < 0 {
+            account.header.loss_provenance = V16PodU32::new(LOSS_PROVENANCE_UNATTRIBUTABLE);
+        }
         Ok(())
     }
 
