@@ -30080,11 +30080,13 @@ mod rent_not_kf_cohort_tests {
         assert!(!V16Core::kernel_kf_cohort_moves(0, 0), "rent-only: no K/F cohort");
         assert!(V16Core::kernel_kf_cohort_moves(1, 0), "K move starts a cohort");
         assert!(V16Core::kernel_kf_cohort_moves(0, -1), "F move starts a cohort");
-        let mut asset = AssetStateV16::default();
-        asset.stored_pos_count_long = 218;
-        asset.stored_pos_count_short = 1;
-        asset.kf_epoch_long = 5;
-        asset.kf_epoch_short = 5;
+        let asset = AssetStateV16 {
+            stored_pos_count_long: 218,
+            stored_pos_count_short: 1,
+            kf_epoch_long: 5,
+            kf_epoch_short: 5,
+            ..AssetStateV16::default()
+        };
         let unchanged = V16Core::kernel_mark_kf_stale_cohorts(
             asset,
             V16Core::kernel_kf_cohort_moves(0, 0),
@@ -30110,11 +30112,13 @@ mod rent_not_kf_cohort_tests {
 
     #[test]
     fn leg_guard_requires_both_the_kf_epoch_and_the_rent_snapshot() {
-        let mut asset = AssetStateV16::default();
-        asset.kf_epoch_long = 4;
-        asset.kf_epoch_short = 6;
-        asset.rent_index_long_num = 1_000;
-        asset.rent_index_short_num = 2_000;
+        let asset = AssetStateV16 {
+            kf_epoch_long: 4,
+            kf_epoch_short: 6,
+            rent_index_long_num: 1_000,
+            rent_index_short_num: 2_000,
+            ..AssetStateV16::default()
+        };
         let mut leg = PortfolioLegV16::EMPTY;
         leg.active = true;
         for side in [SideV16::Long, SideV16::Short] {
