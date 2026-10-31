@@ -13190,10 +13190,15 @@ fn v16_liquidation_of_unattributed_deficit_never_charges_the_surviving_domain() 
             long.validate_with_market(&market.as_view()).unwrap();
             short.validate_with_market(&market.as_view()).unwrap();
         } else {
-            assert_eq!(outcome.map(|o| o.closed_q), Err(V16Error::RecoveryRequired));
-            assert_eq!(market.header.mode, 2, "Recovery rather than charging asset 1");
+            // #302 round 3: the recorded domain (asset 0) has no insurance and no winners left, so
+            // nothing is charged to it; the deficit is written off in the Live market, never Recovery,
+            // and the surviving asset's domain is still not charged.
+            let outcome = outcome.expect("b-prime-2: no Recovery for an uncoverable flat deficit");
+            assert_eq!((outcome.insurance_used, outcome.residual_booked, outcome.explicit_loss), (0, 0, 0));
+            assert_eq!(market.header.mode, 0, "the market stays Live");
             assert_eq!(market.header.insurance.get(), insurance_before, "no insurance consumed");
-            assert_eq!(short.header.pnl.get(), -250, "deficit untouched");
+            assert_eq!(short.header.pnl.get(), 0, "deficit written off");
+            assert_eq!(market.header.negative_pnl_account_count.get(), 0);
         }
     }
 }
@@ -15895,3 +15900,259 @@ fn v16_resolved_zero_conversion_coclaimants_on_empty_bucket_both_close() {
     loser.validate_with_market(&market.as_view()).unwrap();
 }
 
+
+// ---------------------------------------------------------------------------
+// GH#292 (dcccrypto/percolator): flat, zero-capital, negative-pnl account left behind by the
+// `liquidation_lock` branch of `liquidate_account_not_atomic`.
+// ---------------------------------------------------------------------------
+
+/// Drives the #292 fixture: two-asset cross-margin short at capital 0, pnl -250, lock 1, one
+/// leg left on asset 1; liquidates that last leg. Then runs every permissionless public step
+/// that exists for the stuck account (auto-crank x4, refresh, `try_clear`). Returns nothing;
+/// callers assert on the final state through the closure.
+fn gh292_drive<R>(
+    f: impl FnOnce(&mut MarketGroupV16ViewMut<'_, u64>, &PortfolioV16ViewMut<'_>, bool) -> R,
+) -> R {
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        unattributed_deficit_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    open_unattributed_deficit(&mut market, &mut long, &mut short);
+    assert_eq!(short.header.liquidation_lock, 1);
+    // Liquidation may legitimately return Err(RecoveryRequired) under an escalating fix.
+    let _ = market.liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 1 });
+    for _ in 0..4 {
+        let slot = market.header.current_slot.get();
+        let _ = market.permissionless_auto_crank_not_atomic(
+            &mut short,
+            AutoCrankWorkV16 {
+                now_slot: slot,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        );
+        let _ = market.full_account_refresh_not_atomic(&mut short);
+    }
+    let cleared = market.try_clear_bankruptcy_hlock_not_atomic().unwrap_or(false);
+    f(&mut market, &short, cleared)
+}
+
+/// PROPERTY (red on fd654cec + #301, green on a fix): in a Live market the locked flat deficit
+/// does not latch. Either the deficit was resolved (pnl >= 0, counter 0, h-lock clearable) or the
+/// market transitioned to Recovery with a recorded reason.
+#[test]
+fn gh292_flat_locked_deficit_does_not_latch_group_hlock() {
+    gh292_drive(|market, short, cleared| {
+        if market.header.mode == 0 {
+            assert!(short.header.pnl.get() >= 0, "Live: deficit must be resolved, pnl={}", short.header.pnl.get());
+            assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+            assert_eq!(short.header.liquidation_lock, 0, "account-local lock released with the deficit");
+            if !cleared {
+                // The ONLY allowed remaining blocker is the separate, known claim-term over-lock
+                // (unconverted winner: `pnl_pos_tot != 0`, ledger LEDGER-FINDINGS:798-801). Prove it
+                // is the only one: with the winner's claim gone the clear must go through.
+                assert_ne!(market.header.pnl_pos_tot.get(), 0, "unexplained residual blocker");
+                market.header.pnl_pos_tot = V16PodU128::new(0);
+                assert!(
+                    market.try_clear_bankruptcy_hlock_not_atomic().unwrap(),
+                    "with the winner claim gone the h-lock must clear"
+                );
+            }
+        } else {
+            assert!(
+                market.header.recovery_reason.try_to_runtime().unwrap().is_some(),
+                "non-Live without a recorded recovery reason"
+            );
+        }
+    });
+}
+
+/// Trade-path variant of the #292 state: the final leg is closed by a risk-reducing TRADE (the
+/// pre-existing upstream test pins this end state), so `liquidate_account_not_atomic` is never
+/// reached. Only the permissionless account steps can resolve it.
+fn gh292_drive_trade_path<R>(
+    f: impl FnOnce(&mut MarketGroupV16ViewMut<'_, u64>, &PortfolioV16ViewMut<'_>, bool) -> R,
+) -> R {
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        unattributed_deficit_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    open_unattributed_deficit(&mut market, &mut long, &mut short);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 1,
+                size_q: -signed_q(SIZE_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .expect("the final risk-reducing close must remain available");
+    assert!(active_bitmap_is_empty(short.header.active_bitmap.map(V16PodU64::get)));
+    for _ in 0..4 {
+        let slot = market.header.current_slot.get();
+        let _ = market.permissionless_auto_crank_not_atomic(
+            &mut short,
+            AutoCrankWorkV16 { now_slot: slot, observations: &[], resolved_close_fee_rate_per_slot: 0 },
+        );
+        let _ = market.full_account_refresh_not_atomic(&mut short);
+    }
+    let cleared = market.try_clear_bankruptcy_hlock_not_atomic().unwrap_or(false);
+    f(&mut market, &short, cleared)
+}
+
+#[test]
+fn gh292_bp_trade_path_flat_locked_deficit_is_released_by_permissionless_steps() {
+    gh292_drive_trade_path(|market, short, cleared| {
+        assert_eq!(market.header.mode, 0, "b-prime never leaves Live");
+        assert_eq!(short.header.pnl.get(), 0, "deficit recognised account-locally");
+        assert_eq!(short.header.liquidation_lock, 0);
+        assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+        if !cleared {
+            assert_ne!(market.header.pnl_pos_tot.get(), 0, "only the claim-term over-lock may remain");
+        }
+    });
+}
+
+/// Safety of the guard: a flat zero-capital NEGATIVE account WITHOUT the unattributed lock, and a
+/// locked account that still has an open leg, are NOT written off.
+#[test]
+fn gh292_bp_writeoff_does_not_fire_with_open_risk() {
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        unattributed_deficit_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    open_unattributed_deficit(&mut market, &mut long, &mut short);
+    // still one leg on asset 1: refresh must not write the deficit off
+    let _ = market.full_account_refresh_not_atomic(&mut short);
+    assert_eq!(short.header.pnl.get(), -250, "open risk: deficit stays");
+    assert_eq!(short.header.liquidation_lock, 1);
+    assert_eq!(market.header.negative_pnl_account_count.get(), 1);
+}
+
+// ---- att-302 probes (round-3 attack on PR #302), asserting the NEW behaviour ----
+#[test]
+fn gh302_292_fixture_stays_live_on_liquidation_and_trade_routes() {
+    for route in 0..2 {
+        const SIZE_Q: u128 = 10 * POS_SCALE;
+        let (mut header, mut markets, mut long_header, mut short_header) = unattributed_deficit_fixture();
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        open_unattributed_deficit(&mut market, &mut long, &mut short);
+        println!("route{route} pre: hlock={} negcnt={} pnl_pos_tot={} long pnl={} short pnl={}",
+            market.header.bankruptcy_hlock_active, market.header.negative_pnl_account_count.get(),
+            market.header.pnl_pos_tot.get(), long.header.pnl.get(), short.header.pnl.get());
+        if route == 0 {
+            let r = market.liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 1 });
+            println!("liq -> {:?} mode={} reason={:?} short legs_empty={} short pnl={} lock={}", r.map(|o| o.insurance_used), market.header.mode, market.header.recovery_reason.try_to_runtime().unwrap(), active_bitmap_is_empty(short.header.active_bitmap.map(V16PodU64::get)), short.header.pnl.get(), short.header.liquidation_lock);
+        } else {
+            market.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short,
+                TradeRequestV16 { asset_index: 1, size_q: -signed_q(SIZE_Q), exec_price: 100, fee_bps: 0 }, true).unwrap();
+        }
+        for _ in 0..4 {
+            let slot = market.header.current_slot.get();
+            let _ = market.permissionless_auto_crank_not_atomic(&mut short,
+                AutoCrankWorkV16 { now_slot: slot, observations: &[], resolved_close_fee_rate_per_slot: 0 });
+            let _ = market.full_account_refresh_not_atomic(&mut short);
+        }
+        let cleared = market.try_clear_bankruptcy_hlock_not_atomic().unwrap();
+        assert_eq!(market.header.mode, 0, "route{route}: the #292 fixture must stay Live (no Recovery)");
+        assert_eq!(short.header.pnl.get(), 0, "route{route}: deficit resolved");
+        assert_eq!(market.header.negative_pnl_account_count.get(), 0, "route{route}: counter released");
+        println!("route{route} post: mode={} hlock={} cleared={} negcnt={} pnl_pos_tot={} long pnl={} long legs_empty={} short pnl={} short lock={}",
+            market.header.mode, market.header.bankruptcy_hlock_active, cleared,
+            market.header.negative_pnl_account_count.get(), market.header.pnl_pos_tot.get(),
+            long.header.pnl.get(), active_bitmap_is_empty(long.header.active_bitmap.map(V16PodU64::get)),
+            short.header.pnl.get(), short.header.liquidation_lock);
+        let _ = market.full_account_refresh_not_atomic(&mut long);
+        let conv = market.convert_released_pnl_to_capital_not_atomic(&mut long);
+        let cleared2 = market.try_clear_bankruptcy_hlock_not_atomic().unwrap();
+        println!("route{route} after winner convert {:?}: hlock={} cleared={} pnl_pos_tot={}",
+            conv, market.header.bankruptcy_hlock_active, cleared2, market.header.pnl_pos_tot.get());
+    }
+}
+
+/// returns (mode, short_pnl, insurance_before, insurance_after, hlock, honest_withdraw_ok)
+fn att302_run(route: u8, ins_domain: Option<(usize, u128)>, honest: bool) -> (u8, i128, u128, u128, u8, String) {
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+    let (mut header, mut markets, mut long_header, mut short_header) = unattributed_deficit_fixture();
+    let mut h1 = account_fixture(2, 70);
+    let mut h2 = account_fixture(2, 71);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut hh1 = PortfolioV16ViewMut::new(&mut h1);
+    let mut hh2 = PortfolioV16ViewMut::new(&mut h2);
+    if honest {
+        market.deposit_not_atomic(&mut hh1, 5_000).unwrap();
+        market.deposit_not_atomic(&mut hh2, 5_000).unwrap();
+        market.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut hh1, &mut hh2,
+            TradeRequestV16 { asset_index: 1, size_q: signed_q(SIZE_Q), exec_price: 100, fee_bps: 0 }, true).unwrap();
+    }
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    open_unattributed_deficit(&mut market, &mut long, &mut short);
+    if let Some((d, amt)) = ins_domain {
+        market.deposit_domain_insurance_not_atomic(d, amt).unwrap();
+    }
+    let ins0 = market.header.insurance.get();
+    if route == 0 {
+        let _ = market.liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 1 });
+    } else {
+        market.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short,
+            TradeRequestV16 { asset_index: 1, size_q: -signed_q(SIZE_Q), exec_price: 100, fee_bps: 0 }, true).unwrap();
+    }
+    for _ in 0..4 {
+        let slot = market.header.current_slot.get();
+        let _ = market.permissionless_auto_crank_not_atomic(&mut short,
+            AutoCrankWorkV16 { now_slot: slot, observations: &[], resolved_close_fee_rate_per_slot: 0 });
+        let _ = market.full_account_refresh_not_atomic(&mut short);
+    }
+    let hw = if honest {
+        // honest account tries to reduce its a1 position (close) and withdraw
+        let r = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut hh2, &mut hh1,
+            TradeRequestV16 { asset_index: 1, size_q: -signed_q(SIZE_Q), exec_price: 100, fee_bps: 0 }, true);
+        format!("honest close trade {:?}", r.map(|_| ()))
+    } else { String::new() };
+    // conservation on every run: the vault still backs capital plus insurance
+    assert!(market.header.vault.get() >= market.header.c_tot.get() + market.header.insurance.get());
+    (market.header.mode, short.header.pnl.get(), ins0, market.header.insurance.get(), market.header.bankruptcy_hlock_active, hw)
+}
+
+/// Liquidation route: never Recovery; the recorded domain's insurance (100 < 250 or 10,000) is used
+/// up to its balance, the remainder written off; other domains' insurance untouched.
+#[test]
+fn gh302_liquidation_route_never_recovery_and_partial_insurance() {
+    gh302_never_recovery_and_partial_insurance(0);
+}
+
+/// Trade route: same (att-302 finding 3: the partial insurance 100 was left untouched).
+#[test]
+fn gh302_trade_route_never_recovery_and_partial_insurance() {
+    gh302_never_recovery_and_partial_insurance(1);
+}
+
+fn gh302_never_recovery_and_partial_insurance(route: u8) {
+    {
+        for ins in [None, Some((0usize, 100u128)), Some((1, 100)), Some((2, 100)), Some((3, 100)), Some((0, 10_000)), Some((1, 10_000)), Some((2, 10_000)), Some((3, 10_000))] {
+            let r = att302_run(route, ins, true);
+            println!("ROUTE{route} ins={:?} => mode={} short_pnl={} ins {}->{} hlock={} {}", ins, r.0, r.1, r.2, r.3, r.4, r.5);
+            // #302 round 3: never Recovery, deficit resolved in the live market on BOTH routes
+            assert_eq!(r.0, 0, "route{route} ins={ins:?}: market must stay Live");
+            assert_eq!(r.1, 0, "route{route} ins={ins:?}: deficit must be resolved");
+            let used = r.2 - r.3;
+            match ins {
+                // recorded loss domain 0: charged as far as it goes (partial allowed), rest written off
+                Some((0, amt)) => assert_eq!(used, amt.min(250), "route{route}: recorded domain insurance used"),
+                // any other domain's insurance is never touched
+                _ => assert_eq!(used, 0, "route{route} ins={ins:?}: other domains' insurance untouched"),
+            }
+        }
+    }
+}

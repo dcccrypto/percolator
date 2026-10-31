@@ -379,6 +379,33 @@ fn uncovered_loss_remains_with_open_risk(
     uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap)
 }
 
+/// GH#292 (variants d / b-prime): the exact shape of the stranded state that is recognised
+/// account-locally: Live, flat, zero capital, negative PnL under the unattributed-loss lock, and no
+/// open bankruptcy-close ledger. Pure so Kani can prove it covers every stuck state.
+#[inline]
+fn flat_locked_deficit_is_writable_off(
+    live: bool,
+    pnl: i128,
+    capital: u128,
+    locked: bool,
+    flat: bool,
+    pending_close_residual: bool,
+) -> bool {
+    live && pnl < 0 && capital == 0 && locked && flat && !pending_close_residual
+}
+
+#[cfg(kani)]
+pub fn kani_flat_locked_deficit_is_writable_off(
+    live: bool,
+    pnl: i128,
+    capital: u128,
+    locked: bool,
+    flat: bool,
+    pending_close_residual: bool,
+) -> bool {
+    flat_locked_deficit_is_writable_off(live, pnl, capital, locked, flat, pending_close_residual)
+}
+
 #[inline]
 fn unattributed_loss_lock_after_pnl(
     was_locked: bool,
@@ -522,8 +549,11 @@ pub enum LiquidationResidualChargeV16 {
     ReduceOnly,
     /// Run the waterfall (principal -> this loss domain's insurance -> B on its winners' side).
     Charge(usize),
-    /// No single domain may be charged and no risk is left to reduce: declare Recovery.
-    Recovery,
+    /// The close leaves the account FLAT (locked): reduce the risk, then resolve the stranded
+    /// deficit in the live market through `flat_deficit_route`: charge the recorded loss domain as
+    /// far as it can absorb it (its insurance, then B on its winners, partial allowed), write off
+    /// the remainder account-locally. Never Recovery from this arm.
+    ResolveFlat,
 }
 
 /// GH#292 + #299 (path 2b): who pays a liquidation's bankruptcy residual. Pure, a Kani target.
@@ -548,20 +578,39 @@ pub fn liquidation_residual_charge(
     if !locked {
         return LiquidationResidualChargeV16::Charge(closed_leg_loss_domain);
     }
+    if flat_after_close {
+        return LiquidationResidualChargeV16::ResolveFlat;
+    }
     match provenance {
-        LossProvenanceV16::Domain(d)
-            if flat_after_close || (closes_leg_fully && d == closed_leg_loss_domain) =>
-        {
+        LossProvenanceV16::Domain(d) if closes_leg_fully && d == closed_leg_loss_domain => {
             LiquidationResidualChargeV16::Charge(d)
         }
-        LossProvenanceV16::Domain(_) => LiquidationResidualChargeV16::ReduceOnly,
-        LossProvenanceV16::None | LossProvenanceV16::Unattributable if flat_after_close => {
-            LiquidationResidualChargeV16::Recovery
-        }
-        LossProvenanceV16::None | LossProvenanceV16::Unattributable => {
-            LiquidationResidualChargeV16::ReduceOnly
-        }
+        _ => LiquidationResidualChargeV16::ReduceOnly,
     }
+}
+
+/// b-prime-2: how a flat, locked, zero-capital deficit is resolved. Pure, a Kani target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlatDeficitRouteV16 {
+    /// The record names loss domain `d` and `d`'s asset is still live-reducible: charge `d` as far
+    /// as it can absorb (insurance, then B on its winners; partial allowed), write off the rest.
+    ChargeDomain(usize),
+    /// No recorded domain (or its asset is terminal): recognise the deficit account-locally
+    /// (never Recovery).
+    WriteOff,
+}
+
+#[inline]
+pub fn flat_deficit_route(record: LossProvenanceV16, domain_live: bool) -> FlatDeficitRouteV16 {
+    match record {
+        LossProvenanceV16::Domain(d) if domain_live => FlatDeficitRouteV16::ChargeDomain(d),
+        _ => FlatDeficitRouteV16::WriteOff,
+    }
+}
+
+#[cfg(kani)]
+pub fn kani_flat_deficit_route(record: LossProvenanceV16, domain_live: bool) -> FlatDeficitRouteV16 {
+    flat_deficit_route(record, domain_live)
 }
 
 #[cfg(kani)]
@@ -21617,28 +21666,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // risk left to protect, and returning early here stranded the deficit for
         // ever (nothing writes the pnl again, so `negative_pnl_account_count` never
         // decrements and `bankruptcy_hlock_active`, a group-wide withdrawal gate,
-        // never clears). That close therefore falls through to the unlocked body
-        // below and is RESOLVED IN THE LIVE MARKET: principal, then domain
-        // insurance, then the B-booking onto the loss-bearing side (in a vault-LP
-        // market that side is the vault LP, so the loss lands on the junior then the
-        // Earn seniors). Recovery is declared only when that cannot cover the deficit
-        // in one step (`preflight_liquidation_residual_durability`). The pnl reaches
-        // 0, which also clears the lock.
+        // never clears). That close is RESOLVED IN THE LIVE MARKET and NEVER declares
+        // Recovery (a permissionless asset must not be able to force a market-wide
+        // wind-down, 4bf0a98f): principal, then the recorded loss domain as far as it
+        // can absorb the rest (its insurance, then B on its winners, partial allowed),
+        // then whatever it could not absorb is written off account-locally.
         //
         // #299 (path 2b, spec req 5 + 27): the domain charged is the LOSS DOMAIN ON
         // RECORD (`loss_provenance`, written by the pnl write that realized each
         // loss), never the leg the caller happens to close last, so a loss realized
         // on asset A cannot be moved onto asset B's insurance or B-index. The charge
-        // runs at the full close of that domain's own leg, while its winners are
-        // still there to book against (closing it reduce-only first would remove
-        // them and turn the later flat close into Recovery: the close order would
-        // decide the outcome). A deficit realized by more than one loss domain has
-        // no single domain to charge: reduce-only until flat, then Recovery (no
-        // invented attribution, no pooled-insurance fallback). See
+        // runs BEFORE the leg is removed, while the domain's winners are still there
+        // to book against (a unilateral close shrinks the opposite side, so charging
+        // after it would make the close order decide the outcome). A deficit realized
+        // by more than one loss domain has no single domain to charge: reduce-only
+        // until flat, then written off account-locally (no invented attribution, no
+        // pooled-insurance fallback). #302 round 3: a locked full close of the
+        // recorded domain's own leg that the domain cannot absorb in one step is
+        // likewise charged partially and reduce-only, not Recovery. See
         // `liquidation_residual_charge`.
         let locked = decode_bool(account.header.liquidation_lock)?;
         let closed_leg_loss_domain = self.insurance_domain_index(request.asset_index, leg.side)?;
-        let charge = liquidation_residual_charge(
+        let mut charge = liquidation_residual_charge(
             locked,
             effective_loss_provenance(
                 decode_loss_provenance(account.header.loss_provenance.get())?,
@@ -21648,27 +21697,91 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             close_q == account_effective_q,
             active_bitmap_is_empty(remaining_active_bitmap),
         );
+        // A locked account's charge of its recorded loss domain at that leg's full close never
+        // declares Recovery: if the domain cannot absorb the whole deficit in one step (or its
+        // asset is no longer live-reducible), charge it as far as it can (insurance, then B on its
+        // winners; nothing if terminal), reduce the leg, and leave the remainder on the account;
+        // it is resolved or written off account-locally when the account is flat.
+        let mut pre_charged = (0u128, 0u128, 0u128);
+        if locked {
+            if let LiquidationResidualChargeV16::Charge(d) = charge {
+                let (domain_asset, domain_side) = self.domain_asset_side(d)?;
+                let live = self.require_asset_live_reducible(domain_asset).is_ok();
+                if !live
+                    || self.liquidation_residual_exceeds_single_step_capacity(
+                        domain_asset,
+                        domain_side,
+                        &account.as_view(),
+                    )?
+                {
+                    if live {
+                        if account.header.capital.get() != 0 {
+                            self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
+                        }
+                        if account.header.pnl.get() < 0
+                            && !account.header.close_progress.try_to_runtime()?.has_pending_residual()
+                        {
+                            self.charge_recorded_domain_up_to_capacity(account, d, &mut pre_charged)?;
+                        }
+                    }
+                    charge = LiquidationResidualChargeV16::ReduceOnly;
+                }
+            }
+        }
         let charge_domain = match charge {
-            LiquidationResidualChargeV16::ReduceOnly => {
+            LiquidationResidualChargeV16::ReduceOnly | LiquidationResidualChargeV16::ResolveFlat => {
+                let mut charged = pre_charged;
+                if matches!(charge, LiquidationResidualChargeV16::ResolveFlat) {
+                    // The close leaves the account flat. Resolve its deficit in the live market,
+                    // never Recovery, and BEFORE the leg is removed: closing first would take the
+                    // recorded domain's winners with it (a unilateral close shrinks the opposite
+                    // side), so the outcome would depend on the close order (spec req 27).
+                    // 1. principal; 2. the recorded loss domain as far as it can absorb the rest
+                    // (its insurance, then B on its winners; partial allowed); 3. whatever it could
+                    // not absorb (or all of it, with no live recorded domain) is written off
+                    // account-locally after the close (`resolve_flat_unattributed_deficit_locally`).
+                    if account.header.capital.get() != 0 {
+                        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
+                    }
+                    let record = effective_loss_provenance(
+                        decode_loss_provenance(account.header.loss_provenance.get())?,
+                        account.header.pnl.get(),
+                    );
+                    if let LossProvenanceV16::Domain(d) = record {
+                        let (domain_asset, _) = self.domain_asset_side(d)?;
+                        if account.header.pnl.get() < 0
+                            && self.require_asset_live_reducible(domain_asset).is_ok()
+                            && !account.header.close_progress.try_to_runtime()?.has_pending_residual()
+                        {
+                            self.charge_recorded_domain_up_to_capacity(account, d, &mut charged)?;
+                        }
+                    }
+                }
                 self.reduce_position(account, request.asset_index, close_q)?;
                 self.certify_account_after_local_settlement_with_price_override(account, None)?;
                 self.begin_zero_oi_residue_resets(request.asset_index)?;
                 self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
                 self.validate_shape_audit_scan()?;
                 self.validate_account_audit_scan(&account.as_view())?;
+                if matches!(charge, LiquidationResidualChargeV16::ResolveFlat) {
+                    if account.header.pnl.get() >= 0 {
+                        // fully absorbed by principal / the recorded domain: the episode ends
+                        account.header.loss_provenance = V16PodU32::new(LOSS_PROVENANCE_NONE);
+                    } else if self
+                        .resolve_flat_unattributed_deficit_locally(account, &mut (0, 0, 0))?
+                    {
+                        // remainder written off account-locally (or, if the close itself already
+                        // ran the flat resolution, nothing is left to do)
+                        self.validate_account_audit_scan(&account.as_view())?;
+                    }
+                }
                 return Ok(LiquidationOutcomeV16 {
                     closed_q: close_q,
-                    insurance_used: 0,
-                    residual_booked: 0,
-                    explicit_loss: 0,
+                    insurance_used: charged.0,
+                    residual_booked: charged.1,
+                    explicit_loss: charged.2,
                     fee_charged: 0,
                 });
-            }
-            LiquidationResidualChargeV16::Recovery => {
-                self.declare_permissionless_recovery(
-                    PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
-                )?;
-                return Err(V16Error::RecoveryRequired);
             }
             LiquidationResidualChargeV16::Charge(domain) => domain,
         };
@@ -23403,6 +23516,214 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// b-prime-2: charge the loss domain `domain` named by the record, as far as it can absorb the
+    /// account's negative PnL in ONE step, and never declare Recovery. Capital is 0 or already
+    /// settled by the caller. Fully coverable: insurance, then B on the domain's winners for the
+    /// whole remainder. Otherwise (PARTIAL): the domain's insurance as far as it goes, then as much
+    /// B on its winners as one step can book. Whatever is left stays on the account's PnL for the
+    /// caller to write off account-locally. Only the recorded domain is touched; `charged` is
+    /// (insurance used, residual booked, explicit loss).
+    fn charge_recorded_domain_up_to_capacity(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        domain: usize,
+        charged: &mut (u128, u128, u128),
+    ) -> V16Result<()> {
+        let (charge_asset, bankrupt_side) = self.domain_asset_side(domain)?;
+        let fully_coverable = !self.liquidation_residual_exceeds_single_step_capacity(
+            charge_asset,
+            bankrupt_side,
+            &account.as_view(),
+        )?;
+        if !fully_coverable {
+            // PARTIAL charge (never Recovery): the domain's insurance as far as it goes, then as
+            // much B on its winners as one step can book; the rest is written off below.
+            charged.0 = self.consume_domain_insurance_for_negative_pnl(
+                charge_asset,
+                bankrupt_side,
+                account,
+            )?;
+            let residual = if account.header.pnl.get() < 0 {
+                account.header.pnl.get().unsigned_abs()
+            } else {
+                0
+            };
+            let step = residual
+                .min(self.header.config.public_b_chunk_atoms.get())
+                .min(self.bankruptcy_residual_single_step_capacity(
+                    charge_asset,
+                    bankrupt_side,
+                    residual,
+                )?);
+            if step != 0 {
+                self.begin_close_progress_ledger(
+                    account,
+                    charge_asset,
+                    opposite_side(bankrupt_side),
+                    step,
+                )?;
+                let outcome = self.book_bankruptcy_residual_chunk_for_account_core(
+                    account,
+                    charge_asset,
+                    bankrupt_side,
+                    step,
+                )?;
+                charged.1 = outcome.booked_loss;
+                charged.2 = outcome.explicit_loss;
+                let cleared = outcome
+                    .booked_loss
+                    .checked_add(outcome.explicit_loss)
+                    .ok_or(V16Error::ArithmeticOverflow)?
+                    .min(step);
+                let cleared_i128 =
+                    i128::try_from(cleared).map_err(|_| V16Error::ArithmeticOverflow)?;
+                let new_pnl = account
+                    .header
+                    .pnl
+                    .get()
+                    .checked_add(cleared_i128)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                self.set_account_pnl(account, new_pnl)?;
+                self.mark_bankruptcy_hlock_event(charge_asset, bankrupt_side);
+            }
+            // fall through to the write-off of whatever the domain could not absorb
+        } else {
+            // capital is 0 (guard), so principal settlement would pay nothing; calling it
+            // here would re-enter this function through its paid == 0 hook.
+            let gross = if account.header.pnl.get() < 0 {
+                account.header.pnl.get().unsigned_abs()
+            } else {
+                0
+            };
+            if gross != 0 {
+                self.begin_close_progress_ledger(
+                    account,
+                    charge_asset,
+                    opposite_side(bankrupt_side),
+                    gross,
+                )?;
+            }
+            let insurance_used = self.consume_domain_insurance_for_negative_pnl(
+                charge_asset,
+                bankrupt_side,
+                account,
+            )?;
+            charged.0 = insurance_used;
+            if insurance_used != 0 {
+                self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
+            }
+            self.try_clear_bankruptcy_hlock_if_healthy()?;
+            let residual = if account.header.pnl.get() < 0 {
+                account.header.pnl.get().unsigned_abs()
+            } else {
+                0
+            };
+            if residual != 0 {
+                let outcome = self.book_bankruptcy_residual_chunk_for_account_core(
+                    account,
+                    charge_asset,
+                    bankrupt_side,
+                    residual,
+                )?;
+                charged.1 = outcome.booked_loss;
+                charged.2 = outcome.explicit_loss;
+                let cleared = outcome
+                    .booked_loss
+                    .checked_add(outcome.explicit_loss)
+                    .ok_or(V16Error::ArithmeticOverflow)?
+                    .min(residual);
+                let cleared_i128 =
+                    i128::try_from(cleared).map_err(|_| V16Error::ArithmeticOverflow)?;
+                let new_pnl = account
+                    .header
+                    .pnl
+                    .get()
+                    .checked_add(cleared_i128)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                self.set_account_pnl(account, new_pnl)?;
+                // scoped to the recorded domain (P2b L1 attribution), never the global byte
+                self.mark_bankruptcy_hlock_event(charge_asset, bankrupt_side);
+            }
+        }
+        // ONE charge per bankruptcy episode (att-302 r4 F1): whatever this call could not absorb is
+        // now the account's remainder, no longer attributable to a single domain. Marking the record
+        // Unattributable stops the flat-close hook, a later close of another leg, or a refresh from
+        // charging the domain a second chunk, so the total charged to the domain is insurance up to
+        // its balance plus at most one B chunk, whatever the close order. The remainder is
+        // written off account-locally when the account is flat.
+        if account.header.pnl.get() < 0 {
+            account.header.loss_provenance = V16PodU32::new(LOSS_PROVENANCE_UNATTRIBUTABLE);
+        }
+        Ok(())
+    }
+
+    /// GH#292 variant (d). A LIVE account that is flat, holds no capital, carries a negative PnL
+    /// under the unattributed-loss lock and has no open close ledger can no longer be liquidated
+    /// and cannot be attributed to any asset domain. Its deficit is recognised ACCOUNT-LOCALLY:
+    /// the PnL is set to zero (the same wind-down `clear_resolved_unattributed_negative_pnl`
+    /// applies at resolution, upstream 228d9b3f), which releases `negative_pnl_account_count` and
+    /// the lock. No value moves: vault, `C_tot`, insurance and every domain's B/K/F are untouched,
+    /// so no domain, LP or insurer is charged; the winners' positive claims are exactly as before
+    /// and stay bounded by realizable backing (they absorb the shortfall as an unrealized claim,
+    /// as at resolution). The group h-lock stays armed (unattributed) and clears through the
+    /// ordinary `try_clear_bankruptcy_hlock_if_healthy` once the other conjuncts hold.
+    fn resolve_flat_unattributed_deficit_locally(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        // (insurance used, residual booked, explicit loss) charged to the recorded domain
+        charged: &mut (u128, u128, u128),
+    ) -> V16Result<bool> {
+        if !flat_locked_deficit_is_writable_off(
+            decode_market_mode(self.header.mode)? == MarketModeV16::Live,
+            account.header.pnl.get(),
+            account.header.capital.get(),
+            decode_bool(account.header.liquidation_lock)?,
+            active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get)),
+            account.header.close_progress.try_to_runtime()?.has_pending_residual(),
+        ) {
+            return Ok(false);
+        }
+        // b-prime-2 (a): an ATTRIBUTABLE deficit (the record names one loss domain `d`) is charged
+        // to `d` first: principal (capital is 0 here), then d's insurance, then B on d's winners,
+        // exactly as the liquidation body does at the full close of d's own leg (spec req 5). Only
+        // when `d` cannot absorb it in one step (insurance + B capacity short, or the asset is no
+        // longer live-reducible) is the deficit written off, whole, without touching insurance.
+        let record = effective_loss_provenance(
+            decode_loss_provenance(account.header.loss_provenance.get())?,
+            account.header.pnl.get(),
+        );
+        // The recorded domain is charged whenever its asset can still be reduced in the live
+        // market; how much it can absorb in one step only decides full vs partial (below).
+        let route = match record {
+            LossProvenanceV16::Domain(domain) => {
+                let (charge_asset, _) = self.domain_asset_side(domain)?;
+                flat_deficit_route(record, self.require_asset_live_reducible(charge_asset).is_ok())
+            }
+            _ => flat_deficit_route(record, false),
+        };
+        if let FlatDeficitRouteV16::ChargeDomain(domain) = route {
+            self.charge_recorded_domain_up_to_capacity(account, domain, charged)?;
+            if account.header.pnl.get() >= 0 {
+                account.header.loss_provenance = V16PodU32::new(LOSS_PROVENANCE_NONE);
+                account.header.health_cert.valid = 0;
+                self.try_clear_bankruptcy_hlock_if_healthy()?;
+                return Ok(true);
+            }
+            if account.header.close_progress.try_to_runtime()?.has_pending_residual() {
+                // The chunk left a residual with an open ledger: not ours to write off.
+                return Ok(true);
+            }
+            // PARTIAL: the recorded domain absorbed what it could; write off the remainder below.
+        }
+        // (b) Truly unattributable (or uncoverable): the deficit is recognised account-locally.
+        // Nothing new is marked on the h-lock: this moves no value and opens no new bankruptcy
+        // event, so the byte keeps exactly the scope the original loss events gave it.
+        self.set_account_pnl(account, 0)?;
+        account.header.health_cert.valid = 0;
+        self.try_clear_bankruptcy_hlock_if_healthy()?;
+        Ok(true)
+    }
+
     fn settle_negative_pnl_from_principal_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -23429,6 +23750,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             pnl,
         )?;
         if paid == 0 {
+            // GH#292 variant (d): a flat, zero-capital account whose deficit is unattributed
+            // (locked, no open close ledger) has no domain to charge and nothing to liquidate.
+            // Recognise the deficit account-locally instead of leaving the counter armed forever.
+            if self.resolve_flat_unattributed_deficit_locally(account, &mut (0, 0, 0))? {
+                return Ok(0);
+            }
             self.mark_bankruptcy_hlock_for_account(&account.as_view())?;
             return Ok(0);
         }
