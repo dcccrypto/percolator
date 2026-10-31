@@ -3056,3 +3056,99 @@ fn rentstale_unsettled_rent_never_becomes_a_deficit() {
     assert!(cap - acct.capital.get() <= owed);
     w.assert_conservation();
 }
+
+// ---------------------------------------------------------------------------
+// att303 (independent attack on PR #303): differential "entrant harm" check. An entrant opens
+// while an untouched near-IM long owes many slots of rent (now admitted: no cohort). Then the
+// price crashes, the long goes bankrupt and is liquidated. The entrant (a short) must be no worse
+// off than in the identical world with rent OFF: the long's unsettled rent must not have become
+// a loss that is socialised onto the entrant.
+// ---------------------------------------------------------------------------
+
+struct Att303Out {
+    entrant_short_equity: i128,
+    first_short_equity: i128,
+    b_short: u128,
+    liq_loss: (u128, u128, u128),
+    rent_unrouted: u128,
+}
+
+fn att303_run(rent_long: u64, sweep_before_entry: bool) -> Att303Out {
+    let mut w = World::new(band_cfg(0), 4, 10_000_000);
+    // 0: near-IM long, 1: its short. 2/3: the entrant pair (2 = entrant short).
+    w.trade(0, 1, 90 * POS_SCALE).unwrap();
+    for i in 0..2 {
+        w.refresh(i).unwrap();
+    }
+    for _ in 0..150 {
+        w.now += 3;
+        w.accrue(0, rent_long, 0).unwrap();
+        assert_eq!(
+            (w.asset().stale_account_count_long, w.asset().stale_account_count_short),
+            (0, 0)
+        );
+    }
+    if rent_long != 0 {
+        assert!(w.asset().rent_index_long_num > 0, "non-vacuous: rent owed");
+    }
+    if sweep_before_entry {
+        for i in 0..2 {
+            w.refresh(i).unwrap();
+        }
+    }
+    w.trade(3, 2, 10 * POS_SCALE).expect("entrant opens while leg 0 owes rent");
+    // Crash: the long goes far past bankruptcy.
+    w.set_target(P0 * 70 / 100);
+    for _ in 0..20 {
+        w.now += 3;
+        w.accrue(0, rent_long, 0).unwrap();
+    }
+    assert!(w.asset().effective_price <= P0 * 71 / 100, "crash reached");
+    let _ = w.refresh(0);
+    let out = w
+        .with(0, |m, a| m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: 0 }))
+        .expect("liquidate the bankrupt long");
+    for i in 1..4 {
+        let _ = w.refresh(i);
+    }
+    let eq = |w: &World, i: usize| w.accounts[i].capital.get() as i128 + w.accounts[i].pnl.get();
+    w.assert_conservation();
+    Att303Out {
+        entrant_short_equity: eq(&w, 2),
+        first_short_equity: eq(&w, 1),
+        b_short: w.asset().b_short_num,
+        liq_loss: (out.insurance_used, out.residual_booked, out.explicit_loss),
+        rent_unrouted: w.asset().rent_unrouted_atoms,
+    }
+}
+
+#[test]
+fn att303_unsettled_rent_does_not_harm_an_entrant_vs_rent_off() {
+    let off = att303_run(0, false);
+    let on = att303_run(23, false);
+    let swept = att303_run(23, true);
+    eprintln!(
+        "att303 off: eq2={} eq1={} b_short={} liq={:?} ru={}",
+        off.entrant_short_equity, off.first_short_equity, off.b_short, off.liq_loss, off.rent_unrouted
+    );
+    eprintln!(
+        "att303 on : eq2={} eq1={} b_short={} liq={:?} ru={}",
+        on.entrant_short_equity, on.first_short_equity, on.b_short, on.liq_loss, on.rent_unrouted
+    );
+    eprintln!(
+        "att303 swp: eq2={} eq1={} b_short={} liq={:?} ru={}",
+        swept.entrant_short_equity, swept.first_short_equity, swept.b_short, swept.liq_loss, swept.rent_unrouted
+    );
+    // Non-vacuity: the long really went bankrupt and something was socialised / absorbed.
+    assert!(
+        off.liq_loss.0 + off.liq_loss.1 + off.liq_loss.2 + off.b_short > 0,
+        "non-vacuous: a deficit existed"
+    );
+    assert!(
+        on.entrant_short_equity >= off.entrant_short_equity,
+        "unsettled rent harmed the entrant: {} < {}",
+        on.entrant_short_equity,
+        off.entrant_short_equity
+    );
+    assert!(on.b_short <= off.b_short, "unsettled rent grew the socialised loss");
+}
