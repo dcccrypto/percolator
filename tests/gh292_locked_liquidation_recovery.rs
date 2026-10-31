@@ -301,7 +301,7 @@ fn snap(w: &W2) -> Snap {
 }
 
 /// The resolution charged asset 0's domain (the one that realized the loss) and nothing else.
-fn assert_resolved_cleanly(l: &Latched, before: &Snap, out: &LiquidationOutcomeV16) {
+fn assert_resolved_cleanly(l: &Latched, before: &Snap, out: &LiquidationOutcomeV16, written_off: u128) {
     let w = &l.w;
     assert_eq!(w.accounts[0].pnl.get(), 0, "deficit fully resolved in place");
     assert_eq!(w.accounts[0].liquidation_lock, 0, "lock clears with the deficit");
@@ -320,9 +320,9 @@ fn assert_resolved_cleanly(l: &Latched, before: &Snap, out: &LiquidationOutcomeV
     );
     assert!(w.header.vault.get() >= w.header.c_tot.get() + w.header.insurance.get());
     assert_eq!(
-        out.insurance_used + out.residual_booked + (before.c_tot - w.header.c_tot.get()),
+        out.insurance_used + out.residual_booked + (before.c_tot - w.header.c_tot.get()) + written_off,
         l.deficit,
-        "deficit = principal paid + insurance + booked residual (no remainder lost)"
+        "deficit = principal paid + insurance + booked residual + written off (nothing lost)"
     );
     // Source-domain isolation: asset 1 (whatever leg was closed last) is untouched on both sides,
     // and on asset 0 only the winners' (short) side moves, never the bankrupt's own long side.
@@ -346,7 +346,7 @@ fn gh292_locked_flat_close_resolves_the_deficit_in_the_live_market() {
     assert_eq!(before.neg, 1, "precondition: the counter is armed");
     let out = resolve(&mut l).expect("the flat close must resolve, not escalate or strand");
     assert!(out.closed_q > 0);
-    assert_resolved_cleanly(&l, &before, &out);
+    assert_resolved_cleanly(&l, &before, &out, 0);
     // No insurance anywhere: the whole deficit is B-booked onto the short side of a0.
     assert_eq!(out.insurance_used, 0);
     assert_eq!(out.residual_booked, l.deficit);
@@ -360,7 +360,7 @@ fn gh292_stage_insurance_only_cover_books_nothing() {
     let mut l = latched(None, probe + 1_000);
     let before = snap(&l.w);
     let out = resolve(&mut l).expect("insurance covers it");
-    assert_resolved_cleanly(&l, &before, &out);
+    assert_resolved_cleanly(&l, &before, &out, 0);
     assert_eq!(out.insurance_used, l.deficit);
     assert_eq!(out.residual_booked, 0, "insurance is exhausted BEFORE any B-booking");
     assert_eq!(b_total(&l.w, 0).1, before.a0_b.1, "no winner haircut at all");
@@ -377,7 +377,7 @@ fn gh292_stage_insurance_then_b_booking_in_order() {
     let mut l = latched(None, seed);
     let before = snap(&l.w);
     let out = resolve(&mut l).expect("insurance + B covers it");
-    assert_resolved_cleanly(&l, &before, &out);
+    assert_resolved_cleanly(&l, &before, &out, 0);
     assert_eq!(out.insurance_used, seed, "ALL available insurance is used first");
     assert_eq!(out.residual_booked, l.deficit - seed, "only the remainder is booked");
     assert_eq!(l.w.header.insurance.get(), before.insurance - seed);
@@ -406,26 +406,23 @@ fn gh292_only_the_charged_domains_holder_bears_the_booking() {
     assert_eq!(b_total(&l.w, 1), (0, 0), "the closed-last asset's domain is untouched");
 }
 
-/// Stage 3: nothing can cover it in one step -> Recovery (and only then). Forces the
-/// single-step B capacity below the residual with a one-atom chunk.
+/// Stage 3 (changed by b-prime-2, att-302 finding 1): nothing can cover the deficit in one step ->
+/// the recorded domain is charged as far as one step goes (insurance, then a one-atom chunk of B)
+/// and the remainder is written off account-locally. NEVER Recovery: that is the permissionless
+/// force-the-whole-group-into-Recovery lever Toly removed in 4bf0a98f. This replaces
+/// `gh292_stage_uncoverable_declares_recovery`, which pinned the old Recovery escalation.
 #[test]
-fn gh292_stage_uncoverable_declares_recovery() {
-    let mut l = latched(Some(1), 0);
-    let before = snap(&l.w);
-    assert!(l.deficit > 1);
-    let out = resolve(&mut l);
-    assert!(
-        matches!(out, Err(V16Error::RecoveryRequired)),
-        "an uncoverable deficit must escalate, got {:?}",
-        out.as_ref().map(|o| o.closed_q).map_err(|e| format!("{e:?}"))
-    );
-    assert_eq!(l.w.header.mode, 2, "Recovery declared");
-    assert!(l.w.header.recovery_reason.try_to_runtime().unwrap().is_some());
-    // The preflight runs before any mutation: nothing was charged on the way to Recovery.
-    assert_eq!(l.w.header.insurance.get(), before.insurance, "no insurance consumed");
-    assert_eq!(l.w.header.c_tot.get(), before.c_tot);
-    assert_eq!(l.w.accounts[0].pnl.get().unsigned_abs(), l.deficit, "deficit untouched");
-    assert_eq!((b_total(&l.w, 0), b_total(&l.w, 1)), (before.a0_b, before.a1_b), "nothing booked");
+fn gh292_uncoverable_deficit_is_charged_partially_and_written_off_never_recovery() {
+    for first in [0usize, 1] {
+        let mut l = latch(260_000, Some(1), false, &[(DOMAIN_A0_SHORT, 0)], first).expect("latched");
+        let before = snap(&l.w);
+        assert!(l.deficit > 1);
+        let out = resolve(&mut l).expect("never Recovery: the flat close succeeds");
+        assert_eq!(l.w.header.mode, 0, "market stays Live");
+        assert!(l.w.header.recovery_reason.try_to_runtime().unwrap().is_none());
+        assert_eq!((out.insurance_used, out.residual_booked, out.explicit_loss), (0, 1, 0), "one atom of B booked");
+        assert_resolved_cleanly(&l, &before, &out, l.deficit - 1);
+    }
 }
 
 /// A deficit that insurance + the chunk can cover never reaches Recovery even when the chunk is
@@ -439,7 +436,7 @@ fn gh292_small_residual_after_insurance_does_not_escalate() {
     let mut l = latched(Some(chunk), seed);
     let before = snap(&l.w);
     let out = resolve(&mut l).expect("residual == chunk is bookable in one step");
-    assert_resolved_cleanly(&l, &before, &out);
+    assert_resolved_cleanly(&l, &before, &out, 0);
     assert_eq!(out.insurance_used, seed);
     assert_eq!(out.residual_booked, chunk);
 }
@@ -595,7 +592,7 @@ fn e299_liquidator_cannot_steer_a0_loss_onto_a1_insurance() {
     assert_eq!(b_total(&l.w, 1), before.a1_b, "asset 1's winners not haircut");
     assert_eq!(out.residual_booked, l.deficit, "asset 0's winners bear it via B");
     assert!(b_total(&l.w, 0).1 > before.a0_b.1);
-    assert_resolved_cleanly(&l, &before, &out);
+    assert_resolved_cleanly(&l, &before, &out, 0);
 }
 
 /// Squid's original fixture: both assets fall, so the deficit was realized by two loss domains.
@@ -670,18 +667,25 @@ proptest! {
         prop_assert_eq!(l.deficit, deficit);
         let before = snap(&l.w);
         let after_ins = deficit - seed.min(deficit);
-        let must_recover = after_ins > chunk.unwrap_or(u128::MAX);
+        // b-prime-2: Recovery is never declared. The recorded domain pays its insurance, then at
+        // most one chunk of B; whatever one step cannot book is written off account-locally.
+        let booked_expected = after_ins.min(chunk.unwrap_or(u128::MAX));
+        let written_off = after_ins - booked_expected;
         match resolve(&mut l) {
             Ok(o) => {
-                prop_assert!(!must_recover, "covered state must not need Recovery");
                 prop_assert_eq!(l.w.accounts[0].pnl.get(), 0);
                 prop_assert_eq!(l.w.accounts[0].liquidation_lock, 0);
                 prop_assert_eq!(l.w.header.negative_pnl_account_count.get(), 0);
-                prop_assert_eq!(l.w.header.mode, 0);
+                prop_assert_eq!(l.w.header.mode, 0, "never Recovery");
                 prop_assert_eq!(l.w.header.vault.get(), before.vault);
-                prop_assert_eq!(o.insurance_used, seed.min(deficit));
-                prop_assert_eq!(o.residual_booked, after_ins);
+                prop_assert_eq!(o.insurance_used, seed.min(deficit), "insurance is consumed up to its balance");
+                prop_assert_eq!(o.residual_booked, booked_expected);
                 prop_assert_eq!(o.explicit_loss, 0);
+                // conservation: deficit = principal + insurance + booked + written off
+                prop_assert_eq!(
+                    o.insurance_used + o.residual_booked + (before.c_tot - l.w.header.c_tot.get()) + written_off,
+                    deficit
+                );
                 // ordering: booking only after insurance is exhausted
                 prop_assert!(o.residual_booked == 0 || o.insurance_used == seed.min(deficit));
                 prop_assert_eq!(l.w.header.insurance.get() + o.insurance_used, before.insurance + o.fee_charged);
@@ -690,21 +694,17 @@ proptest! {
                 prop_assert_eq!(b_total(&l.w, 1), before.a1_b);
                 prop_assert_eq!(b_total(&l.w, 0).0, before.a0_b.0);
             }
-            Err(V16Error::RecoveryRequired) => {
-                prop_assert!(must_recover, "Recovery only when single-step capacity cannot cover");
-                prop_assert_eq!(l.w.header.mode, 2);
-            }
-            Err(e) => prop_assert!(false, "unexpected error {:?}", e),
+            Err(e) => prop_assert!(false, "unexpected error {:?} (Recovery must never be declared)", e),
         }
     }
 }
 
 /// Non-vacuity guard for the sim: a deterministic sweep over the same state space (both close
 /// orders) must actually reach the latched state many times AND exercise every outcome (resolved
-/// with insurance only, insurance + B, B only, and Recovery), asserting the invariants on each.
+/// with insurance only, insurance + B, B only, and partial charge + write-off; never Recovery), asserting the invariants on each.
 #[test]
 fn gh292_sim_sweep_covers_every_waterfall_outcome() {
-    let (mut ran, mut ins_only, mut ins_b, mut b_only, mut recovery) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    let (mut ran, mut ins_only, mut ins_b, mut b_only, mut partial) = (0u32, 0u32, 0u32, 0u32, 0u32);
     for deposit in (200_000u128..=330_000).step_by(10_000) {
         for first in [0usize, 1] {
             let Some(probe) = latched_with_deposit(deposit, None, 0, first) else { continue };
@@ -718,30 +718,26 @@ fn gh292_sim_sweep_covers_every_waterfall_outcome() {
                     ran += 1;
                     let before = snap(&l.w);
                     let used = seed.min(deficit);
-                    let must_recover = deficit - used > chunk.unwrap_or(u128::MAX);
+                    let booked_expected = (deficit - used).min(chunk.unwrap_or(u128::MAX));
+                    let written_off = deficit - used - booked_expected;
                     match resolve(&mut l) {
                         Ok(o) => {
-                            assert!(!must_recover);
-                            assert_resolved_cleanly(&l, &before, &o);
-                            assert_eq!((o.insurance_used, o.residual_booked), (used, deficit - used));
-                            match (o.insurance_used > 0, o.residual_booked > 0) {
-                                (true, false) => ins_only += 1,
-                                (true, true) => ins_b += 1,
-                                (false, true) => b_only += 1,
-                                (false, false) => unreachable!("deficit > 0"),
+                            assert_resolved_cleanly(&l, &before, &o, written_off);
+                            assert_eq!((o.insurance_used, o.residual_booked), (used, booked_expected));
+                            match (o.insurance_used > 0, o.residual_booked > 0, written_off > 0) {
+                                (true, false, false) => ins_only += 1,
+                                (true, true, false) => ins_b += 1,
+                                (false, true, false) => b_only += 1,
+                                (_, _, true) => partial += 1,
+                                (false, false, false) => unreachable!("deficit > 0"),
                             }
                         }
-                        Err(V16Error::RecoveryRequired) => {
-                            assert!(must_recover);
-                            assert_eq!(l.w.header.mode, 2);
-                            recovery += 1;
-                        }
-                        Err(e) => panic!("unexpected {e:?}"),
+                        Err(e) => panic!("unexpected {e:?}: Recovery must never be declared"),
                     }
                 }
             }
         }
     }
-    println!("sweep ran={ran} ins_only={ins_only} ins_b={ins_b} b_only={b_only} recovery={recovery}");
-    assert!(ran >= 40 && ins_only > 0 && ins_b > 0 && b_only > 0 && recovery > 0, "sim must be non-vacuous");
+    println!("sweep ran={ran} ins_only={ins_only} ins_b={ins_b} b_only={b_only} partial_writeoff={partial}");
+    assert!(ran >= 40 && ins_only > 0 && ins_b > 0 && b_only > 0 && partial > 0, "sim must be non-vacuous");
 }

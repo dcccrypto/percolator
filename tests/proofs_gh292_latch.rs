@@ -83,9 +83,10 @@ fn proof_gh292_writeoff_covers_every_stuck_state_and_releases_the_lock() {
 }
 
 /// b-prime-2: the flat-deficit route charges ONLY the recorded domain (never one the caller picks),
-/// only when it is coverable, and every other input is a write-off. There is no Recovery arm.
+/// only while its asset is live-reducible (how much it can absorb decides full vs partial charge,
+/// not the route), and every other input is a write-off. There is no Recovery arm.
 #[kani::proof]
-fn proof_gh292_bprime2_flat_route_charges_only_the_recorded_coverable_domain() {
+fn proof_gh292_bprime2_flat_route_charges_only_the_recorded_live_domain() {
     let d = kani::any::<u8>() as usize;
     let which: u8 = kani::any();
     let rec = match which % 3 {
@@ -93,17 +94,17 @@ fn proof_gh292_bprime2_flat_route_charges_only_the_recorded_coverable_domain() {
         1 => LossProvenanceV16::Unattributable,
         _ => LossProvenanceV16::Domain(d),
     };
-    let coverable: bool = kani::any();
-    let out = kani_flat_deficit_route(rec, coverable);
+    let live: bool = kani::any();
+    let out = kani_flat_deficit_route(rec, live);
     match out {
         FlatDeficitRouteV16::ChargeDomain(c) => {
-            assert!(coverable);
+            assert!(live);
             assert_eq!(rec, LossProvenanceV16::Domain(c));
         }
         FlatDeficitRouteV16::WriteOff => {
-            assert!(!coverable || !matches!(rec, LossProvenanceV16::Domain(_)));
+            assert!(!live || !matches!(rec, LossProvenanceV16::Domain(_)));
         }
     }
-    kani::cover!(matches!(out, FlatDeficitRouteV16::ChargeDomain(_)), "attributed and coverable is charged");
-    kani::cover!(out == FlatDeficitRouteV16::WriteOff && coverable, "unattributable is written off even if coverable");
+    kani::cover!(matches!(out, FlatDeficitRouteV16::ChargeDomain(_)), "attributed and live is charged");
+    kani::cover!(out == FlatDeficitRouteV16::WriteOff && live, "unattributable is written off even if live");
 }

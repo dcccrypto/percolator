@@ -301,7 +301,13 @@ fn att_d4_cowinner_order() {
         println!("T4 deficit={d} order {:?} withdrawn {:?}", order, out);
         res.push(out);
     }
-    assert_eq!(res[0], res[1], "payout depends on cash-out order");
+    // b-prime-2 books the loss onto the winners' B index: payouts are pro rata up to 1 unit of
+    // rounding (the later converter takes the residue unit); totals are identical.
+    let tot = |r: &Vec<(usize, u128)>| r.iter().map(|x| x.1).sum::<u128>();
+    assert_eq!(tot(&res[0]), tot(&res[1]), "total payout depends on cash-out order");
+    for (x, y) in res[0].iter().zip(res[1].iter()) {
+        assert!(x.1.abs_diff(y.1) <= 1, "payout depends on cash-out order beyond 1 unit rounding: {:?} vs {:?}", res[0], res[1]);
+    }
 }
 
 /// T5: busy market. An UNRELATED healthy winner on asset 0 (accounts 3 long / 4 short) holds positive pnl.

@@ -174,7 +174,7 @@ proptest! {
 
 #[test]
 fn e299_charge_decision_table() {
-    use LiquidationResidualChargeV16::{Charge, ReduceOnly, WriteOff};
+    use LiquidationResidualChargeV16::{Charge, ReduceOnly, ResolveFlat};
     let none = LossProvenanceV16::None;
     for full in [false, true] {
         for flat in [false, true] {
@@ -182,16 +182,16 @@ fn e299_charge_decision_table() {
             for p in [none, Unattributable, Domain(0), Domain(5)] {
                 assert_eq!(liquidation_residual_charge(false, p, 3, full, flat), Charge(3));
             }
-            // locked, unattributable or no record: never charged; write-off (never Recovery) only once flat
+            // locked, unattributable or no record: never charged; ResolveFlat (never Recovery) once flat
             for p in [none, Unattributable] {
-                let want = if flat { WriteOff } else { ReduceOnly };
+                let want = if flat { ResolveFlat } else { ReduceOnly };
                 assert_eq!(liquidation_residual_charge(true, p, 3, full, flat), want);
             }
-            // locked, attributed to the closed leg's domain: charged at its full close or flat
-            let want = if full || flat { Charge(3) } else { ReduceOnly };
+            // locked, attributed to the closed leg's domain: charged at its full close; flat -> ResolveFlat
+            let want = if flat { ResolveFlat } else if full { Charge(3) } else { ReduceOnly };
             assert_eq!(liquidation_residual_charge(true, Domain(3), 3, full, flat), want);
             // locked, attributed elsewhere: the closed leg NEVER becomes the charged domain
-            let want = if flat { Charge(0) } else { ReduceOnly };
+            let want = if flat { ResolveFlat } else { ReduceOnly };
             assert_eq!(liquidation_residual_charge(true, Domain(0), 3, full, flat), want);
         }
     }
