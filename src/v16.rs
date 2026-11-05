@@ -21719,6 +21719,100 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         request: LiquidationRequestV16,
     ) -> V16Result<LiquidationOutcomeV16> {
+        self.liquidate_account_inner_not_atomic(account, None, request)
+    }
+
+    /// bigtest-2026-11-05 finding 2: liquidation that books a NON-BANKRUPT close against a
+    /// named counterparty instead of through quantity ADL.
+    ///
+    /// The plain entry closes the liquidated leg UNILATERALLY (`reduce_position`): nothing takes
+    /// the other side, so the opposite side's effective OI is scaled down through its `A`
+    /// factor. Upstream 6ae709e0 (aeyakovenko/percolator#134, the #131 fresh-basis-reissue LoF
+    /// fix) then refuses every attach / flip / enlarge on the asset while either `A != ADL_ONE`,
+    /// and `A` returns to `ADL_ONE` only through a side reset at zero effective OI. On a market
+    /// whose opposite side is held by a standing counterparty (the fork's vault LP), one routine
+    /// partial liquidation therefore latches the whole asset reduce-only until one side is flat.
+    ///
+    /// Here, when the close is clean (unlocked account, no bankruptcy residual after the fee and
+    /// principal, no insurance / B booking) and `counterparty` holds an opposite leg on the asset
+    /// with at least `close_q` effective quantity, both legs are reduced by `close_q` at the
+    /// current mark -- a matched, risk-REDUCING transfer for both accounts (no new basis, so the
+    /// #131 gate is untouched) -- and no `A` factor moves. In every other case (bankrupt close,
+    /// locked account, counterparty not certifiable, no or too small opposite leg, a pending
+    /// domain-loss barrier on its delta) it falls back to the unilateral path, so the outcome
+    /// is never worse than `liquidate_account_not_atomic`.
+    ///
+    /// The engine does not choose the counterparty and does not ask its consent: the CALLER
+    /// MUST bind it to a protocol-designated standing counterparty (the wrapper: the market's
+    /// registered vault-LP portfolio). An arbitrary caller-chosen counterparty would be a
+    /// targeted forced reduction of one holder instead of the pro-rata one quantity ADL applies.
+    pub fn liquidate_account_against_counterparty_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        counterparty: &mut PortfolioV16ViewMut<'_>,
+        request: LiquidationRequestV16,
+    ) -> V16Result<LiquidationOutcomeV16> {
+        self.liquidate_account_inner_not_atomic(account, Some(counterparty), request)
+    }
+
+    /// Reduce `account`'s leg on `asset_index` by `close_q` effective quantity and the
+    /// counterparty's OPPOSITE leg by the same amount, at the current mark (both legs have just
+    /// been refreshed, so no PnL moves). Returns `Ok(false)` without mutating anything when the
+    /// counterparty cannot take the close; the caller then uses the unilateral path.
+    fn try_reduce_position_matched(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        counterparty: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        close_q: u128,
+    ) -> V16Result<bool> {
+        if close_q == 0 {
+            return Ok(false);
+        }
+        let leg = Self::active_leg_for_asset(&account.as_view(), asset_index)?;
+        if !leg.active {
+            return Err(V16Error::InvalidLeg);
+        }
+        let cp_leg = match Self::active_leg_for_asset(&counterparty.as_view(), asset_index) {
+            Ok(l) if l.active && l.side == opposite_side(leg.side) => l,
+            _ => return Ok(false),
+        };
+        let asset = self.asset_state(asset_index)?;
+        let cp_effective_q = V16Core::effective_abs_quantity_for_leg(asset, cp_leg)?;
+        if cp_effective_q < close_q {
+            return Ok(false);
+        }
+        let close_i128 = i128::try_from(close_q).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let (delta, cp_delta) = match leg.side {
+            SideV16::Long => (
+                close_i128.checked_neg().ok_or(V16Error::ArithmeticOverflow)?,
+                close_i128,
+            ),
+            SideV16::Short => (
+                close_i128,
+                close_i128.checked_neg().ok_or(V16Error::ArithmeticOverflow)?,
+            ),
+        };
+        if self.position_delta_touches_pending_domain_loss_barrier(
+            &counterparty.as_view(),
+            asset_index,
+            cp_delta,
+        )? {
+            return Ok(false);
+        }
+        self.apply_position_delta(account, asset_index, delta)?;
+        self.apply_position_delta(counterparty, asset_index, cp_delta)?;
+        self.begin_side_reset_if_effective_oi_exhausted(asset_index, leg.side)?;
+        self.begin_side_reset_if_effective_oi_exhausted(asset_index, cp_leg.side)?;
+        Ok(true)
+    }
+
+    fn liquidate_account_inner_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        mut counterparty: Option<&mut PortfolioV16ViewMut<'_>>,
+        request: LiquidationRequestV16,
+    ) -> V16Result<LiquidationOutcomeV16> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
@@ -21745,6 +21839,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let cert = account.header.health_cert.try_to_runtime()?;
         if cert.certified_liq_deficit == 0 {
             return Err(V16Error::NonProgress);
+        }
+        // bigtest finding 2: a counterparty that cannot be brought current is simply not used
+        // (the unilateral path below is the fallback), it never blocks the liquidation.
+        if let Some(cp) = counterparty.as_mut() {
+            let certified = matches!(
+                self.refresh_account_and_certify_not_atomic(
+                    cp,
+                    None,
+                    self.header.config.public_b_chunk_atoms.get(),
+                    false,
+                    &mut 0u8,
+                )?,
+                AccountRefreshCertOutcomeV16::Certified(_)
+            );
+            if !certified {
+                counterparty = None;
+            }
         }
         let before_score = self.risk_score_unchecked(&account.as_view())?;
         let leg_slot =
@@ -22033,8 +22144,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // (the multi-leg-sticky rule would otherwise carry it into the next one).
             account.header.loss_provenance = V16PodU32::new(LOSS_PROVENANCE_NONE);
         }
-        self.reduce_position(account, request.asset_index, close_q)?;
+        // bigtest finding 2: a clean (non-bankrupt, unlocked) close is matched against the
+        // caller-bound counterparty when it can take it, so no `A` factor moves and the asset
+        // does not enter ADL reduce-only; otherwise the unilateral (quantity-ADL) close.
+        let matched = match counterparty.as_mut() {
+            Some(cp)
+                if !locked
+                    && gross_bankruptcy_residual == 0
+                    && insurance_used == 0
+                    && booked == 0
+                    && explicit == 0 =>
+            {
+                self.try_reduce_position_matched(account, cp, request.asset_index, close_q)?
+            }
+            _ => false,
+        };
+        if !matched {
+            self.reduce_position(account, request.asset_index, close_q)?;
+        }
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
+        if matched {
+            if let Some(cp) = counterparty.as_mut() {
+                self.certify_account_after_local_settlement_with_price_override(cp, None)?;
+                self.validate_account_audit_scan(&cp.as_view())?;
+            }
+        }
         self.begin_zero_oi_residue_resets(request.asset_index)?;
         if locked && !active_bitmap_is_empty(remaining_active_bitmap) {
             // #299: a locked account's charge of its loss domain at that leg's full close, with
