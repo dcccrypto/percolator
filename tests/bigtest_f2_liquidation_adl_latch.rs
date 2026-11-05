@@ -775,3 +775,158 @@ fn bytemuck_eq(a: &PortfolioAccountV16Account, b: &PortfolioAccountV16Account) -
     };
     pa == pb
 }
+
+// ---------------------------------------------------------------------------------------------
+// Regression (local-validator run 2026-11-05, percolator-prog tests/f2_local_validator.rs):
+// an already-latched asset and sequential matched liquidations.
+// ---------------------------------------------------------------------------------------------
+
+/// A second trader, long against the same lp, so two liquidations can run in one world.
+fn world_two_traders() -> (World, PortfolioAccountV16Account) {
+    let (mut header, mut markets) = market_fixture_slots(1, PRICE);
+    let mut trader = account_fixture(1, 10);
+    let mut trader2 = account_fixture(1, 14);
+    let mut lp = account_fixture(1, 11);
+    let mut l2 = account_fixture(1, 12);
+    let mut s2 = account_fixture(1, 13);
+    deposit(&mut header, &mut markets, &mut trader, 1_200_000);
+    deposit(&mut header, &mut markets, &mut trader2, 1_200_000);
+    for a in [&mut lp, &mut l2, &mut s2] {
+        deposit(&mut header, &mut markets, a, 400_000_000);
+    }
+    trade(
+        &mut header,
+        &mut markets,
+        &mut trader,
+        &mut lp,
+        signed_q(LOT),
+        PRICE,
+    )
+    .unwrap();
+    trade(
+        &mut header,
+        &mut markets,
+        &mut trader2,
+        &mut lp,
+        signed_q(LOT),
+        PRICE,
+    )
+    .unwrap();
+    trade(
+        &mut header,
+        &mut markets,
+        &mut l2,
+        &mut s2,
+        signed_q(LOT),
+        PRICE,
+    )
+    .unwrap();
+    let mut w = World {
+        header,
+        markets,
+        trader,
+        lp,
+        l2,
+        s2,
+    };
+    for step in 1..80u64 {
+        let p = PRICE * (100 - step) / 100;
+        accrue(&mut w.header, &mut w.markets, step + 1, p);
+        for i in 1..4 {
+            let a = match i {
+                1 => &mut w.lp,
+                2 => &mut w.l2,
+                _ => &mut w.s2,
+            };
+            refresh(&mut w.header, &mut w.markets, a);
+        }
+        let mut probe = w.fork();
+        match probe.liquidate(false) {
+            Err(V16Error::NonProgress) => continue,
+            Ok(_) => return (w, trader2),
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    panic!("never liquidatable");
+}
+
+fn liquidate_other(
+    w: &mut World,
+    who: &mut PortfolioAccountV16Account,
+    with_lp: bool,
+) -> LiquidationOutcomeV16 {
+    let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut tv = PortfolioV16ViewMut::new(who);
+    let req = LiquidationRequestV16 { asset_index: 0 };
+    if with_lp {
+        let mut cv = PortfolioV16ViewMut::new(&mut w.lp);
+        market
+            .liquidate_account_against_counterparty_not_atomic(&mut tv, &mut cv, req)
+            .unwrap()
+    } else {
+        market.liquidate_account_not_atomic(&mut tv, req).unwrap()
+    }
+}
+
+/// Sequential matched liquidations keep A at ADL_ONE every time, and the market stays open after each.
+#[test]
+fn f2_regression_sequential_matched_liquidations_keep_a_one() {
+    let (mut w, mut t2) = world_two_traders();
+    let lp0 = eff_q(&w.markets, &w.lp);
+    let o1 = w.liquidate(true).unwrap();
+    assert_eq!(w.a(), (ADL_ONE, ADL_ONE));
+    let o2 = liquidate_other(&mut w, &mut t2, true);
+    assert_eq!(w.a(), (ADL_ONE, ADL_ONE));
+    assert_eq!(
+        eff_q(&w.markets, &w.lp),
+        lp0 - o1.closed_q - o2.closed_q,
+        "the lp took both closes exactly"
+    );
+    {
+        let market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        market.validate_shape().unwrap();
+    }
+    open_new_short(&mut w).expect("open after two matched liquidations");
+}
+
+/// On an asset ALREADY latched by a unilateral close, a matched liquidation still works (it is risk-reducing for both
+/// legs, so the #134 gate allows it), does NOT move A any further, and does not lift the latch either: only a side
+/// reset (one side flat) or tag 104 does. Pinned so nobody reads "matched" as "unlatches".
+#[test]
+fn f2_regression_matched_liquidation_on_a_latched_asset_neither_deepens_nor_lifts_the_latch() {
+    let (mut w, mut t2) = world_two_traders();
+    w.liquidate(false).unwrap();
+    let (al, ash) = w.a();
+    assert_eq!(al, ADL_ONE);
+    assert!(ash < ADL_ONE, "latched by the unilateral close");
+    let lp_eff0 = eff_q(&w.markets, &w.lp);
+    let o = liquidate_other(&mut w, &mut t2, true);
+    assert!(o.closed_q > 0);
+    assert_eq!(w.a(), (al, ash), "A did not move");
+    let lp_eff1 = eff_q(&w.markets, &w.lp);
+    // eff_q rounds up per leg; the matched delta is exact up to that rounding
+    assert!(
+        lp_eff0 - lp_eff1 >= o.closed_q - 1 && lp_eff0 - lp_eff1 <= o.closed_q + 1,
+        "{lp_eff0} -> {lp_eff1}, closed {}",
+        o.closed_q
+    );
+    {
+        let market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        market.validate_shape().unwrap();
+    }
+    assert_eq!(
+        open_new_short(&mut w),
+        Err(V16Error::AdlReduceOnly),
+        "still latched: matched closes do not lift it"
+    );
+}
+
+/// Control for the above: the same second liquidation WITHOUT the counterparty deepens the latch.
+#[test]
+fn f2_regression_unilateral_second_liquidation_deepens_the_latch() {
+    let (mut w, mut t2) = world_two_traders();
+    w.liquidate(false).unwrap();
+    let ash = w.a().1;
+    liquidate_other(&mut w, &mut t2, false);
+    assert!(w.a().1 < ash);
+}
