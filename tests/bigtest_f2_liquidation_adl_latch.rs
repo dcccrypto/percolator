@@ -21,8 +21,10 @@ use percolator::{
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
     V16Config, V16Error, V16PodU64,
 };
-use percolator::{ADL_ONE, POS_SCALE};
-
+use percolator::{
+    AutoCrankObservationV16, AutoCrankPlanV16, AutoCrankResultV16, AutoCrankWorkV16, ADL_ONE,
+    POS_SCALE, S10_MAX_MOVES_PER_INSTRUCTION,
+};
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32])
@@ -49,8 +51,12 @@ fn market_fixture_activated(
     // under a 2-slot accrual window, so the solvency envelope validates). The shared p2b
     // fixture is IMR = MMR = 100%, under which a long can never become liquidatable before
     // the price reaches zero.
-    let mut cfg =
-        V16Config::public_user_fund_with_market_slots(max_portfolio_assets, market_slots, 0, 100_000);
+    let mut cfg = V16Config::public_user_fund_with_market_slots(
+        max_portfolio_assets,
+        market_slots,
+        0,
+        100_000,
+    );
     cfg.max_abs_funding_e9_per_slot = 10_000;
     cfg.max_price_move_bps_per_slot = 200;
     cfg.initial_margin_bps = 1_000;
@@ -130,7 +136,12 @@ fn trade(
         .map(|_| ())
 }
 
-fn deposit(header: &mut Header, markets: &mut Markets, a: &mut PortfolioAccountV16Account, amt: u128) {
+fn deposit(
+    header: &mut Header,
+    markets: &mut Markets,
+    a: &mut PortfolioAccountV16Account,
+    amt: u128,
+) {
     let mut market = MarketGroupV16ViewMut::new(header, markets);
     let mut v = PortfolioV16ViewMut::new(a);
     market.deposit_not_atomic(&mut v, amt).unwrap();
@@ -148,7 +159,12 @@ fn accrue(header: &mut Header, markets: &mut Markets, slot: u64, price: u64) {
 /// b-stale (the keeper does exactly this).
 fn refresh(header: &mut Header, markets: &mut Markets, a: &mut PortfolioAccountV16Account) {
     let now_slot = header.current_slot.get();
-    let price = markets[0].engine.asset.try_to_runtime().unwrap().effective_price;
+    let price = markets[0]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap()
+        .effective_price;
     for _ in 0..64 {
         let mut market = MarketGroupV16ViewMut::new(header, markets);
         let mut v = PortfolioV16ViewMut::new(a);
@@ -232,9 +248,32 @@ fn world() -> World {
     for a in [&mut lp, &mut l2, &mut s2] {
         deposit(&mut header, &mut markets, a, 400_000_000);
     }
-    trade(&mut header, &mut markets, &mut trader, &mut lp, signed_q(LOT), PRICE).unwrap();
-    trade(&mut header, &mut markets, &mut l2, &mut s2, signed_q(LOT), PRICE).unwrap();
-    let mut w = World { header, markets, trader, lp, l2, s2 };
+    trade(
+        &mut header,
+        &mut markets,
+        &mut trader,
+        &mut lp,
+        signed_q(LOT),
+        PRICE,
+    )
+    .unwrap();
+    trade(
+        &mut header,
+        &mut markets,
+        &mut l2,
+        &mut s2,
+        signed_q(LOT),
+        PRICE,
+    )
+    .unwrap();
+    let mut w = World {
+        header,
+        markets,
+        trader,
+        lp,
+        l2,
+        s2,
+    };
     for step in 1..80u64 {
         let p = PRICE * (100 - step) / 100;
         accrue(&mut w.header, &mut w.markets, step + 1, p);
@@ -249,7 +288,11 @@ fn world() -> World {
             refresh(&mut w.header, &mut w.markets, a);
         }
         let asset = w.markets[0].engine.asset.try_to_runtime().unwrap();
-        assert_eq!((asset.a_long, asset.a_short), (ADL_ONE, ADL_ONE), "nothing ADL'd while walking");
+        assert_eq!(
+            (asset.a_long, asset.a_short),
+            (ADL_ONE, ADL_ONE),
+            "nothing ADL'd while walking"
+        );
         let mut probe = World {
             header: w.header,
             markets: w.markets.clone(),
@@ -261,7 +304,10 @@ fn world() -> World {
         match probe.liquidate(false) {
             Err(V16Error::NonProgress) => continue,
             Ok(o) => {
-                assert_eq!((o.insurance_used, o.residual_booked, o.explicit_loss), (0, 0, 0));
+                assert_eq!(
+                    (o.insurance_used, o.residual_booked, o.explicit_loss),
+                    (0, 0, 0)
+                );
                 assert!(o.closed_q > 0 && o.closed_q < LOT, "a partial close: {o:?}");
                 println!("liquidatable (not bankrupt) at price {p} (step {step}): {o:?}");
                 return w;
@@ -277,8 +323,20 @@ fn open_new_short(w: &mut World) -> Result<(), V16Error> {
     let mut fresh_s = account_fixture(1, 31);
     deposit(&mut w.header, &mut w.markets, &mut fresh_l, 100_000_000);
     deposit(&mut w.header, &mut w.markets, &mut fresh_s, 100_000_000);
-    let p = w.markets[0].engine.asset.try_to_runtime().unwrap().effective_price;
-    trade(&mut w.header, &mut w.markets, &mut fresh_l, &mut fresh_s, signed_q(POS_SCALE), p)
+    let p = w.markets[0]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap()
+        .effective_price;
+    trade(
+        &mut w.header,
+        &mut w.markets,
+        &mut fresh_l,
+        &mut fresh_s,
+        signed_q(POS_SCALE),
+        p,
+    )
 }
 
 /// RED on today's path (documents the finding): one clean partial liquidation leaves
@@ -290,9 +348,15 @@ fn f2_unilateral_liquidation_latches_the_asset_reduce_only() {
     let o = w.liquidate(false).unwrap();
     let a = w.markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(a.a_long, ADL_ONE);
-    assert!(a.a_short < ADL_ONE, "the close was booked by scaling the shorts");
+    assert!(
+        a.a_short < ADL_ONE,
+        "the close was booked by scaling the shorts"
+    );
     assert_eq!(a.oi_eff_long_q, a.oi_eff_short_q);
-    assert!(w.header.insurance.get() >= insurance0, "no insurance draw: not a bankruptcy");
+    assert!(
+        w.header.insurance.get() >= insurance0,
+        "no insurance draw: not a bankruptcy"
+    );
     assert!(o.closed_q > 0);
     assert_eq!(open_new_short(&mut w), Err(V16Error::AdlReduceOnly));
 }
@@ -301,8 +365,16 @@ fn f2_unilateral_liquidation_latches_the_asset_reduce_only() {
 #[test]
 fn f2_matched_liquidation_keeps_the_asset_open_and_matches_the_unilateral_outcome() {
     let base = world();
-    let mut uni = World { header: base.header, markets: base.markets.clone(), ..base };
-    let mut mat = World { header: base.header, markets: base.markets.clone(), ..base };
+    let mut uni = World {
+        header: base.header,
+        markets: base.markets.clone(),
+        ..base
+    };
+    let mut mat = World {
+        header: base.header,
+        markets: base.markets.clone(),
+        ..base
+    };
     let value0 = total_value(&base.header, &base.all());
     let vault0 = base.header.vault.get();
     let lp_eff0 = eff_q(&base.markets, &base.lp);
@@ -325,15 +397,29 @@ fn f2_matched_liquidation_keeps_the_asset_open_and_matches_the_unilateral_outcom
     assert_eq!(eff_q(&mat.markets, &mat.lp), lp_eff0 - om.closed_q);
     assert_eq!(eff_q(&mat.markets, &mat.s2), s2_eff0);
     let au = uni.markets[0].engine.asset.try_to_runtime().unwrap();
-    assert_eq!(a.oi_eff_long_q, au.oi_eff_long_q, "same OI removed either way");
+    assert_eq!(
+        a.oi_eff_long_q, au.oi_eff_long_q,
+        "same OI removed either way"
+    );
 
     // Conservation: identical total value on both paths. Before the liquidation every account
     // but the trader was settled at the walked mark; the liquidation's own refresh settles the
     // trader's mark loss (LOT * (PRICE - mark)), which is the only change in total value.
-    assert_eq!(total_value(&mat.header, &mat.all()), total_value(&uni.header, &uni.all()));
-    let mark = base.markets[0].engine.asset.try_to_runtime().unwrap().effective_price;
+    assert_eq!(
+        total_value(&mat.header, &mat.all()),
+        total_value(&uni.header, &uni.all())
+    );
+    let mark = base.markets[0]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap()
+        .effective_price;
     let trader_mark_loss = (LOT * u128::from(PRICE - mark) / POS_SCALE) as i128;
-    assert_eq!(total_value(&mat.header, &mat.all()), value0 - trader_mark_loss);
+    assert_eq!(
+        total_value(&mat.header, &mat.all()),
+        value0 - trader_mark_loss
+    );
     {
         let market = MarketGroupV16ViewMut::new(&mut mat.header, &mut mat.markets);
         market.validate_shape().unwrap();
@@ -349,8 +435,16 @@ fn f2_matched_liquidation_keeps_the_asset_open_and_matches_the_unilateral_outcom
 #[test]
 fn f2_counterparty_without_an_opposite_leg_falls_back_to_the_unilateral_close() {
     let base = world();
-    let mut uni = World { header: base.header, markets: base.markets.clone(), ..base };
-    let mut fb = World { header: base.header, markets: base.markets.clone(), ..base };
+    let mut uni = World {
+        header: base.header,
+        markets: base.markets.clone(),
+        ..base
+    };
+    let mut fb = World {
+        header: base.header,
+        markets: base.markets.clone(),
+        ..base
+    };
     // Hand `fb` a counterparty on the SAME side as the trader (l2 is long).
     std::mem::swap(&mut fb.lp, &mut fb.l2);
     let ou = uni.liquidate(false).unwrap();
@@ -360,7 +454,10 @@ fn f2_counterparty_without_an_opposite_leg_falls_back_to_the_unilateral_close() 
         fb.markets[0].engine.asset.try_to_runtime().unwrap(),
         uni.markets[0].engine.asset.try_to_runtime().unwrap(),
     );
-    assert_eq!((a.a_long, a.a_short, a.oi_eff_long_q), (b.a_long, b.a_short, b.oi_eff_long_q));
+    assert_eq!(
+        (a.a_long, a.a_short, a.oi_eff_long_q),
+        (b.a_long, b.a_short, b.oi_eff_long_q)
+    );
     assert!(a.a_short < ADL_ONE);
 }
 
@@ -377,9 +474,32 @@ fn f2_counterparty_too_small_falls_back_to_the_unilateral_close() {
         deposit(&mut header, &mut markets, a, 400_000_000);
     }
     // The trader's short side is s2 (LOT); lp holds only one unit short against l2.
-    trade(&mut header, &mut markets, &mut trader, &mut s2, signed_q(LOT), PRICE).unwrap();
-    trade(&mut header, &mut markets, &mut l2, &mut lp, signed_q(1), PRICE).unwrap();
-    let mut w = World { header, markets, trader, lp, l2, s2 };
+    trade(
+        &mut header,
+        &mut markets,
+        &mut trader,
+        &mut s2,
+        signed_q(LOT),
+        PRICE,
+    )
+    .unwrap();
+    trade(
+        &mut header,
+        &mut markets,
+        &mut l2,
+        &mut lp,
+        signed_q(1),
+        PRICE,
+    )
+    .unwrap();
+    let mut w = World {
+        header,
+        markets,
+        trader,
+        lp,
+        l2,
+        s2,
+    };
     let mut closed = None;
     for step in 1..80u64 {
         let p = PRICE * (100 - step) / 100;
@@ -398,8 +518,15 @@ fn f2_counterparty_too_small_falls_back_to_the_unilateral_close() {
     let closed = closed.expect("liquidated");
     assert!(closed > 1);
     let a = w.markets[0].engine.asset.try_to_runtime().unwrap();
-    assert!(a.a_short < ADL_ONE, "too small to match: quantity ADL as before");
-    assert_eq!(eff_q(&w.markets, &w.lp), 1, "the small counterparty leg was not touched");
+    assert!(
+        a.a_short < ADL_ONE,
+        "too small to match: quantity ADL as before"
+    );
+    assert_eq!(
+        eff_q(&w.markets, &w.lp),
+        1,
+        "the small counterparty leg was not touched"
+    );
 }
 
 /// A BANKRUPT close keeps the unilateral path even with a counterparty: insurance / B booking
@@ -412,7 +539,15 @@ fn f2_bankrupt_close_keeps_the_unilateral_path() {
     deposit(&mut header, &mut markets, &mut thin, 3_250_000);
     deposit(&mut header, &mut markets, &mut lp, 400_000_000);
     // thin is SHORT against the lp, then the price runs far up in one step.
-    trade(&mut header, &mut markets, &mut lp, &mut thin, signed_q(LOT), PRICE).unwrap();
+    trade(
+        &mut header,
+        &mut markets,
+        &mut lp,
+        &mut thin,
+        signed_q(LOT),
+        PRICE,
+    )
+    .unwrap();
     // Walk the price up 2% a slot to +180% without liquidating on the way (no keeper).
     let mut p = PRICE;
     let mut slot = 1;
@@ -435,8 +570,208 @@ fn f2_bankrupt_close_keeps_the_unilateral_path() {
             )
             .unwrap()
     };
-    assert!(o.insurance_used + o.residual_booked + o.explicit_loss > 0, "bankrupt: {o:?}");
+    assert!(
+        o.insurance_used + o.residual_booked + o.explicit_loss > 0,
+        "bankrupt: {o:?}"
+    );
     let leg = lp.legs[0].try_to_runtime().unwrap();
     // The lp's raw basis was not reduced by a matched close.
-    assert!(!leg.active || leg.basis_pos_q.unsigned_abs() == lp_eff0, "no matched reduction on a bankrupt close");
+    assert!(
+        !leg.active || leg.basis_pos_q.unsigned_abs() == lp_eff0,
+        "no matched reduction on a bankrupt close"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wiring: the permissionless auto-crank (wrapper tag 5) threads the bound counterparty through.
+// ---------------------------------------------------------------------------------------------
+
+impl World {
+    /// The wrapper's tag-5 call shape: one observation of asset 0 at the committed mark; the
+    /// engine's plan selector picks the action. `cp_asset = None` is the plain entry.
+    fn auto_crank(&mut self, cp_asset: Option<usize>) -> Result<AutoCrankResultV16, V16Error> {
+        let now_slot = self.header.current_slot.get();
+        let price = self.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .effective_price;
+        let observations = [AutoCrankObservationV16 {
+            asset_index: 0,
+            effective_price: price,
+            funding_rate_e9: 0,
+        }];
+        let work = AutoCrankWorkV16 {
+            now_slot,
+            observations: &observations,
+            resolved_close_fee_rate_per_slot: 0,
+        };
+        let mut market = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut tv = PortfolioV16ViewMut::new(&mut self.trader);
+        match cp_asset {
+            Some(bound) => {
+                let mut cv = PortfolioV16ViewMut::new(&mut self.lp);
+                market.permissionless_auto_crank_s10_with_counterparty_not_atomic(
+                    &mut tv,
+                    &mut cv,
+                    bound,
+                    work,
+                    S10_MAX_MOVES_PER_INSTRUCTION,
+                )
+            }
+            None => market.permissionless_auto_crank_s10_not_atomic(
+                &mut tv,
+                work,
+                S10_MAX_MOVES_PER_INSTRUCTION,
+            ),
+        }
+    }
+    /// Crank until the engine's plan is the liquidation (the first step certifies the stale
+    /// trader, exactly the wrapper's refresh + F1 follow-on), returning that step's result.
+    fn crank_to_liquidation(&mut self, cp_asset: Option<usize>) -> AutoCrankResultV16 {
+        for _ in 0..8 {
+            let r = self.auto_crank(cp_asset).expect("auto crank");
+            if matches!(r.selected, AutoCrankPlanV16::Liquidate { .. }) {
+                return r;
+            }
+        }
+        panic!("the plan never selected Liquidate");
+    }
+    fn a(&self) -> (u128, u128) {
+        let a = self.markets[0].engine.asset.try_to_runtime().unwrap();
+        (a.a_long, a.a_short)
+    }
+    fn fork(&self) -> World {
+        World {
+            header: self.header,
+            markets: self.markets.clone(),
+            trader: self.trader,
+            lp: self.lp,
+            l2: self.l2,
+            s2: self.s2,
+        }
+    }
+}
+
+/// The plan-selected liquidation through the auto-crank with the counterparty bound to the
+/// liquidated asset: same plan, same trader outcome as the plain crank, but no A factor moves.
+#[test]
+fn f2_auto_crank_with_bound_counterparty_matches_and_keeps_the_asset_open() {
+    let base = world();
+    let mut uni = base.fork();
+    let mut mat = base.fork();
+    let ru = uni.crank_to_liquidation(None);
+    let rm = mat.crank_to_liquidation(Some(0));
+    assert_eq!(ru.selected, AutoCrankPlanV16::Liquidate { asset_index: 0 });
+    assert_eq!(rm.selected, ru.selected);
+    assert_eq!(rm.outcome, ru.outcome);
+    assert_eq!(mat.trader.capital.get(), uni.trader.capital.get());
+    assert_eq!(mat.trader.pnl.get(), uni.trader.pnl.get());
+    assert_eq!(
+        eff_q(&mat.markets, &mat.trader),
+        eff_q(&uni.markets, &uni.trader)
+    );
+    assert_eq!(
+        total_value(&mat.header, &mat.all()),
+        total_value(&uni.header, &uni.all())
+    );
+    assert!(uni.a().1 < ADL_ONE, "plain crank: quantity ADL");
+    assert_eq!(mat.a(), (ADL_ONE, ADL_ONE), "bound counterparty: matched");
+    let closed = eff_q(&base.markets, &base.trader) - eff_q(&mat.markets, &mat.trader);
+    assert_eq!(
+        eff_q(&mat.markets, &mat.lp),
+        eff_q(&base.markets, &base.lp) - closed
+    );
+    {
+        let market = MarketGroupV16ViewMut::new(&mut mat.header, &mut mat.markets);
+        market.validate_shape().unwrap();
+    }
+    open_new_short(&mut mat).expect("asset still open");
+}
+
+/// A counterparty the caller bound to a DIFFERENT asset is never consulted: bit-for-bit the
+/// plain crank, and the counterparty account is not written.
+#[test]
+fn f2_auto_crank_counterparty_bound_to_another_asset_is_ignored() {
+    let base = world();
+    let mut uni = base.fork();
+    let mut other = base.fork();
+    uni.crank_to_liquidation(None);
+    other.crank_to_liquidation(Some(1));
+    assert_eq!(other.a(), uni.a());
+    assert!(other.a().1 < ADL_ONE);
+    assert_eq!(
+        bytemuck_eq(&other.lp, &base.lp),
+        true,
+        "counterparty untouched"
+    );
+}
+
+/// A crank whose plan is NOT a liquidation (the counterparty itself refreshed) never touches the
+/// bound counterparty either.
+#[test]
+fn f2_auto_crank_refresh_plan_ignores_the_counterparty() {
+    let mut w = world();
+    // Swap roles: crank the healthy l2 (a Refresh plan) with the lp bound.
+    std::mem::swap(&mut w.trader, &mut w.l2);
+    let lp0 = w.lp;
+    let r = w.auto_crank(Some(0));
+    match r {
+        Ok(r) => assert!(
+            !matches!(r.selected, AutoCrankPlanV16::Liquidate { .. }),
+            "healthy account: {r:?}"
+        ),
+        Err(e) => assert_eq!(e, V16Error::NonProgress),
+    }
+    assert!(bytemuck_eq(&w.lp, &lp0));
+}
+
+/// LIVENESS: a counterparty whose refresh would FAIL (B-stale) must not block the liquidation of
+/// somebody else. Before the read-only preflight the counterparty refresh returned BStale and
+/// reverted the whole liquidation.
+#[test]
+fn f2_b_stale_counterparty_falls_back_without_failing_the_liquidation() {
+    let base = world();
+    let mut uni = base.fork();
+    let mut fb = base.fork();
+    fb.lp.b_stale_state = 1;
+    let lp0 = fb.lp;
+    let ou = uni.liquidate(false).unwrap();
+    let of = fb
+        .liquidate(true)
+        .expect("a B-stale counterparty must not revert the liquidation");
+    assert_eq!(of, ou);
+    assert_eq!(fb.a(), uni.a());
+    assert!(fb.a().1 < ADL_ONE, "unilateral fallback");
+    assert!(bytemuck_eq(&fb.lp, &lp0), "counterparty untouched");
+}
+
+/// A counterparty that fails market validation (here: a lock bit with no lock episode behind it)
+/// is not used either. The preflight's own `liquidation_lock` check is a second guard behind
+/// `validate_with_market`; this test pins the observable fallback, not which guard fires.
+#[test]
+fn f2_locked_counterparty_falls_back() {
+    let base = world();
+    let mut uni = base.fork();
+    let mut fb = base.fork();
+    fb.lp.liquidation_lock = 1;
+    let lp0 = fb.lp;
+    let ou = uni.liquidate(false).unwrap();
+    let of = fb.liquidate(true).unwrap();
+    assert_eq!(of, ou);
+    assert_eq!(fb.a(), uni.a());
+    assert!(bytemuck_eq(&fb.lp, &lp0));
+}
+
+fn bytemuck_eq(a: &PortfolioAccountV16Account, b: &PortfolioAccountV16Account) -> bool {
+    let size = core::mem::size_of::<PortfolioAccountV16Account>();
+    // SAFETY: plain-old-data account structs, compared byte for byte.
+    let (pa, pb) = unsafe {
+        (
+            core::slice::from_raw_parts(a as *const _ as *const u8, size),
+            core::slice::from_raw_parts(b as *const _ as *const u8, size),
+        )
+    };
+    pa == pb
 }
