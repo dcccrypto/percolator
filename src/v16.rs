@@ -18716,6 +18716,39 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         work: AutoCrankWorkV16<'_>,
         s10_grant: u8,
     ) -> V16Result<AutoCrankResultV16> {
+        self.permissionless_auto_crank_inner_not_atomic(account, None, work, s10_grant)
+    }
+
+    /// bigtest finding 2: `permissionless_auto_crank_s10_not_atomic` with a standing
+    /// counterparty bound to `counterparty_asset`. It is consulted ONLY when the engine's own plan
+    /// selector picks `Liquidate` on that asset, and then only as described at
+    /// `liquidate_account_against_counterparty_not_atomic` (clean close, eligible counterparty;
+    /// otherwise the unilateral close). Every other plan ignores it and never touches it. The
+    /// CALLER MUST bind the counterparty to a protocol-designated standing counterparty (the
+    /// wrapper: the market's registered vault-LP portfolio for that asset).
+    pub fn permissionless_auto_crank_s10_with_counterparty_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        counterparty: &mut PortfolioV16ViewMut<'_>,
+        counterparty_asset: usize,
+        work: AutoCrankWorkV16<'_>,
+        s10_grant: u8,
+    ) -> V16Result<AutoCrankResultV16> {
+        self.permissionless_auto_crank_inner_not_atomic(
+            account,
+            Some((counterparty, counterparty_asset)),
+            work,
+            s10_grant,
+        )
+    }
+
+    fn permissionless_auto_crank_inner_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        counterparty: Option<(&mut PortfolioV16ViewMut<'_>, usize)>,
+        work: AutoCrankWorkV16<'_>,
+        s10_grant: u8,
+    ) -> V16Result<AutoCrankResultV16> {
         // A market already in Recovery has exactly one bounded public step left:
         // the value-neutral transition to Resolved, which puts terminal account
         // close back within reach. Without it Recovery is a dead end for the single
@@ -18927,12 +18960,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 // request and carried a liquidation_max_close_q budget in the
                 // work; b97e1746 removed all three, and this fork already carries
                 // the reduced shape, so the request is built in its tip form.
-                AutoCrankOutcomeV16::Progressed(crank_with(
-                    self,
+                // bigtest finding 2: the only plan that may consult the bound counterparty.
+                AutoCrankOutcomeV16::Progressed(self.permissionless_crank_inner_not_atomic(
                     account,
-                    asset_index,
-                    obs,
-                    PermissionlessCrankActionV16::Liquidate(LiquidationRequestV16 { asset_index }),
+                    counterparty,
+                    PermissionlessCrankRequestV16 {
+                        now_slot: work.now_slot,
+                        asset_index,
+                        effective_price: obs.effective_price,
+                        funding_rate_e9: obs.funding_rate_e9,
+                        action: PermissionlessCrankActionV16::Liquidate(LiquidationRequestV16 {
+                            asset_index,
+                        }),
+                    },
+                    s10_grant,
                 )?)
             }
             AutoCrankPlanV16::AdvanceClose => {
@@ -19023,6 +19064,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         request: PermissionlessCrankRequestV16,
         s10_grant: u8,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        self.permissionless_crank_inner_not_atomic(account, None, request, s10_grant)
+    }
+
+    fn permissionless_crank_inner_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        counterparty: Option<(&mut PortfolioV16ViewMut<'_>, usize)>,
+        request: PermissionlessCrankRequestV16,
+        s10_grant: u8,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
         self.validate_unconfigured_market_tail()?;
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live
             && !matches!(request.action, PermissionlessCrankActionV16::Recover(_))
@@ -19089,7 +19140,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     // would roll the declaration back on SVM, so the account never
                     // moves. Convert it to progress -- but ONLY when this same call
                     // left a complete Recovery marker behind.
-                    if let Err(error) = self.liquidate_account_not_atomic(account, liq) {
+                    if let Err(error) =
+                        self.liquidate_account_inner_not_atomic(account, counterparty, liq)
+                    {
                         let mode = decode_market_mode(self.header.mode)?;
                         let reason = self.header.recovery_reason.try_to_runtime()?;
                         return V16Core::kernel_commit_declared_liquidation_recovery(
@@ -21719,6 +21772,158 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         request: LiquidationRequestV16,
     ) -> V16Result<LiquidationOutcomeV16> {
+        self.liquidate_account_inner_not_atomic(account, None, request)
+    }
+
+    /// bigtest-2026-11-05 finding 2: liquidation that books a NON-BANKRUPT close against a
+    /// named counterparty instead of through quantity ADL.
+    ///
+    /// The plain entry closes the liquidated leg UNILATERALLY (`reduce_position`): nothing takes
+    /// the other side, so the opposite side's effective OI is scaled down through its `A`
+    /// factor. Upstream 6ae709e0 (aeyakovenko/percolator#134, the #131 fresh-basis-reissue LoF
+    /// fix) then refuses every attach / flip / enlarge on the asset while either `A != ADL_ONE`,
+    /// and `A` returns to `ADL_ONE` only through a side reset at zero effective OI. On a market
+    /// whose opposite side is held by a standing counterparty (the fork's vault LP), one routine
+    /// partial liquidation therefore latches the whole asset reduce-only until one side is flat.
+    ///
+    /// Here, when the close is clean (unlocked account, no bankruptcy residual after the fee and
+    /// principal, no insurance / B booking) and `counterparty` holds an opposite leg on the asset
+    /// with at least `close_q` effective quantity, both legs are reduced by `close_q` at the
+    /// current mark -- a matched, risk-REDUCING transfer for both accounts (no new basis, so the
+    /// #131 gate is untouched) -- and no `A` factor moves. In every other case (bankrupt close,
+    /// locked account, counterparty not certifiable, no or too small opposite leg, a pending
+    /// domain-loss barrier on its delta) it falls back to the unilateral path, so the outcome
+    /// is never worse than `liquidate_account_not_atomic`.
+    ///
+    /// The engine does not choose the counterparty and does not ask its consent: the CALLER
+    /// MUST bind it to a protocol-designated standing counterparty (the wrapper: the market's
+    /// registered vault-LP portfolio). An arbitrary caller-chosen counterparty would be a
+    /// targeted forced reduction of one holder instead of the pro-rata one quantity ADL applies.
+    pub fn liquidate_account_against_counterparty_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        counterparty: &mut PortfolioV16ViewMut<'_>,
+        request: LiquidationRequestV16,
+    ) -> V16Result<LiquidationOutcomeV16> {
+        let bound_asset = request.asset_index;
+        self.liquidate_account_inner_not_atomic(account, Some((counterparty, bound_asset)), request)
+    }
+
+    /// bigtest finding 2: READ-ONLY preflight for the matched close. True only when the
+    /// counterparty's refresh with `allow_b_chunk = false` cannot return an error for a reason
+    /// the counterparty's own state controls (B-stale), and when it is in a state the matched
+    /// close may touch at all: unlocked, no pending close, and an active leg on `asset_index`
+    /// on `side` (the side opposite the liquidated leg). Every failure is `Ok(false)`, never an
+    /// error: an unusable counterparty must not stop a liquidation.
+    fn counterparty_eligible_for_matched_close(
+        &self,
+        counterparty: &PortfolioV16View<'_>,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<bool> {
+        if self.validate_account_scalar_preflight(counterparty).is_err()
+            || counterparty.validate_with_market(&self.as_view()).is_err()
+        {
+            return Ok(false);
+        }
+        if !matches!(decode_bool(counterparty.header.b_stale_state), Ok(false))
+            || !matches!(decode_bool(counterparty.header.liquidation_lock), Ok(false))
+        {
+            return Ok(false);
+        }
+        match counterparty.header.close_progress.try_to_runtime() {
+            Ok(close) if !close.active => {}
+            _ => return Ok(false),
+        }
+        let mut has_opposite_leg = false;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = match counterparty.header.legs[slot].try_to_runtime() {
+                Ok(leg) => leg,
+                Err(_) => return Ok(false),
+            };
+            slot += 1;
+            if !leg.active {
+                continue;
+            }
+            let idx = leg.asset_index as usize;
+            if idx >= self.markets.len() {
+                return Ok(false);
+            }
+            let asset = match self.markets[idx].engine.asset.try_to_runtime() {
+                Ok(asset) => asset,
+                Err(_) => return Ok(false),
+            };
+            // the refresh below refuses (BStale) a leg whose B index moved past its snapshot
+            match Self::b_target_for_leg_from_asset(asset, leg) {
+                Ok(target) if target <= leg.b_snap && !leg.b_stale => {}
+                _ => return Ok(false),
+            }
+            if idx == asset_index && leg.side == side {
+                has_opposite_leg = true;
+            }
+        }
+        Ok(has_opposite_leg)
+    }
+
+    /// Reduce `account`'s leg on `asset_index` by `close_q` effective quantity and the
+    /// counterparty's OPPOSITE leg by the same amount, at the current mark (both legs have just
+    /// been refreshed, so no PnL moves). Returns `Ok(false)` without mutating anything when the
+    /// counterparty cannot take the close; the caller then uses the unilateral path.
+    fn try_reduce_position_matched(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        counterparty: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        close_q: u128,
+    ) -> V16Result<bool> {
+        if close_q == 0 {
+            return Ok(false);
+        }
+        let leg = Self::active_leg_for_asset(&account.as_view(), asset_index)?;
+        if !leg.active {
+            return Err(V16Error::InvalidLeg);
+        }
+        let cp_leg = match Self::active_leg_for_asset(&counterparty.as_view(), asset_index) {
+            Ok(l) if l.active && l.side == opposite_side(leg.side) => l,
+            _ => return Ok(false),
+        };
+        let asset = self.asset_state(asset_index)?;
+        let cp_effective_q = V16Core::effective_abs_quantity_for_leg(asset, cp_leg)?;
+        if cp_effective_q < close_q {
+            return Ok(false);
+        }
+        let close_i128 = i128::try_from(close_q).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let (delta, cp_delta) = match leg.side {
+            SideV16::Long => (
+                close_i128.checked_neg().ok_or(V16Error::ArithmeticOverflow)?,
+                close_i128,
+            ),
+            SideV16::Short => (
+                close_i128,
+                close_i128.checked_neg().ok_or(V16Error::ArithmeticOverflow)?,
+            ),
+        };
+        if self.position_delta_touches_pending_domain_loss_barrier(
+            &counterparty.as_view(),
+            asset_index,
+            cp_delta,
+        )? {
+            return Ok(false);
+        }
+        self.apply_position_delta(account, asset_index, delta)?;
+        self.apply_position_delta(counterparty, asset_index, cp_delta)?;
+        self.begin_side_reset_if_effective_oi_exhausted(asset_index, leg.side)?;
+        self.begin_side_reset_if_effective_oi_exhausted(asset_index, cp_leg.side)?;
+        Ok(true)
+    }
+
+    fn liquidate_account_inner_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        counterparty: Option<(&mut PortfolioV16ViewMut<'_>, usize)>,
+        request: LiquidationRequestV16,
+    ) -> V16Result<LiquidationOutcomeV16> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
@@ -21752,6 +21957,39 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let leg = account.header.legs[leg_slot].try_to_runtime()?;
         if !leg.active {
             return Err(V16Error::InvalidLeg);
+        }
+        // bigtest finding 2: the counterparty is used only for the asset the caller bound it to,
+        // and only when a READ-ONLY preflight says its refresh cannot fail (not B-stale, not
+        // locked, no close in progress, an active opposite leg). A counterparty that fails the
+        // preflight is simply not used -- the unilateral path below is the fallback -- so its
+        // state can never block or revert the liquidation of somebody else.
+        let mut counterparty = match counterparty {
+            Some((cp, bound_asset))
+                if bound_asset == request.asset_index
+                    && self.counterparty_eligible_for_matched_close(
+                        &cp.as_view(),
+                        request.asset_index,
+                        opposite_side(leg.side),
+                    )? =>
+            {
+                Some(cp)
+            }
+            _ => None,
+        };
+        if let Some(cp) = counterparty.as_mut() {
+            let certified = matches!(
+                self.refresh_account_and_certify_not_atomic(
+                    cp,
+                    None,
+                    self.header.config.public_b_chunk_atoms.get(),
+                    false,
+                    &mut 0u8,
+                )?,
+                AccountRefreshCertOutcomeV16::Certified(_)
+            );
+            if !certified {
+                counterparty = None;
+            }
         }
         let asset = self.asset_state(request.asset_index)?;
         let account_effective_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
@@ -22033,8 +22271,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // (the multi-leg-sticky rule would otherwise carry it into the next one).
             account.header.loss_provenance = V16PodU32::new(LOSS_PROVENANCE_NONE);
         }
-        self.reduce_position(account, request.asset_index, close_q)?;
+        // bigtest finding 2: a clean (non-bankrupt, unlocked) close is matched against the
+        // caller-bound counterparty when it can take it, so no `A` factor moves and the asset
+        // does not enter ADL reduce-only; otherwise the unilateral (quantity-ADL) close.
+        let matched = match counterparty.as_mut() {
+            Some(cp)
+                if !locked
+                    && gross_bankruptcy_residual == 0
+                    && insurance_used == 0
+                    && booked == 0
+                    && explicit == 0 =>
+            {
+                self.try_reduce_position_matched(account, cp, request.asset_index, close_q)?
+            }
+            _ => false,
+        };
+        if !matched {
+            self.reduce_position(account, request.asset_index, close_q)?;
+        }
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
+        if matched {
+            if let Some(cp) = counterparty.as_mut() {
+                self.certify_account_after_local_settlement_with_price_override(cp, None)?;
+                self.validate_account_audit_scan(&cp.as_view())?;
+            }
+        }
         self.begin_zero_oi_residue_resets(request.asset_index)?;
         if locked && !active_bitmap_is_empty(remaining_active_bitmap) {
             // #299: a locked account's charge of its loss domain at that leg's full close, with
