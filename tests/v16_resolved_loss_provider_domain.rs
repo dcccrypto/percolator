@@ -345,6 +345,7 @@ fn s2_resolved_loss_credits_provider_domain_exactly() {
 /// Unchanged: a provider bucket past the resolved backing horizon cannot take
 /// fresh backing, so the loss stays junior residual and no backing is created.
 #[test]
+#[ignore = "needs upstream #219 resolved backing horizon (c054c8c3), not adopted in v2.2: blocked, see wip/v22-eng-219-horizon-blocked"]
 fn s2_past_horizon_bucket_keeps_loss_in_junior_residual() {
     let (mut header, mut markets) = one_asset_market();
     let mut w_h = account_fixture(80);

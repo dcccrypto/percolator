@@ -15769,6 +15769,55 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// S2 (adopt upstream bdaebc3e + 54633dcb). Resolved mode, non-terminal domain: how much
+    /// newly crystallized capital-backed loss (BOUND_SCALE units) the loss domain's backing owns.
+    ///
+    /// While the domain holds live funded backing (a Fresh, unlapsed bucket with provider
+    /// principal, liened or not, or an outstanding provider receivable) that backing is what pays
+    /// the opposite-side claims, so the loss goes to the domain in full, exactly as in Live mode:
+    /// it refills the provider receivable first and otherwise replaces the principal the claims
+    /// draw. Before this, with the claims already covered the support gap was 0, the whole loss
+    /// went to junior residual, winners were paid from provider principal, and terminal cleanup
+    /// retired the loser's money (provider 100_000 -> 90_000, 10_000 retired).
+    ///
+    /// Without live funded backing (Empty, Expired, lapsed) only what existing claimants own is
+    /// credited: the support gap plus the provider receivable already advanced. Once the payout
+    /// snapshot is captured only the support gap is credited (unchanged).
+    ///
+    /// v2.2: called only from the narrowed split (creditor claims final), see the caller.
+    fn resolved_loss_backing_capacity_num(&self, domain: usize) -> V16Result<u128> {
+        let source = self.source_credit_for_domain(domain)?;
+        let support_gap_num = source.positive_claim_bound_num.saturating_sub(
+            V16Core::available_backing_num_for_source_credit_state(source)?,
+        );
+        if decode_bool(self.header.payout_snapshot_captured)? {
+            return Ok(support_gap_num);
+        }
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        // v2.2 adaptation: upstream tests `fresh_unliened_backing_num != 0 ||
+        // valid_liened_backing_num != 0` (54633dcb), which on this line is also true for
+        // engine-created loser backing with no provider behind it; crediting the excess there
+        // recreates the ownerless source backing the narrowed 94979ede (a) split exists to avoid
+        // (s16ac_excess_late_loss_funds_junior_residual_once_creditors_are_final). "Funded" here
+        // reads the provider-principal mirror (S10, `adjust_slot_provider_principal`: provider and
+        // vault-pot principal only, liened or not, so 54633dcb's fully-liened case is included).
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot();
+        let provider_principal_num = match side {
+            SideV16::Long => slot.provider_principal_long.get(),
+            SideV16::Short => slot.provider_principal_short.get(),
+        };
+        if bucket.status == BackingBucketStatusV16::Fresh
+            && bucket.expiry_slot > self.header.current_slot.get()
+            && (provider_principal_num != 0 || source.provider_receivable_num != 0)
+        {
+            return Ok(u128::MAX);
+        }
+        support_gap_num
+            .checked_add(source.provider_receivable_num)
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
     /// Whether `book_realized_loss_backing_for_domain_not_atomic` can book into `domain` now:
     /// the Resolved-impaired branch always can (post-snapshot residual credit). Otherwise it
     /// mirrors the status rule of `prepare_counterparty_backing_add_delta` exactly: Empty and
@@ -15869,14 +15918,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
                     && self.domain_creditor_claims_final(domain)?
                 {
-                    let source = self.source_credit_for_domain(domain)?;
-                    let support_gap_num = source.positive_claim_bound_num.saturating_sub(
-                        V16Core::available_backing_num_for_source_credit_state(source)?,
-                    );
-                    let gap_atoms = support_gap_num
-                        .checked_add(BOUND_SCALE - 1)
-                        .ok_or(V16Error::ArithmeticOverflow)?
-                        / BOUND_SCALE;
+                    // S2 (adopt upstream bdaebc3e + 54633dcb): a provider-funded domain takes the
+                    // loss in full, as in Live; only an unfunded domain is capped at the support
+                    // gap (plus the provider receivable already advanced).
+                    let capacity_num = self.resolved_loss_backing_capacity_num(domain)?;
+                    let gap_atoms = if capacity_num == u128::MAX {
+                        u128::MAX
+                    } else {
+                        capacity_num
+                            .checked_add(BOUND_SCALE - 1)
+                            .ok_or(V16Error::ArithmeticOverflow)?
+                            / BOUND_SCALE
+                    };
                     let source_atoms = amount.min(gap_atoms);
                     let residual_atoms = amount
                         .checked_sub(source_atoms)
