@@ -194,3 +194,22 @@ fn issue172_site2_exhausted_lp_recovers_on_reversal() {
         assert!(o.tr0 - o.tr1 <= 500_000_000);
     }
 }
+
+/// #172 (reopen): the site-2 scenario above, asserted against spec.md's "Permissionless
+/// settlement order therefore cannot change the account's terminal value merely by changing
+/// which account is refreshed first". Same price path, same accounts; only `tr_first` differs.
+#[test]
+fn issue172_site2_reversal_is_independent_of_refresh_order() {
+    let mut path = geo(100_000, 400_000, true);
+    path.extend(geo(400_000, 100_000, false).into_iter().skip(1));
+    let lp_first = run_ordered(&path, 1_000_000_000, 500_000_000_000, 5_000, false);
+    let tr_first = run_ordered(&path, 1_000_000_000, 500_000_000_000, 5_000, true);
+    println!("\nLP refreshed first:"); show(&lp_first, path.len() - 1);
+    println!("\ncounterparty refreshed first:"); show(&tr_first, path.len() - 1);
+    assert_eq!(lp_first.v1, tr_first.v1);
+    assert_eq!(
+        (lp_first.lp1, lp_first.tr1),
+        (tr_first.lp1, tr_first.tr1),
+        "refresh order changed terminal values on a path that returns exactly to its start"
+    );
+}
