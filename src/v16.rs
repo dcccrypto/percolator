@@ -16210,6 +16210,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 return Ok(PermissionlessProgressOutcomeV16::AccountCurrent);
             }
             PermissionlessCrankActionV16::SettleB { asset_index } => {
+                // spec: per leg, net_pnl_delta = KF_pnl_delta - B_loss. Settle the account's
+                // pending K/F first (as settle_account_side_effects_not_atomic does) so a B share
+                // lands on the gain it offsets instead of arriving as a debt the gain must cure.
+                self.settle_account_kf_effects_not_atomic(account, false)?;
                 let out = self.settle_account_b_chunk(
                     account,
                     asset_index,
