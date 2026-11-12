@@ -18767,5 +18767,183 @@ fn v16_owner_can_still_exit_while_the_crank_is_stuck_in_a_moving_market() {
     account.validate_with_market(&market.as_view()).unwrap();
 }
 
+// Re-derived from aeyakovenko/percolator d2f363ab (upstream #105); trades take the fork's
+// 4th `taker_is_long_account` arg. The health-cert half is already in the fork (C-S-04), so
+// this test passes on the base too; the residual (IM source-credit sizing) test follows.
+// ---- issue #105: an expired counterparty lien must not count as account margin ----
+#[test]
+fn issue105_expired_trade_created_lien_does_not_prevent_liquidation() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.initial_margin_bps = V16PodU64::new(5_000);
+    header.config.maintenance_margin_bps = V16PodU64::new(5_000);
 
+    let mut long_header = account_fixture(1, 240);
+    let mut short_header = account_fixture(1, 241);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100, 5)
+            .unwrap();
 
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 50).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+
+        market.set_asset_raw_oracle_target_not_atomic(0, 200).unwrap();
+        market.accrue_asset_to_not_atomic(0, 2, 200, 0, true).unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE / 2),
+                    exec_price: 200,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        long_header.source_domains[0].source_lien_effective_reserved.get(),
+        100
+    );
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    for slot in 3..=5 {
+        market.accrue_asset_to_not_atomic(0, slot, 200, 0, true).unwrap();
+    }
+    market.expire_source_backing_bucket_not_atomic(1, 5).unwrap();
+
+    let bucket = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket.status, BackingBucketStatusV16::Impaired);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(bucket.impaired_liened_backing_num, 100 * BOUND_SCALE);
+
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let cert = market.full_account_refresh_not_atomic(&mut long).unwrap();
+
+    assert_eq!(long.header.capital.get(), 50);
+    // The impaired lien no longer supports equity: the 100-atom deficit is visible.
+    assert_eq!(cert.certified_equity, 50);
+    assert_eq!(cert.certified_maintenance_req, 150);
+    assert_eq!(cert.certified_liq_deficit, 100);
+    assert!(market
+        .build_actionable_summary(&long.as_view())
+        .unwrap()
+        .liquidatable);
+}
+
+/// Upstream #105 residual: `incremental_initial_margin_source_credit_needed` summed the RAW
+/// `source_lien_effective_reserved`, so a counterparty lien whose bucket has lapsed still read
+/// as IM cover and the IM lien gate reported "nothing more needed". Same setup as the test
+/// above; after the bucket expires the account's 100-atom lien supports nothing, so the gate
+/// must try to reserve fresh credit (and, with no live backing left, refuse) instead of
+/// passing the account as covered.
+#[cfg(feature = "fuzz")]
+#[test]
+fn issue105_expired_lien_does_not_cover_initial_margin_source_credit() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.initial_margin_bps = V16PodU64::new(5_000);
+    header.config.maintenance_margin_bps = V16PodU64::new(5_000);
+
+    let mut long_header = account_fixture(1, 240);
+    let mut short_header = account_fixture(1, 241);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100, 5)
+            .unwrap();
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 50).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+        market.set_asset_raw_oracle_target_not_atomic(0, 200).unwrap();
+        market.accrue_asset_to_not_atomic(0, 2, 200, 0, true).unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE / 2),
+                    exec_price: 200,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        long_header.source_domains[0].source_lien_effective_reserved.get(),
+        100
+    );
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    // While the bucket is live the existing lien IS valid cover: the gate passes untouched.
+    {
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        let before = *long.header;
+        assert_eq!(market.kani_create_initial_margin_source_lien_if_needed(&mut long), Ok(()));
+        assert_eq!(bytemuck::bytes_of(&*long.header), bytemuck::bytes_of(&before));
+    }
+    for slot in 3..=5 {
+        market.accrue_asset_to_not_atomic(0, slot, 200, 0, true).unwrap();
+    }
+    market.expire_source_backing_bucket_not_atomic(1, 5).unwrap();
+
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    // No account refresh: the expiry runs on the MARKET alone and cannot reach the
+    // holders' mirrors (C-S-04 note), so the account still carries its certificate and
+    // the un-normalized lien until its own next refresh.
+    assert_eq!(long.header.health_cert.valid, 1);
+    // The account still records the (now impaired) 100-atom lien...
+    assert_eq!(long.header.source_domains[0].source_lien_effective_reserved.get(), 100);
+    // ...but it must not count as IM cover.
+    let result = market.kani_create_initial_margin_source_lien_if_needed(&mut long);
+    assert_ne!(
+        result,
+        Ok(()),
+        "an impaired counterparty lien was counted as initial-margin source credit"
+    );
+}

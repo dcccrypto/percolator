@@ -12960,30 +12960,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             //
             // Proof: `closure_expired_counterparty_lien_cannot_remain_favorable_account_credit`
             // in `tests/proofs_v16.rs`, ported from `faa3bcf9`'s `src/v16_proofs.rs`.
-            let counterparty_backing_num = source.source_lien_counterparty_backing_num.get();
-            let current_counterparty_backing_num = if counterparty_backing_num == 0 {
-                0
-            } else {
-                let bucket = self.backing_bucket_for_domain(d)?;
-                if bucket.status == BackingBucketStatusV16::Fresh
-                    && bucket.expiry_slot > self.header.current_slot.get()
-                {
-                    counterparty_backing_num
-                } else {
-                    0
-                }
-            };
-            let valid_lien_effective_num = current_counterparty_backing_num
-                .checked_add(source.source_lien_insurance_backing_num.get())
-                .ok_or(V16Error::ArithmeticOverflow)?
-                .min(
-                    source
-                        .source_lien_effective_reserved
-                        .get()
-                        .checked_mul(BOUND_SCALE)
-                        .ok_or(V16Error::ArithmeticOverflow)?,
-                )
-                .min(remaining_num);
+            //
+            // The lane rebuild now lives in `source_lien_valid_support_num` (unchanged
+            // semantics), so the IM source-credit sizing (upstream #105 residual) applies
+            // exactly the same validity rule.
+            let valid_lien_effective_num =
+                self.source_lien_valid_support_num(&source, d)?.min(remaining_num);
             if valid_lien_effective_num != 0 {
                 support = support
                     .checked_add(valid_lien_effective_num / BOUND_SCALE)
@@ -13062,7 +13044,79 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
-    fn valid_source_lien_effective_reserved_sum(account: &PortfolioV16View<'_>) -> V16Result<u128> {
+    /// C-S-04 lane rebuild (upstream faa3bcf9), shared with the IM source-credit sizing
+    /// (upstream #105 residual, re-derived from aeyakovenko/percolator d2f363ab): the lien
+    /// reserve, in BOUND_SCALE units, that may still support this account. The counterparty
+    /// share counts only while its backing bucket is live-Fresh (`Fresh` and
+    /// `expiry_slot > current_slot`); an impaired or lapsed bucket's share is impaired by spec
+    /// and cannot support risk, even before a normalization transition moves it into the
+    /// account's impaired fields. The insurance share is unaffected by bucket expiry. The
+    /// `.min(effective * BOUND_SCALE)` is the defensive ceiling C-S-04 documents. An
+    /// insurance-only lien never touches the market (`counterparty == 0` short-circuit).
+    fn source_lien_valid_support_num(
+        &self,
+        source: &PortfolioSourceDomainV16Account,
+        domain: usize,
+    ) -> V16Result<u128> {
+        let counterparty_backing_num = source.source_lien_counterparty_backing_num.get();
+        let current_counterparty_backing_num = if counterparty_backing_num == 0 {
+            0
+        } else {
+            let bucket = self.backing_bucket_for_domain(domain)?;
+            if bucket.status == BackingBucketStatusV16::Fresh
+                && bucket.expiry_slot > self.header.current_slot.get()
+            {
+                counterparty_backing_num
+            } else {
+                0
+            }
+        };
+        Ok(current_counterparty_backing_num
+            .checked_add(source.source_lien_insurance_backing_num.get())
+            .ok_or(V16Error::ArithmeticOverflow)?
+            .min(
+                source
+                    .source_lien_effective_reserved
+                    .get()
+                    .checked_mul(BOUND_SCALE)
+                    .ok_or(V16Error::ArithmeticOverflow)?,
+            ))
+    }
+
+    /// Effective lien reserve (atoms) that may still support this account: every occupied
+    /// source domain's `source_lien_valid_support_num`, floored per domain exactly as the
+    /// health-cert support path floors it. Upstream #105 (d2f363ab): the IM source-credit
+    /// sizing used to sum the raw `source_lien_effective_reserved`, so an expired or impaired
+    /// counterparty lien still read as "covered" and new risk was admitted under-reserved.
+    fn valid_source_lien_effective_reserved_sum(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<u128> {
+        let mut sum = 0u128;
+        let mut d = 0usize;
+        while d < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[d];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() {
+                let support_num =
+                    self.source_lien_valid_support_num(&source, source.domain.get() as usize)?;
+                sum = sum
+                    .checked_add(support_num / BOUND_SCALE)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+            }
+            d += 1;
+        }
+        Ok(sum)
+    }
+
+    /// Raw recorded lien reserve, valid or not. Used only as a "does any lien remain"
+    /// test (lien release before PnL conversion, conversion refusal): an impaired lien
+    /// still has to be released, so these callers must NOT use the valid-support sum.
+    fn recorded_source_lien_effective_reserved_sum(
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<u128> {
         let mut sum = 0u128;
         let mut d = 0usize;
         while d < PORTFOLIO_SOURCE_DOMAIN_CAP {
@@ -13079,6 +13133,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn incremental_initial_margin_source_credit_needed(
+        &self,
         account: &PortfolioV16View<'_>,
         no_positive_equity: i128,
     ) -> V16Result<u128> {
@@ -13086,7 +13141,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !cert.valid {
             return Err(V16Error::Stale);
         }
-        let existing_lien = Self::valid_source_lien_effective_reserved_sum(account)?;
+        let existing_lien = self.valid_source_lien_effective_reserved_sum(account)?;
         if no_positive_equity >= 0 {
             let covered = (no_positive_equity as u128)
                 .checked_add(existing_lien)
@@ -14661,7 +14716,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 return Err(V16Error::Stale);
             }
             let no_positive = Self::account_no_positive_credit_equity(&account.as_view())?;
-            let required_credit = Self::incremental_initial_margin_source_credit_needed(
+            let required_credit = self.incremental_initial_margin_source_credit_needed(
                 &account.as_view(),
                 no_positive,
             )?;
@@ -25184,7 +25239,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // Mirrors upstream av/codex/blocker-dos-flat-source-lien-convert-20260728
         // ("Release flat source liens before PnL conversion", 4d4f9ed8), minus the
         // contracts layer this fork does not carry.
-        if Self::valid_source_lien_effective_reserved_sum(&account.as_view())? != 0 {
+        if Self::recorded_source_lien_effective_reserved_sum(&account.as_view())? != 0 {
             self.release_account_source_credit_liens_if_unneeded_not_atomic(account)?;
         }
         self.preflight_convert_released_pnl_to_capital(&account.as_view())?;
@@ -25226,7 +25281,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if released == 0
             || !Self::account_has_source_claims(account)?
             || Self::account_has_source_liens(account)
-            || Self::valid_source_lien_effective_reserved_sum(account)? != 0
+            || Self::recorded_source_lien_effective_reserved_sum(account)? != 0
         {
             return Ok(0);
         }
