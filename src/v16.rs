@@ -1657,6 +1657,54 @@ impl V16Core {
         Ok(ledger)
     }
 
+    /// PRODUCTION KERNEL (upstream #204, re-derived from aeyakovenko/percolator e918e954):
+    /// credit the closing account cures by itself lowers its close ledger's gross loss and
+    /// remaining residual by the same amount, preserving
+    /// `residual = gross + drift - progress`. When the residual reaches zero the domain
+    /// barrier is released: with booked progress the close finalizes; with none it is cured
+    /// exactly as CureAndCancelClose would leave it. Returns the ledger and whether the
+    /// barrier is released.
+    ///
+    /// Fork note: the principal half of this cure already runs at payment time through
+    /// `kernel_settle_close_ledger_principal` (F-02, ledger half). This kernel is the
+    /// general clamp keyed off `account.pnl`, so it also covers credit that does NOT arrive
+    /// through principal settlement. When F-02 already brought the residual down to the
+    /// debt still owed, the clamp is a no-op.
+    pub(crate) fn kernel_principal_cure_close_ledger(
+        mut ledger: CloseProgressLedgerV16,
+        paid: u128,
+    ) -> V16Result<(CloseProgressLedgerV16, bool)> {
+        if paid == 0 || !ledger.has_pending_residual() {
+            return Ok((ledger, false));
+        }
+        // A cure never exceeds the gross loss it pays down (drift is never funded today, but
+        // residual may exceed gross by drift, which principal does not cure).
+        let cure = paid
+            .min(ledger.residual_remaining)
+            .min(ledger.gross_loss_at_close_start);
+        if cure == 0 {
+            return Ok((ledger, false));
+        }
+        ledger.gross_loss_at_close_start = ledger
+            .gross_loss_at_close_start
+            .checked_sub(cure)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        ledger.residual_remaining = ledger
+            .residual_remaining
+            .checked_sub(cure)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if ledger.residual_remaining != 0 {
+            return Ok((ledger, false));
+        }
+        if ledger.has_irreversible_progress() {
+            ledger.finalized = true;
+        } else {
+            ledger.active = false;
+            ledger.canceled = true;
+        }
+        Ok((ledger, true))
+    }
+
     /// PRODUCTION KERNEL: the attach-leg core — snapshot the side's basis
     /// anchors, gate the a-basis range, add open interest, and construct the
     /// new leg. Pure on (AssetStateV16, scalars); the attach glue calls
@@ -4536,6 +4584,16 @@ pub fn kani_kernel_settle_close_ledger_principal(
     principal_paid: u128,
 ) -> V16Result<CloseProgressLedgerV16> {
     V16Core::kernel_settle_close_ledger_principal(ledger, principal_paid)
+}
+
+/// Proof shim for the upstream #204 close-ledger cure kernel (`pub(crate)`), so the
+/// out-of-crate proof file can call it.
+#[cfg(kani)]
+pub fn kani_kernel_principal_cure_close_ledger(
+    ledger: CloseProgressLedgerV16,
+    paid: u128,
+) -> V16Result<(CloseProgressLedgerV16, bool)> {
+    V16Core::kernel_principal_cure_close_ledger(ledger, paid)
 }
 
 #[cfg(kani)]
@@ -21179,6 +21237,49 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// Upstream #204 (re-derived from aeyakovenko/percolator e918e954): a close ledger must
+    /// never book more residual than the account still owes. Principal, backed gains, or any
+    /// other credit can lower the account's negative PnL after the close began; the
+    /// difference is cured by the account itself, so gross loss and residual drop by it
+    /// together (partition preserved) before anything is booked to the opposite side. A loss
+    /// booked on another leg after the close began raises |pnl| and so never reads as a
+    /// cure. When the residual reaches zero the domain barrier is released.
+    ///
+    /// Runs AFTER `credit_close_progress_principal_settlement` (F-02) on every path: for a
+    /// principal-only cure F-02 has already lowered the residual to the debt owed, so this
+    /// is a no-op there and nothing is cured twice.
+    fn clamp_close_residual_to_account_loss(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<()> {
+        let before = account.header.close_progress.try_to_runtime()?;
+        if !before.has_pending_residual() {
+            return Ok(());
+        }
+        let owed = account.header.pnl.get().min(0).unsigned_abs();
+        if before.residual_remaining <= owed {
+            return Ok(());
+        }
+        let excess = before.residual_remaining - owed;
+        let (ledger, barrier_released) =
+            V16Core::kernel_principal_cure_close_ledger(before, excess)?;
+        if ledger == before {
+            return Ok(());
+        }
+        if barrier_released {
+            let asset_index = ledger.asset_index as usize;
+            let count = self.pending_domain_loss_barrier_count(asset_index, ledger.domain_side)?;
+            self.set_pending_domain_loss_barrier_count(
+                asset_index,
+                ledger.domain_side,
+                count.checked_sub(1).ok_or(V16Error::CounterUnderflow)?,
+            )?;
+        }
+        account.header.close_progress = CloseProgressLedgerV16Account::from_runtime(&ledger);
+        account.header.health_cert.valid = 0;
+        Ok(())
+    }
+
     fn bankruptcy_residual_single_step_capacity(
         &self,
         asset_index: usize,
@@ -21494,6 +21595,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if ledger.asset_index as usize != asset_index || ledger.domain_side != domain_side {
             return Err(V16Error::LockActive);
         }
+        // Upstream #204: cure any excess of the ledger over the debt still owed before
+        // booking anything to the opposite side.
+        self.clamp_close_residual_to_account_loss(account)?;
+        let ledger = account.header.close_progress.try_to_runtime()?;
+        if !ledger.has_pending_residual() {
+            return Ok(BResidualBookingOutcomeV16 {
+                booked_loss: 0,
+                explicit_loss: 0,
+                delta_b: 0,
+                remaining_after: 0,
+            });
+        }
         self.ensure_open_close_snapshot_current_or_recovery(&account.as_view(), ledger)?;
         let outcome = self.book_bankruptcy_residual_chunk_internal(
             asset_index,
@@ -21542,8 +21655,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if insurance_used != 0 {
             self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
         }
+        // Upstream #204: credit that reached the account without going through principal
+        // settlement cures the ledger here, so a cured close finalizes/cancels and releases
+        // its barrier instead of reporting NonProgress forever.
+        self.clamp_close_residual_to_account_loss(account)?;
 
-        let residual = if account.header.pnl.get() < 0 {
+        let residual = if account.header.pnl.get() < 0
+            && account
+                .header
+                .close_progress
+                .try_to_runtime()?
+                .has_pending_residual()
+        {
             account.header.pnl.get().unsigned_abs()
         } else {
             0
@@ -23853,7 +23976,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<()> {
         if account.header.pnl.get() >= 0 {
-            return Ok(());
+            // Upstream #204: a pending close whose loss was cured after it began books
+            // nothing more.
+            return self.clamp_close_residual_to_account_loss(account);
         }
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
@@ -24556,7 +24681,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     // Kani-only entry to the bare negative-PnL principal-settlement transition,
     // bypassing the O(N) loop-based shape validation so an inductive proof can
     // assume a decomposed loop-free invariant and apply just this transition.
-    #[cfg(kani)]
+    // Also built under `fuzz` so the #204 regression can drive a principal settlement
+    // in isolation (tests/v16_spec_tests.rs, fuzz-gated); absent from the wrapper build.
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn kani_settle_negative_pnl_from_principal_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

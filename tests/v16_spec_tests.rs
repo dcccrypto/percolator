@@ -17968,3 +17968,300 @@ fn v16_legless_asset_after_bankrupt_liquidation_of_last_leg_resets() {
     long.validate_with_market(&market.as_view()).unwrap();
     short.validate_with_market(&market.as_view()).unwrap();
 }
+
+// Re-derived from aeyakovenko/percolator e918e954 (upstream #204); fixture trades take the
+// fork's 4th `taker_is_long_account` arg.
+// ---- issue #204: a mid-close deposit must lower the close ledger's residual ----
+
+fn issue204_pending_close_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+) {
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(1_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    let mut long_header = account_fixture(1, 61);
+    let mut short_header = account_fixture(1, 62);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 250).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(SIZE_Q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+        for (offset, price) in (105u64..=150).step_by(5).enumerate() {
+            let slot = 2 + offset as u64;
+            market.set_asset_raw_oracle_target_not_atomic(0, price).unwrap();
+            market.accrue_asset_to_not_atomic(0, slot, price, 0, true).unwrap();
+        }
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: -signed_q(SIZE_Q),
+                    exec_price: 150,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+        let pending = short.header.close_progress.try_to_runtime().unwrap();
+        assert_eq!(pending.residual_remaining, 250);
+        assert_eq!(short.header.pnl.get(), -250);
+    }
+    (header, markets, long_header, short_header)
+}
+
+fn issue204_pending(l: percolator::CloseProgressLedgerV16) -> bool {
+    l.active && !l.finalized && !l.canceled && l.residual_remaining != 0
+}
+
+fn issue204_charged(ledger: percolator::CloseProgressLedgerV16) -> u128 {
+    ledger.support_consumed + ledger.insurance_spent + ledger.b_loss_booked
+        + ledger.explicit_loss_assigned
+}
+
+#[test]
+fn issue204_live_advance_close_charges_only_the_post_deposit_residual() {
+    let (mut header, mut markets, _long_header, mut short_header) =
+        issue204_pending_close_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut short, 100).unwrap();
+    let work = AutoCrankWorkV16 {
+        now_slot: 11,
+        observations: &[],
+        resolved_close_fee_rate_per_slot: 0,
+    };
+    let mut steps = 0;
+    while issue204_pending(short.header.close_progress.try_to_runtime().unwrap()) {
+        market
+            .permissionless_auto_crank_not_atomic(&mut short, work)
+            .expect("pending close continues");
+        steps += 1;
+        assert!(steps < 8, "close must finalize");
+    }
+    let ledger = short.header.close_progress.try_to_runtime().unwrap();
+    assert!(ledger.finalized);
+    assert_eq!(ledger.residual_remaining, 0);
+    // 100 of the 250 loss was paid by the depositor's own principal; only 150 may be
+    // charged to the opposite side.
+    assert_eq!(issue204_charged(ledger), 150);
+    assert_eq!(short.header.capital.get(), 0);
+    assert_eq!(short.header.pnl.get(), 0);
+    market.validate_shape().unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn issue204_full_principal_cure_releases_the_domain_barrier() {
+    let (mut header, mut markets, _long_header, mut short_header) =
+        issue204_pending_close_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut short, 400).unwrap();
+    let work = AutoCrankWorkV16 {
+        now_slot: 11,
+        observations: &[],
+        resolved_close_fee_rate_per_slot: 0,
+    };
+    let mut steps = 0;
+    while issue204_pending(short.header.close_progress.try_to_runtime().unwrap()) {
+        market
+            .permissionless_auto_crank_not_atomic(&mut short, work)
+            .expect("pending close continues");
+        steps += 1;
+        assert!(steps < 8, "close must finalize");
+    }
+    let ledger = short.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(issue204_charged(ledger), 0);
+    assert_eq!(short.header.capital.get(), 150);
+    assert_eq!(short.header.pnl.get(), 0);
+    assert_eq!(
+        market.markets[0].engine.pending_domain_loss_barrier_long.get(),
+        0
+    );
+    market.validate_shape().unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn issue204_resolved_close_charges_only_the_post_deposit_residual() {
+    let (mut header, mut markets, _long_header, mut short_header) =
+        issue204_pending_close_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut short, 100).unwrap();
+    let slot = market.header.current_slot.get();
+    market.resolve_market_not_atomic(slot).unwrap();
+    let _ = market.close_resolved_account_not_atomic(&mut short, 0);
+    let ledger = short.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(issue204_charged(ledger), 150);
+    assert_eq!(ledger.residual_remaining, 0);
+}
+
+#[test]
+fn issue204_deposit_frames_the_close_episode_until_booking() {
+    let (mut header, mut markets, _long_header, mut short_header) =
+        issue204_pending_close_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let before = short.header.close_progress.try_to_runtime().unwrap();
+    market.deposit_not_atomic(&mut short, 100).unwrap();
+    // The deposit itself leaves the close episode untouched (upstream framing rule);
+    // the cure is applied only when the close next books residual.
+    assert_eq!(short.header.close_progress.try_to_runtime().unwrap(), before);
+}
+
+// ---- fork regressions for the #204 clamp layered over F-02 ----
+
+fn issue204_barrier_long(market: &MarketGroupV16ViewMut<'_, u64>) -> u64 {
+    market.markets[0].engine.pending_domain_loss_barrier_long.get()
+}
+
+/// Principal paid mid-close is credited by F-02 (`credit_close_progress_principal_settlement`)
+/// at payment time; the #204 clamp that runs afterwards on the booking path must then be a
+/// no-op. Cure exactly once (gross drops by the 100 paid, not 200), book exactly the 150 still
+/// owed, and release the domain barrier exactly once (1 -> 0, no CounterUnderflow, and later
+/// cranks leave it at 0).
+#[test]
+fn issue204_principal_then_close_cures_once_and_releases_barrier_once() {
+    let (mut header, mut markets, _long_header, mut short_header) =
+        issue204_pending_close_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let start = short.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(start.gross_loss_at_close_start, 250);
+    assert_eq!(issue204_barrier_long(&market), 1);
+    market.deposit_not_atomic(&mut short, 100).unwrap();
+    let work = AutoCrankWorkV16 {
+        now_slot: 11,
+        observations: &[],
+        resolved_close_fee_rate_per_slot: 0,
+    };
+    let mut steps = 0;
+    while issue204_pending(short.header.close_progress.try_to_runtime().unwrap()) {
+        market
+            .permissionless_auto_crank_not_atomic(&mut short, work)
+            .expect("pending close continues");
+        steps += 1;
+        assert!(steps < 8, "close must finalize");
+    }
+    let ledger = short.header.close_progress.try_to_runtime().unwrap();
+    assert!(ledger.active && ledger.finalized && !ledger.canceled);
+    assert_eq!(ledger.residual_remaining, 0);
+    // Cured once: 250 - 100 principal. A second (clamp) cure of the same payment would
+    // have lowered gross again and booked less than the 150 still owed.
+    assert_eq!(ledger.gross_loss_at_close_start, 150);
+    assert_eq!(issue204_charged(ledger), 150);
+    assert_eq!(short.header.pnl.get(), 0);
+    assert_eq!(issue204_barrier_long(&market), 0);
+    // Barrier released exactly once: further cranks neither re-release nor change the ledger.
+    let _ = market.permissionless_auto_crank_not_atomic(&mut short, work);
+    assert_eq!(short.header.close_progress.try_to_runtime().unwrap(), ledger);
+    assert_eq!(issue204_barrier_long(&market), 0);
+    market.validate_shape().unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+/// The gap F-02 leaves open: credit that lowers the account's loss WITHOUT going through
+/// principal settlement (backed gains, issue #172). Modelled with the fuzz-gated pnl hook,
+/// which writes pnl through the same `set_account_pnl` every credit path uses. Before the
+/// clamp, the ledger kept the stale 250 residual, booked only the 100 owed, and then every
+/// crank returned `NonProgress` with the barrier stuck at 1 (route-1c brick). With the clamp
+/// the close books exactly 100 and releases the barrier.
+#[cfg(feature = "fuzz")]
+#[test]
+fn issue204_non_principal_credit_cures_ledger_and_releases_barrier() {
+    let (mut header, mut markets, _long_header, mut short_header) =
+        issue204_pending_close_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    assert_eq!(issue204_barrier_long(&market), 1);
+    market.kani_set_account_pnl(&mut short, -100).unwrap();
+    let work = AutoCrankWorkV16 {
+        now_slot: 11,
+        observations: &[],
+        resolved_close_fee_rate_per_slot: 0,
+    };
+    let mut steps = 0;
+    while issue204_pending(short.header.close_progress.try_to_runtime().unwrap()) {
+        market
+            .permissionless_auto_crank_not_atomic(&mut short, work)
+            .expect("pending close continues");
+        steps += 1;
+        assert!(steps < 8, "close must finalize");
+    }
+    let ledger = short.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(ledger.residual_remaining, 0);
+    assert_eq!(issue204_charged(ledger), 100);
+    assert_eq!(ledger.gross_loss_at_close_start, 100);
+    assert_eq!(short.header.pnl.get(), 0);
+    assert_eq!(issue204_barrier_long(&market), 0);
+    market.validate_shape().unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+/// Principal (F-02), then a non-principal cure, then close: each credit is cured exactly
+/// once (gross 250 -> 150 by principal -> 100 by the clamp), exactly the 100 still owed is
+/// booked, and the barrier is released once.
+#[cfg(feature = "fuzz")]
+#[test]
+fn issue204_principal_then_non_principal_cure_then_close_no_double_cure() {
+    let (mut header, mut markets, _long_header, mut short_header) =
+        issue204_pending_close_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut short, 100).unwrap();
+    // Run the principal settlement directly so F-02 credits the ledger before the
+    // non-principal credit lands.
+    market
+        .kani_settle_negative_pnl_from_principal_core_not_atomic(&mut short)
+        .unwrap();
+    let mid = short.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(mid.gross_loss_at_close_start, 150);
+    assert_eq!(mid.residual_remaining, 150);
+    assert_eq!(short.header.pnl.get(), -150);
+    market.kani_set_account_pnl(&mut short, -100).unwrap();
+    let work = AutoCrankWorkV16 {
+        now_slot: 11,
+        observations: &[],
+        resolved_close_fee_rate_per_slot: 0,
+    };
+    let mut steps = 0;
+    while issue204_pending(short.header.close_progress.try_to_runtime().unwrap()) {
+        market
+            .permissionless_auto_crank_not_atomic(&mut short, work)
+            .expect("pending close continues");
+        steps += 1;
+        assert!(steps < 8, "close must finalize");
+    }
+    let ledger = short.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(ledger.residual_remaining, 0);
+    assert_eq!(ledger.gross_loss_at_close_start, 100);
+    assert_eq!(issue204_charged(ledger), 100);
+    assert_eq!(short.header.pnl.get(), 0);
+    assert_eq!(issue204_barrier_long(&market), 0);
+    market.validate_shape().unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
