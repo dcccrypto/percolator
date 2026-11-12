@@ -2943,24 +2943,44 @@ impl V16Core {
         None
     }
 
-    /// PRODUCTION KERNEL (F-LIVE-1, v22live): the auto-crank's liquidation leg. The FIRST
-    /// liquidatable leg that is not behind a pending domain-loss barrier on its own side, else
-    /// the FIRST liquidatable leg (whose liquidation the kernel then refuses with `LockActive`,
-    /// exactly as before). `unblocked` is masked by `liquidatable` here, so the kernel is total
-    /// and the result is `Some` iff some leg is liquidatable: the summary's `has_open_risk` and
-    /// the plan priority are unchanged, and an account with no barrier leg gets the same slot as
-    /// before. Deterministic, O(legs). Proof: tests/proofs_v22_livefix.rs.
+    /// PRODUCTION KERNEL (F-LIVE-1, v22live + upstream #176): the auto-crank's liquidation
+    /// leg. In priority order:
+    /// 1. among liquidatable legs that are not behind a pending domain-loss barrier on their
+    ///    own side AND that the liquidation can actually reduce (`risk[slot]` is `Some`: non-zero
+    ///    position and non-zero unilateral close capacity), the one with the HIGHEST risk
+    ///    (ADL-effective notional); exactly equal risk keeps the FIRST slot (upstream #176,
+    ///    re-derived from aeyakovenko/percolator a5e0de73: liquidation order must not depend on
+    ///    physical slot order, which a BatchTradeCpi taker controls for an unsigned LP);
+    /// 2. else the FIRST liquidatable unblocked leg (F-LIVE-1);
+    /// 3. else the FIRST liquidatable leg (whose liquidation the kernel then refuses with
+    ///    `LockActive`, exactly as before).
+    ///
+    /// `unblocked`/`risk` are masked by `liquidatable` here, so the kernel is total and the
+    /// result is `Some` iff some leg is liquidatable: the summary's `has_open_risk` and the plan
+    /// priority are unchanged. Deterministic, O(legs). Proof: tests/proofs_v22_livefix.rs.
     pub(crate) fn kernel_auto_crank_liquidation_slot(
         unblocked: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
         liquidatable: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
+        risk: [Option<u128>; V16_MAX_PORTFOLIO_ASSETS_N],
     ) -> Option<usize> {
         let mut preferred = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut riskiest: Option<(u128, usize)> = None;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             preferred[slot] = unblocked[slot] && liquidatable[slot];
+            if preferred[slot] {
+                if let Some(r) = risk[slot] {
+                    if riskiest.is_none_or(|(best, _)| r > best) {
+                        riskiest = Some((r, slot));
+                    }
+                }
+            }
             slot += 1;
         }
-        Self::first_actionable_slot(preferred).or(Self::first_actionable_slot(liquidatable))
+        riskiest
+            .map(|(_, s)| s)
+            .or(Self::first_actionable_slot(preferred))
+            .or(Self::first_actionable_slot(liquidatable))
     }
 
 
@@ -4516,8 +4536,9 @@ pub fn kani_first_actionable_slot(flags: [bool; V16_MAX_PORTFOLIO_ASSETS_N]) -> 
 pub fn kani_auto_crank_liquidation_slot(
     unblocked: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
     liquidatable: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
+    risk: [Option<u128>; V16_MAX_PORTFOLIO_ASSETS_N],
 ) -> Option<usize> {
-    V16Core::kernel_auto_crank_liquidation_slot(unblocked, liquidatable)
+    V16Core::kernel_auto_crank_liquidation_slot(unblocked, liquidatable, risk)
 }
 
 #[cfg(kani)]
@@ -18659,8 +18680,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// the FIRST active leg with pending B settlement (either a cached stale bit or
     /// a current B target above its snapshot), the FIRST accrual-dispatchable
     /// active leg (falling back to the FIRST Recovery leg for committed-state
-    /// refresh), and the FIRST live-reducible leg (liquidation), preferring one whose side has
-    /// no pending domain-loss barrier (`kernel_auto_crank_liquidation_slot`). A prior-epoch
+    /// refresh), and for liquidation the highest-risk reducible leg whose side has no
+    /// pending domain-loss barrier, else the first such leg, else the first live-reducible leg
+    /// (`kernel_auto_crank_liquidation_slot`, F-LIVE-1 + upstream #176). A prior-epoch
     /// ResetPending leg is still refreshable, but
     /// its effective OI was already removed by ADL; selecting it for liquidation
     /// would fail before a later current-epoch leg could make progress. Recovery
@@ -18691,6 +18713,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut refresh_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut liquidation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut liquidation_unblocked_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut liquidation_risk: [Option<u128>; V16_MAX_PORTFOLIO_ASSETS_N] =
+            [None; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut reset_obligation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut b_stale_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut recovery_refresh_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
@@ -18733,6 +18757,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 // kernel's own refusal are unchanged.
                 liquidation_unblocked_flags[slot] = liquidatable
                     && !self.has_pending_domain_loss_barrier(leg.asset_index as usize, leg.side)?;
+                // Upstream #176: the risk contribution (ADL-effective notional) of a leg this
+                // liquidation can actually reduce. A leg with no position or no unilateral close
+                // capacity does not compete (the crank would revert on it while a smaller leg
+                // could progress). Computed only for unblocked liquidatable legs. Fail-soft: this
+                // runs on EVERY classification (upstream computes it only for a Liquidate plan),
+                // so a leg whose effective quantity cannot be derived simply does not compete
+                // instead of turning classification into an error.
+                if liquidation_unblocked_flags[slot] && leg.basis_pos_q != 0 {
+                    if let Ok(effective_q) = V16Core::effective_abs_quantity_for_leg(asset, leg) {
+                        let capacity = V16Core::kernel_unilateral_close_capacity(
+                            effective_q,
+                            asset.oi_eff_long_q,
+                            asset.oi_eff_short_q,
+                        );
+                        if capacity != 0 {
+                            liquidation_risk[slot] =
+                                Some(effective_q.saturating_mul(u128::from(asset.effective_price)));
+                        }
+                    }
+                }
                 // A legacy Normal-mode leg whose effective OI is already exhausted
                 // is a reset obligation too, or it stays uncrankable after upgrade.
                 // (upstream 9ffc4749)
@@ -18773,6 +18817,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let liquidatable_asset = asset_of(V16Core::kernel_auto_crank_liquidation_slot(
             liquidation_unblocked_flags,
             liquidation_flags,
+            liquidation_risk,
         ))?;
         let reset_obligation_asset =
             asset_of(V16Core::first_actionable_slot(reset_obligation_flags))?;
