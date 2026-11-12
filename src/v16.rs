@@ -19150,6 +19150,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     < self.header.config.max_market_slots.get() as usize
                     && Self::active_leg_slot_for_asset(&account.as_view(), request.asset_index)?
                         .is_some();
+                // Upstream #248 (re-derived from aeyakovenko/percolator 01883784): the mark
+                // must move BEFORE the refresh settles it, and the certificate must be
+                // stamped AFTER the epoch bump. The old order (refresh -> accrue) stamped
+                // `cert_oracle_epoch` from the PRE-accrue header epoch and the trailing
+                // accrual then incremented `header.oracle_epoch`, so the crank's own
+                // certificate was stale the moment the crank returned. The next
+                // classification requires `cert_current` for `liquidatable`, so in a market
+                // that keeps moving the `Liquidate` arm was unreachable.
+                self.accrue_asset_to_not_atomic(
+                    request.asset_index,
+                    request.now_slot,
+                    request.effective_price,
+                    request.funding_rate_e9,
+                    selected_leg_before,
+                )?;
                 match self.refresh_account_and_certify_not_atomic(
                     account,
                     Some((request.asset_index, request.effective_price)),
@@ -19180,7 +19195,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     self.validate_shape_audit_scan()?;
                     return Ok(PermissionlessProgressOutcomeV16::AccountCurrent);
                 }
-                selected_leg_before
+                // No trailing accrual: the mark already moved above, and a second accrual
+                // would invalidate the certificate again (upstream #248). The S10 retry
+                // that used to follow the trailing accrual still runs here, so the refresh
+                // crank keeps its unclaimed-backing move for an unpositioned asset; it only
+                // fires when the asset stores no position (so not for a leg this cert
+                // covers) and it does not touch the account's certificate.
+                self.s10_retry_for_unpositioned_asset(request.asset_index, &mut s10_budget)?;
+                return Ok(PermissionlessProgressOutcomeV16::AccountCurrent);
             }
             PermissionlessCrankActionV16::SettleB { asset_index } => {
                 let out = self.settle_account_b_chunk(

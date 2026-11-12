@@ -1840,8 +1840,11 @@ fn diag_is_the_clamp_regime_discrepancy_the_engine_or_the_harness() {
     }
     let mut slot = SLOTS_PER_STEP;
     let (mut ok, mut err) = (0u32, 0u32);
-    // A settle uses the k from the PREVIOUS accrual, so equity at step i reflects the
-    // price move accrued at step i-1. Track that explicitly instead of assuming.
+    // Upstream #248 (aeyakovenko/percolator 01883784): the Refresh crank now accrues BEFORE
+    // it settles, so equity at step i reflects the price move accrued at step i itself.
+    // (Before #248 the settle used the k from the PREVIOUS accrual and this harness tracked a
+    // one-step lag; that lag no longer exists.) `pending_move` is kept for the closing
+    // print and is always 0 after a successful crank.
     let mut pending_move = 0i128;
     let mut cum_expected = 0i128;
     let mut cum_actual = 0i128;
@@ -1862,8 +1865,10 @@ fn diag_is_the_clamp_regime_discrepancy_the_engine_or_the_harness() {
                 ok += 1;
                 let eq_after = lp.capital.get() as i128 + lp.pnl.get();
                 let actual = eq_after - eq_before;
-                // this settle realized the PENDING move from the previous accrual
-                let expected = -size * pending_move / POS_SCALE as i128;
+                // this settle realized the move accrued by THIS crank (#248 order)
+                let this_move =
+                    markets[0].engine.asset.effective_price.get() as i128 - p_before;
+                let expected = -size * this_move / POS_SCALE as i128;
                 cum_expected += expected;
                 cum_actual += actual;
                 let d = actual - expected;
@@ -1880,7 +1885,7 @@ fn diag_is_the_clamp_regime_discrepancy_the_engine_or_the_harness() {
                         usd(d)
                     );
                 }
-                pending_move = markets[0].engine.asset.effective_price.get() as i128 - p_before;
+                pending_move = 0;
             }
             Err(_) => err += 1,
         }
