@@ -6419,6 +6419,15 @@ impl<'a> PortfolioV16View<'a> {
         let mut seen_asset_count = 0usize;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            // v22-cu-1113: an inactive slot holding exactly the empty-leg encoding decodes to
+            // `PortfolioLegV16::EMPTY` (no error possible) and takes a `continue` below on every
+            // branch (bit == active == false, is_empty()); skip that decode and those checks.
+            // Kani verifies the loop unchanged.
+            #[cfg(not(kani))]
+            if !active_bitmap_get(bitmap, slot) && self.header.legs[slot].is_empty_encoding() {
+                slot += 1;
+                continue;
+            }
             let bit = active_bitmap_get(bitmap, slot);
             let leg = self.header.legs[slot].try_to_runtime()?;
             if slot >= active_leg_cap {
@@ -16925,6 +16934,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut reset_obligation_cleared = false;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            // v22-cu-1113: an inactive slot holding exactly the empty-leg encoding decodes to
+            // `PortfolioLegV16::EMPTY` (no error possible) and takes a `continue` below on every
+            // branch (bit == active == false, is_empty()); skip that decode and those checks.
+            // Kani verifies the loop unchanged.
+            #[cfg(not(kani))]
+            if !active_bitmap_get(bitmap, slot) && account.header.legs[slot].is_empty_encoding() {
+                slot += 1;
+                continue;
+            }
             let leg = account.header.legs[slot].try_to_runtime()?;
             let bit = active_bitmap_get(bitmap, slot);
             if slot >= active_leg_cap {
@@ -29378,6 +29396,28 @@ mod empty_leg_image_tests {
             return Err(V16Error::HiddenLeg);
         }
         Ok(out)
+    }
+
+    /// v22-cu-1113: the leg loops of `validate_with_market` and
+    /// `refresh_account_and_certify_not_atomic` skip an inactive slot holding exactly the empty
+    /// encoding. That is identical only because such a slot decodes without error to a leg that
+    /// is inactive and `is_empty()`, which both loops `continue` on; pin all three facts.
+    #[test]
+    fn empty_encoding_slot_is_skippable_in_leg_loops() {
+        let empty = PORTFOLIO_LEG_V16_EMPTY_ACCOUNT;
+        assert!(empty.is_empty_encoding());
+        let leg = empty.try_to_runtime().expect("empty encoding decodes");
+        assert_eq!(leg, PortfolioLegV16::EMPTY);
+        assert!(!leg.active);
+        assert!(leg.is_empty());
+        // Any single-byte change is no longer the empty encoding (takes the full decode path).
+        let bytes = bytemuck::bytes_of(&empty).to_vec();
+        for i in 0..bytes.len() {
+            let mut b = bytes.clone();
+            b[i] ^= 1;
+            let other: PortfolioLegV16Account = *bytemuck::from_bytes(&b);
+            assert!(!other.is_empty_encoding(), "byte {i}");
+        }
     }
 
     #[test]
