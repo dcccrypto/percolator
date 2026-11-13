@@ -1122,6 +1122,39 @@ pub fn div_rem_u256(num: U256, den: U256) -> (U256, U256) {
         return (U256::from_u128(q), U256::from_u128(r));
     }
 
+    div_rem_u256_slow(num, den)
+}
+
+/// Slow path of `div_rem_u256` (num, den != 0, den <= num, not both below 2^128).
+///
+/// DUAL-MODE (like the U256/I256 layouts above): Kani builds keep the original bit-serial
+/// long division, which CBMC handles well; BPF/host builds use exact digit long division
+/// (`divmnu32`). Both compute floor(num / den) and num mod den, so they return identical
+/// values; `tests::digit_division_matches_bit_serial_reference` checks the non-Kani path
+/// against this exact bit-serial code (v22-cu-1113).
+#[cfg(kani)]
+fn div_rem_u256_slow(num: U256, den: U256) -> (U256, U256) {
+    let shift = leading_zeros_u256(den) - leading_zeros_u256(num);
+    let mut remainder = num;
+    let mut quotient = U256::ZERO;
+    let mut divisor = den.shl(shift);
+
+    // We iterate shift+1 times (from bit `shift` down to 0)
+    let mut i = shift as i32;
+    while i >= 0 {
+        if remainder >= divisor {
+            remainder = remainder.saturating_sub(divisor);
+            quotient = quotient.bitor(U256::ONE.shl(i as u32));
+        }
+        divisor = divisor.shr(1);
+        i -= 1;
+    }
+
+    (quotient, remainder)
+}
+
+#[cfg(not(kani))]
+fn div_rem_u256_slow(num: U256, den: U256) -> (U256, U256) {
     // Long division on 32-bit digits (Knuth D). Exact, so the quotient and remainder are the
     // same values the former bit-serial loop produced; it only runs ~8 digit steps instead of
     // up to 256 shift/compare/subtract rounds (v22-cu-1113).
@@ -1492,6 +1525,36 @@ impl U512 {
             return Some((U256::ZERO, r));
         }
 
+        let shift = den_lz - num_lz;
+        self.div_rem_slow(den_512, den, shift)
+    }
+
+    /// Slow path of `checked_div_rem_by_u256`; dual-mode exactly like `div_rem_u256_slow`
+    /// (Kani: the original bit-serial loop; BPF/host: digit long division). Identical results;
+    /// `tests::u512_digit_division_matches_bit_serial_reference` checks this (v22-cu-1113).
+    #[cfg(kani)]
+    fn div_rem_slow(self, den_512: U512, _den: U256, shift: u32) -> Option<(U256, U256)> {
+        let mut remainder = self;
+        let mut quotient = U512::ZERO;
+        let mut divisor = den_512.shl_u512(shift);
+
+        let mut i = shift as i32;
+        while i >= 0 {
+            if remainder.cmp_u512(&divisor) != Ordering::Less {
+                remainder = remainder.sub_u512(divisor);
+                quotient = quotient.set_bit(i as u32);
+            }
+            divisor = divisor.shr_u512(1);
+            i -= 1;
+        }
+
+        let q = quotient.try_into_u256()?;
+        let r = remainder.try_into_u256().expect("remainder must fit U256");
+        Some((q, r))
+    }
+
+    #[cfg(not(kani))]
+    fn div_rem_slow(self, _den_512: U512, den: U256, _shift: u32) -> Option<(U256, U256)> {
         // Long division on 32-bit digits (Knuth D), exact: same quotient and remainder as the
         // former bit-serial loop over `den_lz - num_lz + 1` bits (v22-cu-1113).
         let mut u = [0u32; 16];
