@@ -1091,6 +1091,8 @@ fn sub_u128_borrow(a: u128, b: u128, borrow_in: bool) -> (u128, bool) {
 // ============================================================================
 
 /// Count leading zeros of a U256.
+// Unused by production code since v22-cu-1113; kept for the reference division in the tests.
+#[allow(dead_code)]
 fn leading_zeros_u256(v: U256) -> u32 {
     if v.hi() != 0 {
         v.hi().leading_zeros()
@@ -1120,7 +1122,18 @@ pub fn div_rem_u256(num: U256, den: U256) -> (U256, U256) {
         return (U256::from_u128(q), U256::from_u128(r));
     }
 
-    // Binary long division
+    div_rem_u256_slow(num, den)
+}
+
+/// Slow path of `div_rem_u256` (num, den != 0, den <= num, not both below 2^128).
+///
+/// DUAL-MODE (like the U256/I256 layouts above): Kani builds keep the original bit-serial
+/// long division, which CBMC handles well; BPF/host builds use exact digit long division
+/// (`divmnu32`). Both compute floor(num / den) and num mod den, so they return identical
+/// values; `tests::digit_division_matches_bit_serial_reference` checks the non-Kani path
+/// against this exact bit-serial code (v22-cu-1113).
+#[cfg(kani)]
+fn div_rem_u256_slow(num: U256, den: U256) -> (U256, U256) {
     let shift = leading_zeros_u256(den) - leading_zeros_u256(num);
     let mut remainder = num;
     let mut quotient = U256::ZERO;
@@ -1140,6 +1153,174 @@ pub fn div_rem_u256(num: U256, den: U256) -> (U256, U256) {
     (quotient, remainder)
 }
 
+#[cfg(not(kani))]
+fn div_rem_u256_slow(num: U256, den: U256) -> (U256, U256) {
+    // Long division on 32-bit digits (Knuth D). Exact, so the quotient and remainder are the
+    // same values the former bit-serial loop produced; it only runs ~8 digit steps instead of
+    // up to 256 shift/compare/subtract rounds (v22-cu-1113).
+    let mut u = [0u32; 16];
+    let u8d = u256_to_digits(num);
+    u[..8].copy_from_slice(&u8d);
+    let v = u256_to_digits(den);
+    let mut q = [0u32; 16];
+    let mut r = [0u32; 8];
+    divmnu32(&mut q, &mut r, &u, sig_digits(&u), &v, sig_digits(&v));
+    // den <= num, so q < 2^256 always fits the low 8 digits.
+    (u256_from_digits(&q[..8]), u256_from_digits(&r))
+}
+
+// ============================================================================
+// Digit helpers for Knuth algorithm D (32-bit digits, 64-bit intermediates)
+// ============================================================================
+
+/// U256 -> eight little-endian 32-bit digits.
+#[cfg(not(kani))]
+fn u256_to_digits(v: U256) -> [u32; 8] {
+    let lo = v.lo();
+    let hi = v.hi();
+    [
+        lo as u32,
+        (lo >> 32) as u32,
+        (lo >> 64) as u32,
+        (lo >> 96) as u32,
+        hi as u32,
+        (hi >> 32) as u32,
+        (hi >> 64) as u32,
+        (hi >> 96) as u32,
+    ]
+}
+
+/// Eight little-endian 32-bit digits -> U256.
+#[cfg(not(kani))]
+fn u256_from_digits(d: &[u32]) -> U256 {
+    let lo = (d[0] as u128) | ((d[1] as u128) << 32) | ((d[2] as u128) << 64) | ((d[3] as u128) << 96);
+    let hi = (d[4] as u128) | ((d[5] as u128) << 32) | ((d[6] as u128) << 64) | ((d[7] as u128) << 96);
+    U256::new(lo, hi)
+}
+
+/// Number of significant digits (index of the highest non-zero digit + 1; 0 for zero).
+#[cfg(not(kani))]
+fn sig_digits(d: &[u32]) -> usize {
+    let mut n = d.len();
+    while n > 0 && d[n - 1] == 0 {
+        n -= 1;
+    }
+    n
+}
+
+/// Knuth TAOCP vol. 2 §4.3.1 algorithm D, in the form of Hacker's Delight `divmnu64`
+/// (32-bit digits, 64-bit intermediates, so every digit division is a native 64-bit divide).
+///
+/// Divides `u[..m]` by `v[..n]` (little-endian digits, `v[n-1] != 0`, `1 <= n <= m <= 16`,
+/// `n <= 8`), writing the quotient digits to `q[..=m-n]` (other digits untouched) and the
+/// remainder to `r[..n]` (other digits untouched). Exact integer division: the results are
+/// floor(u / v) and u mod v. All intermediates are bounded (see inline notes), so no
+/// operation can overflow.
+#[cfg(not(kani))]
+fn divmnu32(q: &mut [u32; 16], r: &mut [u32; 8], u: &[u32; 16], m: usize, v: &[u32; 8], n: usize) {
+    const B: u64 = 1u64 << 32;
+    assert!(n >= 1 && n <= 8 && m >= n && m <= 16, "divmnu32: bad digit counts");
+    assert!(v[n - 1] != 0, "divmnu32: divisor top digit is zero");
+
+    if n == 1 {
+        // Single-digit divisor: k < v0 < 2^32, so k * B + u[j] < 2^64.
+        let v0 = v[0] as u64;
+        let mut k: u64 = 0;
+        let mut j = m;
+        while j > 0 {
+            j -= 1;
+            let t = k * B + u[j] as u64;
+            let qd = t / v0;
+            q[j] = qd as u32;
+            k = t - qd * v0;
+        }
+        r[0] = k as u32;
+        return;
+    }
+
+    // D1: normalize so the divisor's top digit has its high bit set. `s` in 0..=31; the
+    // complementary shift `32 - s` is done in u64 so that s == 0 (a 32-bit shift) is defined
+    // and contributes 0 after truncation.
+    let s = v[n - 1].leading_zeros();
+    let mut vn = [0u32; 8];
+    let mut i = n - 1;
+    while i > 0 {
+        vn[i] = (v[i] << s) | (((v[i - 1] as u64) >> (32 - s)) as u32);
+        i -= 1;
+    }
+    vn[0] = v[0] << s;
+
+    let mut un = [0u32; 17];
+    un[m] = ((u[m - 1] as u64) >> (32 - s)) as u32;
+    let mut i = m - 1;
+    while i > 0 {
+        un[i] = (u[i] << s) | (((u[i - 1] as u64) >> (32 - s)) as u32);
+        i -= 1;
+    }
+    un[0] = u[0] << s;
+
+    let vtop = vn[n - 1] as u64;
+    let vnext = vn[n - 2] as u64;
+    // D2..D7: one quotient digit per step, j = m-n down to 0.
+    let mut j = m - n + 1;
+    while j > 0 {
+        j -= 1;
+        // D3: estimate. num < 2^64; qhat <= B + 1 (un[j+n] <= vtop by the D-loop invariant and
+        // vtop >= 2^31), and rhat < vtop < B on entry.
+        let num = ((un[j + n] as u64) << 32) | un[j + n - 1] as u64;
+        let mut qhat = num / vtop;
+        let mut rhat = num - qhat * vtop;
+        // `qhat * vnext` is only evaluated once qhat < B (the `||` short-circuits), so it is
+        // < 2^64; rhat < B whenever `rhat << 32` is evaluated. After the loop qhat < B.
+        while qhat >= B || qhat * vnext > ((rhat << 32) | un[j + n - 2] as u64) {
+            qhat -= 1;
+            rhat += vtop;
+            if rhat >= B {
+                break;
+            }
+        }
+
+        // D4: multiply and subtract. p < 2^64, every t fits i64 (|t| < 2^33).
+        let mut k: i64 = 0;
+        let mut t: i64;
+        let mut i = 0;
+        while i < n {
+            let p = qhat * vn[i] as u64;
+            t = un[i + j] as i64 - k - (p & 0xFFFF_FFFF) as i64;
+            un[i + j] = t as u32;
+            k = (p >> 32) as i64 - (t >> 32);
+            i += 1;
+        }
+        t = un[j + n] as i64 - k;
+        un[j + n] = t as u32;
+
+        // D5/D6: store the digit; add back in the (rare) case the estimate was one too large.
+        if t < 0 {
+            q[j] = (qhat - 1) as u32;
+            let mut c: i64 = 0;
+            let mut i = 0;
+            while i < n {
+                let s2 = un[i + j] as i64 + vn[i] as i64 + c;
+                un[i + j] = s2 as u32;
+                c = s2 >> 32;
+                i += 1;
+            }
+            un[j + n] = un[j + n].wrapping_add(c as u32);
+        } else {
+            q[j] = qhat as u32;
+        }
+    }
+
+    // D8: unnormalize the remainder.
+    let mut i = 0;
+    while i < n - 1 {
+        r[i] = (un[i] >> s) | (((un[i + 1] as u64) << (32 - s)) as u32);
+        i += 1;
+    }
+    // un[n] is 0 here (the final remainder is below vn), as in Hacker's Delight.
+    r[n - 1] = un[n - 1] >> s;
+}
+
 // ============================================================================
 // U512 - private intermediate for mul_div operations
 // ============================================================================
@@ -1151,6 +1332,9 @@ pub fn div_rem_u256(num: U256, den: U256) -> (U256, U256) {
 struct U512([u128; 4]);
 
 impl U512 {
+    // Kept (unused by production code since v22-cu-1113) for the bit-serial reference
+    // division in this file's tests.
+    #[allow(dead_code)]
     const ZERO: Self = Self([0, 0, 0, 0]);
 
     fn is_zero(&self) -> bool {
@@ -1211,6 +1395,9 @@ impl U512 {
         Ordering::Equal
     }
 
+    // Kept (unused by production code since v22-cu-1113) for the bit-serial reference
+    // division in this file's tests.
+    #[allow(dead_code)]
     /// Shift left by `bits`. Saturates to zero if bits >= 512.
     fn shl_u512(self, bits: u32) -> Self {
         if bits >= 512 {
@@ -1232,6 +1419,9 @@ impl U512 {
         Self(result)
     }
 
+    // Kept (unused by production code since v22-cu-1113) for the bit-serial reference
+    // division in this file's tests.
+    #[allow(dead_code)]
     /// Shift right by `bits`.
     fn shr_u512(self, bits: u32) -> Self {
         if bits >= 512 {
@@ -1253,6 +1443,9 @@ impl U512 {
         Self(result)
     }
 
+    // Kept (unused by production code since v22-cu-1113) for the bit-serial reference
+    // division in this file's tests.
+    #[allow(dead_code)]
     /// Subtract rhs from self. Assumes self >= rhs.
     fn sub_u512(self, rhs: Self) -> Self {
         let mut result = [0u128; 4];
@@ -1266,6 +1459,9 @@ impl U512 {
         Self(result)
     }
 
+    // Kept (unused by production code since v22-cu-1113) for the bit-serial reference
+    // division in this file's tests.
+    #[allow(dead_code)]
     /// Bitwise OR with a U512 that has only the bit at position `bit` set.
     fn set_bit(self, bit: u32) -> Self {
         if bit >= 512 {
@@ -1335,6 +1531,14 @@ impl U512 {
         }
 
         let shift = den_lz - num_lz;
+        self.div_rem_slow(den_512, den, shift)
+    }
+
+    /// Slow path of `checked_div_rem_by_u256`; dual-mode exactly like `div_rem_u256_slow`
+    /// (Kani: the original bit-serial loop; BPF/host: digit long division). Identical results;
+    /// `tests::u512_digit_division_matches_bit_serial_reference` checks this (v22-cu-1113).
+    #[cfg(kani)]
+    fn div_rem_slow(self, den_512: U512, _den: U256, shift: u32) -> Option<(U256, U256)> {
         let mut remainder = self;
         let mut quotient = U512::ZERO;
         let mut divisor = den_512.shl_u512(shift);
@@ -1352,6 +1556,32 @@ impl U512 {
         let q = quotient.try_into_u256()?;
         let r = remainder.try_into_u256().expect("remainder must fit U256");
         Some((q, r))
+    }
+
+    #[cfg(not(kani))]
+    fn div_rem_slow(self, _den_512: U512, den: U256, _shift: u32) -> Option<(U256, U256)> {
+        // Long division on 32-bit digits (Knuth D), exact: same quotient and remainder as the
+        // former bit-serial loop over `den_lz - num_lz + 1` bits (v22-cu-1113).
+        let mut u = [0u32; 16];
+        let mut w = 0;
+        while w < 4 {
+            let x = self.0[w];
+            u[4 * w] = x as u32;
+            u[4 * w + 1] = (x >> 32) as u32;
+            u[4 * w + 2] = (x >> 64) as u32;
+            u[4 * w + 3] = (x >> 96) as u32;
+            w += 1;
+        }
+        let v = u256_to_digits(den);
+        let mut qd = [0u32; 16];
+        let mut rd = [0u32; 8];
+        divmnu32(&mut qd, &mut rd, &u, sig_digits(&u), &v, sig_digits(&v));
+
+        // The quotient must fit U256 (same refusal as the former `quotient.try_into_u256()?`).
+        if sig_digits(&qd) > 8 {
+            return None;
+        }
+        Some((u256_from_digits(&qd[..8]), u256_from_digits(&rd)))
     }
 }
 
@@ -2213,5 +2443,176 @@ mod tests {
             mul_div_floor_u256(U256::ONE, U256::ONE, U256::ONE),
             U256::ONE
         );
+    }
+
+    // --- v22-cu-1113: digit long division == the former bit-serial division, exactly ---
+
+    /// The pre-v22-cu-1113 `div_rem_u256` slow path, verbatim (bit-serial long division).
+    fn ref_div_rem_u256(num: U256, den: U256) -> (U256, U256) {
+        assert!(!den.is_zero());
+        if num.is_zero() {
+            return (U256::ZERO, U256::ZERO);
+        }
+        if den > num {
+            return (U256::ZERO, num);
+        }
+        let shift = leading_zeros_u256(den) - leading_zeros_u256(num);
+        let mut remainder = num;
+        let mut quotient = U256::ZERO;
+        let mut divisor = den.shl(shift);
+        let mut i = shift as i32;
+        while i >= 0 {
+            if remainder >= divisor {
+                remainder = remainder.saturating_sub(divisor);
+                quotient = quotient.bitor(U256::ONE.shl(i as u32));
+            }
+            divisor = divisor.shr(1);
+            i -= 1;
+        }
+        (quotient, remainder)
+    }
+
+    /// The pre-v22-cu-1113 `U512::checked_div_rem_by_u256` slow path, verbatim.
+    fn ref_u512_div(n: U512, den: U256) -> Option<(U256, U256)> {
+        if n.is_zero() {
+            return Some((U256::ZERO, U256::ZERO));
+        }
+        let den_512 = U512::from_u256(den);
+        if n.cmp_u512(&den_512) == Ordering::Less {
+            return Some((U256::ZERO, n.try_into_u256().unwrap()));
+        }
+        let num_lz = n.leading_zeros();
+        let den_lz = den_512.leading_zeros();
+        let shift = den_lz - num_lz;
+        let mut remainder = n;
+        let mut quotient = U512::ZERO;
+        let mut divisor = den_512.shl_u512(shift);
+        let mut i = shift as i32;
+        while i >= 0 {
+            if remainder.cmp_u512(&divisor) != Ordering::Less {
+                remainder = remainder.sub_u512(divisor);
+                quotient = quotient.set_bit(i as u32);
+            }
+            divisor = divisor.shr_u512(1);
+            i -= 1;
+        }
+        let q = quotient.try_into_u256()?;
+        Some((q, remainder.try_into_u256().unwrap()))
+    }
+
+    struct XorShift(u64);
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        /// A u128 with a random bit length and random "digit-boundary" structure (runs of
+        /// 0x0000_0000 / 0xFFFF_FFFF / 0x8000_0000 digits), the shapes that drive Knuth D's
+        /// qhat correction and add-back branches.
+        fn word(&mut self) -> u128 {
+            let mut v = 0u128;
+            for k in 0..4 {
+                let d = match self.next() % 6 {
+                    0 => 0u32,
+                    1 => u32::MAX,
+                    2 => 0x8000_0000,
+                    3 => 0x7FFF_FFFF,
+                    4 => 1,
+                    _ => self.next() as u32,
+                };
+                v |= (d as u128) << (32 * k);
+            }
+            let bits = (self.next() % 129) as u32;
+            if bits == 0 {
+                0
+            } else if bits >= 128 {
+                v
+            } else {
+                v & ((1u128 << bits) - 1)
+            }
+        }
+    }
+
+    fn digits_u256(d: [u32; 8]) -> U256 {
+        u256_from_digits(&d)
+    }
+
+    /// Hacker's Delight divmnu test vectors that force qhat correction / add-back, embedded at
+    /// every digit offset, plus random structured operands; every path of `divmnu32` against
+    /// the bit-serial reference.
+    #[test]
+    fn digit_division_matches_bit_serial_reference() {
+        let mut cases: alloc::vec::Vec<(U256, U256)> = alloc::vec::Vec::new();
+        // (dividend digits, divisor digits), little-endian, from Hacker's Delight divmnu64 tests.
+        let hd: &[(&[u32], &[u32])] = &[
+            (&[0, 0, 0x8000_0000, 0x7FFF_FFFF], &[1, 0, 0x8000_0000]),
+            (&[3, 0, 0x8000_0000], &[1, 0, 0x2000_0000]),
+            (&[0, 0, 0x8000_0000], &[1, 0, 0x8000_0000]),
+            (&[0, 0xFFFF_FFFE, 0x8000_0000], &[0xFFFF_FFFF, 0x8000_0000]),
+            (&[0x0000_7899, 0x0000_BCDE, 0x0000_789A, 0x0000_BCDE], &[0x0000_FFFF, 0x0000_FFFF]),
+            (&[0xFFFF_FFFF, 0xFFFF_FFFF], &[0xFFFF_FFFF, 0xFFFF_FFFF]),
+            (&[0, 0xFFFF_FFFF, 0xFFFF_FFFF], &[1, 0xFFFF_FFFF]),
+            (&[0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF], &[0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF]),
+            (&[0, 0, 0, 0x8000_0000], &[0xFFFF_FFFF, 0x7FFF_FFFF]),
+        ];
+        for (u, v) in hd {
+            for shift in 0..=(8 - u.len()) {
+                for vshift in 0..=shift {
+                    let mut ud = [0u32; 8];
+                    let mut vd = [0u32; 8];
+                    ud[shift..shift + u.len()].copy_from_slice(u);
+                    vd[vshift..vshift + v.len()].copy_from_slice(v);
+                    cases.push((digits_u256(ud), digits_u256(vd)));
+                }
+            }
+        }
+        let mut r = XorShift(0xD1B5_4A32_D192_ED03);
+        for _ in 0..200_000 {
+            cases.push((U256::new(r.word(), r.word()), U256::new(r.word(), r.word())));
+            cases.push((U256::new(r.word(), r.word()), U256::from_u128(r.word())));
+            cases.push((U256::new(r.word(), r.word()), U256::from_u64(r.next() >> (r.next() % 64))));
+        }
+        let mut checked = 0u64;
+        for (num, den) in cases {
+            if den.is_zero() {
+                continue;
+            }
+            assert_eq!(div_rem_u256(num, den), ref_div_rem_u256(num, den), "num={num:?} den={den:?}");
+            checked += 1;
+        }
+        assert!(checked > 550_000, "digit division: {checked} cases");
+    }
+
+    #[test]
+    fn u512_digit_division_matches_bit_serial_reference() {
+        let mut r = XorShift(0x2545_F491_4F6C_DD1D);
+        let mut checked = 0u64;
+        let mut none_seen = 0u64;
+        for i in 0..300_000u64 {
+            let n = match i % 3 {
+                // products, as in mul_div_*: the only way production code builds a U512
+                0 => U512::mul_u256(U256::new(r.word(), r.word()), U256::new(r.word(), r.word())),
+                1 => U512::mul_u256(U256::new(r.word(), r.word()), U256::from_u128(r.word())),
+                _ => U512([r.word(), r.word(), r.word(), r.word()]),
+            };
+            let den = match i % 4 {
+                0 => U256::new(r.word(), r.word()),
+                1 => U256::from_u128(r.word()),
+                2 => U256::from_u64(r.next() >> (r.next() % 64)),
+                _ => U256::new(r.word(), u128::MAX >> (r.next() % 128)),
+            };
+            if den.is_zero() {
+                continue;
+            }
+            let got = n.checked_div_rem_by_u256(den);
+            assert_eq!(got, ref_u512_div(n, den), "n={n:?} den={den:?}");
+            if got.is_none() {
+                none_seen += 1;
+            }
+            checked += 1;
+        }
+        assert!(checked > 280_000 && none_seen > 0, "u512: {checked} cases, {none_seen} refusals");
     }
 }
