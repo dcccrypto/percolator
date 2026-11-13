@@ -1,5 +1,6 @@
 //! Liquidation edge cases on the v2.2 engine, driven through the public API only
-//! (deposit -> trade -> accrue -> liquidate). Each test is a small, deterministic world:
+//! (deposit -> trade -> accrue -> liquidate), except that the wrapper-owned raw oracle target
+//! is written straight onto the market slot (the wrapper normally stores it). Each test is a small, deterministic world:
 //! one asset, a target account and a counterparty that took the other side, a price move,
 //! then a liquidation. They pin spec.md section 4.5 (liquidation fee), 4.6 (exact insurance
 //! spend), 5.4 (bankrupt residual), 7 (margin / partial vs full close) and 10 (conservation).
@@ -58,7 +59,7 @@ fn account(seed: u8) -> PortfolioAccountV16Account {
     a
 }
 
-/// One asset at price 100. The target opens `q` (long if `tgt_long`) against a well-funded
+/// One asset at price 1_000 (notional 100_000 for `Q`). The target opens `q` (long if `tgt_long`) against a well-funded
 /// counterparty; `tgt_capital` is the target's deposit.
 fn world(c: Cfg, tgt_capital: u128, q: u128, tgt_long: bool) -> World {
     let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
@@ -107,7 +108,8 @@ fn world(c: Cfg, tgt_capital: u128, q: u128, tgt_long: bool) -> World {
 }
 
 impl World {
-    /// Walk the effective price to `target` within the 5%/slot cap, one slot per step.
+    /// Walk the effective price to `target` within the configured `move_bps` per-slot cap,
+    /// one slot per step.
     fn move_price(&mut self, target: u64) {
         let mut g = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         let mut price = g.markets[0]
@@ -304,9 +306,10 @@ fn liq_edge_wrong_asset_index_is_refused() {
         let mut tv = PortfolioV16ViewMut::new(&mut w.tgt);
         g.liquidate_account_not_atomic(&mut tv, LiquidationRequestV16 { asset_index: 1 })
     };
-    assert!(
-        out.is_err(),
-        "an asset index outside the market must be refused: {out:?}"
+    assert_eq!(
+        out.unwrap_err(),
+        V16Error::InvalidConfig,
+        "index outside the market"
     );
     assert_eq!(w.tgt_leg_q(), Q, "nothing closed");
 }
@@ -319,9 +322,10 @@ fn liq_edge_flat_account_is_refused() {
     let mut fv = PortfolioV16ViewMut::new(&mut flat);
     g.deposit_not_atomic(&mut fv, 1_000).unwrap();
     let out = g.liquidate_account_not_atomic(&mut fv, LiquidationRequestV16 { asset_index: 0 });
-    assert!(
-        out.is_err(),
-        "an account with no leg cannot be liquidated: {out:?}"
+    assert_eq!(
+        out.unwrap_err(),
+        V16Error::InvalidLeg,
+        "an account with no leg"
     );
     assert_eq!(fv.header.capital.get(), 1_000);
 }
@@ -330,7 +334,7 @@ fn liq_edge_flat_account_is_refused() {
 // Partial close and health after the close
 // ---------------------------------------------------------------------------------------------
 
-/// Long, mildly underwater (equity 7_000 < MM 9_200 at price 92): the engine picks a partial
+/// Long, mildly underwater (equity 7_000 < MM 9_200 at price 920): the engine picks a partial
 /// close, the account is maintenance-healthy afterwards, and the close is the MINIMAL one --
 /// one quantum less would leave it unhealthy (spec.md 7: the remaining position must be healthy).
 #[test]
@@ -371,7 +375,9 @@ fn liq_edge_partial_close_is_minimal_and_restores_health_long() {
         spec_mm(Q - out.closed_q, 920, c)
     );
 
-    // minimality, from the spec formulas: closing one quantum less is not healthy
+    // minimality, from the spec formulas: closing one quantum less is not healthy. The fee
+    // oracle uses a CEIL closed notional like the engine and upstream master
+    // (`liquidation_risk_notional_ceil`); this repo's spec.md 4.5 still says floor.
     let smaller = out.closed_q - 1;
     let fee_smaller = ((smaller * 920).div_ceil(POS_SCALE) * c.fee_bps as u128).div_ceil(10_000);
     let eq_smaller = equity_before - fee_smaller as i128;
@@ -486,10 +492,13 @@ fn liq_edge_repeated_partial_closes_on_a_falling_price() {
     assert!(!w.tgt_flat(), "still a partial position");
 }
 
-/// Raw oracle target below the effective price (a long's adverse lag, spec.md 1.7 / 10.12): the
-/// maintenance requirement carries the lag penalty `ceil(|q| * (P_eff - P_target) / POS_SCALE)`
-/// and the engine's partial close sizes against it, so the account is healthy against the
-/// penalised requirement afterwards, and the close is still minimal.
+/// Raw oracle target below the effective price (a long's adverse lag): the maintenance
+/// requirement carries `target_effective_lag_penalty = ceil(|q| * (P_eff - P_target) / POS_SCALE)`.
+/// That term is upstream spec section 7 (aeyakovenko/percolator master: `portfolio_maintenance_req
+/// = gross_mm + target_effective_lag_penalty`) and upstream's engine; this repo's older spec.md
+/// section 7 does not list it yet. The engine's partial close sizes against the penalised
+/// requirement,
+/// so the account is healthy against it afterwards, and the close is still minimal.
 #[test]
 fn liq_edge_partial_close_accounts_for_target_lag_penalty() {
     let c = Cfg::default();
@@ -548,7 +557,6 @@ fn liq_edge_zero_fee_partial_close() {
     };
     let mut w = world(c, 15_000, Q, true);
     w.move_price(920);
-    let cap = w.tgt.capital.get();
     let pre = w.refresh_tgt();
     let out = w.liquidate().unwrap();
     assert_eq!(out.fee_charged, 0);
@@ -559,9 +567,9 @@ fn liq_edge_zero_fee_partial_close() {
         "no value moved by a zero-fee close"
     );
     assert_eq!(post.certified_liq_deficit, 0);
-    // capital is untouched until the loss is realised; the loss on the closed part may be
-    // settled from principal, which leaves equity unchanged (checked above)
-    assert!(w.tgt.capital.get() <= cap);
+    // the 8_000 loss is settled from principal: 15_000 - 8_000, nothing else taken
+    assert_eq!(w.tgt.capital.get(), 7_000);
+    assert_eq!(w.tgt.pnl.get(), 0);
     w.assert_sound();
 }
 
@@ -607,7 +615,9 @@ fn liq_edge_fee_floor_allows_partial_when_raw_fee_clears_it() {
     w.move_price(920);
     let out = w.liquidate().unwrap();
     assert!(out.closed_q < Q, "{out:?}");
-    assert!(out.fee_charged >= 10);
+    let raw = ((out.closed_q * 920).div_ceil(POS_SCALE) * 50).div_ceil(10_000);
+    assert!(raw >= 10, "the raw fee clears the floor ({raw})");
+    assert_eq!(out.fee_charged, raw);
     assert_eq!(w.refresh_tgt().certified_liq_deficit, 0);
     w.assert_sound();
 }
@@ -631,7 +641,10 @@ fn liq_edge_bankrupt_full_close_insurance_covers_exactly() {
     let out = w.liquidate().unwrap();
     assert_eq!(out.closed_q, Q);
     assert!(w.tgt_flat());
-    assert_eq!(out.fee_charged, 0, "a bankrupt account pays no fee");
+    assert_eq!(
+        out.fee_charged, 0,
+        "a bankrupt account pays no fee (engine: no fee when pnl < 0, no fee debt)"
+    );
     assert_eq!(out.insurance_used, deficit, "exact spend: {out:?}");
     assert_eq!(out.residual_booked + out.explicit_loss, 0);
     assert_eq!(w.insurance(), ins_before - deficit);
@@ -643,8 +656,10 @@ fn liq_edge_bankrupt_full_close_insurance_covers_exactly() {
 /// A fully insured bankruptcy still raises the bankruptcy h-lock, attributed to the bankrupt
 /// domain (single-asset group), and the public re-evaluation does NOT clear it while the winner
 /// still holds an unconverted claim sourced from that domain (P2b L1:
-/// `bankruptcy_hlock_claim_term_clear`). Every other clear condition is already met here, so
-/// this pins that the claim term alone holds the lock -- the deficit itself is fully gone.
+/// `bankruptcy_hlock_claim_term_clear`). Every other clear condition of
+/// `try_clear_bankruptcy_hlock_if_healthy` is asserted to hold, so the claim term is what holds
+/// the lock -- the deficit itself is fully gone. (No positive control: making the winner convert
+/// or exit needs the warm-up/conversion path, out of scope here.)
 #[test]
 fn liq_edge_full_insurance_cover_hlock_waits_only_for_winner_claim() {
     let mut w = world(Cfg::default(), 10_000, Q, true);
@@ -663,6 +678,23 @@ fn liq_edge_full_insurance_cover_hlock_waits_only_for_winner_claim() {
     assert_eq!(w.header.stale_certificate_count.get(), 0);
     assert_eq!(w.header.b_stale_account_count.get(), 0);
     assert!(w.header.recovery_reason.try_to_runtime().unwrap().is_none());
+    let slot0 = &w.markets[0].engine;
+    assert_eq!(
+        slot0.pending_domain_loss_barrier_long.get(),
+        0,
+        "no unabsorbed loss"
+    );
+    assert_eq!(
+        slot0.pending_domain_loss_barrier_short.get(),
+        0,
+        "no unabsorbed loss"
+    );
+    // the winner (short) holds a claim sourced from the bankrupt long domain (asset 0, Long)
+    let src = slot0.source_credit_long.try_to_runtime().unwrap();
+    assert!(
+        src.positive_claim_bound_num != 0 || src.exact_positive_claim_num != 0,
+        "the attributed domain carries the winner's claim: {src:?}"
+    );
     let hlock = w.header.bankruptcy_hlock_active;
     assert_ne!(hlock, 0, "the bankruptcy is recorded");
     assert_ne!(
@@ -784,7 +816,9 @@ fn liq_edge_short_bankrupt_full_close_uses_winners_domain() {
 
 /// Equity positive but tiny (100) and the fee for the only healthy close is larger than that:
 /// the fee is bounded by what the account has, the account never goes negative and nothing is
-/// socialised (spec.md 4.5: the uncollectible tail is dropped; lenient).
+/// socialised. Engine policy (`charge_account_fee_current_not_atomic` charges `min(fee, capital)`
+/// and writes no fee debt): more lenient than spec.md 4.5, which would record a collectible
+/// shortfall as negative `fee_credits`.
 #[test]
 fn liq_edge_fee_never_exceeds_capital_on_full_close() {
     let mut w = world(Cfg::default(), 10_000, Q, true);
@@ -1036,14 +1070,34 @@ fn liq_edge_cross_margin_partial_on_either_leg_restores_account_health() {
 /// liquidation leaves the account flat with no debt left on it (spec req 5 / 27, GH#292).
 #[test]
 fn liq_edge_cross_margin_bankrupt_two_legs_resolves_without_recovery() {
+    let mut booked_b = Vec::new();
     for order in [[1usize, 0], [0, 1]] {
         let mut w = world2(20_000);
         w.move_price(0, 780); // loss 22_000 on equity 20_000: equity -2_000
         let pre = w.refresh_tgt();
         assert_eq!(pre.certified_equity, -2_000, "{pre:?}");
         let ins_before = w.header.insurance.get();
+        // every per-asset loss index a residual booking can write (B, K, social-loss carry)
+        let loss_of = |w: &World2, i: usize| {
+            let a = w.markets[i].engine.asset.try_to_runtime().unwrap();
+            (
+                (a.k_long, a.k_short, a.b_long_num, a.b_short_num),
+                (a.b_epoch_start_long_num, a.b_epoch_start_short_num),
+                (
+                    a.social_loss_remainder_long_num,
+                    a.social_loss_remainder_short_num,
+                ),
+                (a.social_loss_dust_long_num, a.social_loss_dust_short_num),
+                (
+                    a.explicit_unallocated_loss_long,
+                    a.explicit_unallocated_loss_short,
+                ),
+            )
+        };
         let mut outs = Vec::new();
         for pick in order {
+            let other_before = loss_of(&w, 1 - pick);
+            let own_before = loss_of(&w, pick);
             match w.liquidate(pick) {
                 Ok(o) => outs.push((pick, o)),
                 Err(e) => panic!(
@@ -1055,6 +1109,21 @@ fn liq_edge_cross_margin_bankrupt_two_legs_resolves_without_recovery() {
                 "order {order:?}: market must stay Live after leg {pick}"
             );
             assert!(w.header.recovery_reason.try_to_runtime().unwrap().is_none());
+            // spec req 5/27: a liquidation call writes loss only onto the asset it closes
+            assert_eq!(
+                loss_of(&w, 1 - pick),
+                other_before,
+                "order {order:?}: closing leg {pick} touched the other asset's loss indices"
+            );
+            if pick == 0 {
+                // the residual lands on asset 0's SHORT (winners) B; closing the only long then
+                // resets that side, so the booked B survives as the short side's epoch start
+                let after = loss_of(&w, 0);
+                assert_eq!(own_before.1, (0, 0));
+                assert_eq!(after.1 .0, 0, "order {order:?}: asset 0 long B untouched");
+                assert_ne!(after.1 .1, 0, "order {order:?}: asset 0 short B charged");
+                booked_b.push(after.1 .1);
+            }
             w.assert_sound();
         }
         assert_eq!(
@@ -1089,6 +1158,9 @@ fn liq_edge_cross_margin_bankrupt_two_legs_resolves_without_recovery() {
             ins_before,
             "no fee or insurance moved on a bankrupt account"
         );
-        println!("order {order:?}: {outs:?}");
     }
+    assert_eq!(
+        booked_b[0], booked_b[1],
+        "same B charge whichever leg closes first"
+    );
 }
