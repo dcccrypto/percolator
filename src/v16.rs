@@ -261,6 +261,10 @@ pub enum V16Error {
     /// below `band_min_leg_notional` (open bigger, or close the leg fully). Wrapper maps it
     /// to 113.
     BandLegBelowMinNotional,
+    /// cpbind: a matched liquidation named a counterparty that is not the asset's bound
+    /// standing counterparty (`EngineAssetSlotV16Account::standing_counterparty_id`), or the
+    /// asset has none bound, or it is the liquidated account itself. Refused before any write.
+    CounterpartyNotBound,
 }
 
 pub type V16Result<T> = core::result::Result<T, V16Error>;
@@ -2994,6 +2998,17 @@ impl V16Core {
         )
     }
 
+    /// cpbind: a matched liquidation may close against `counterparty_id` only when it is the
+    /// asset's bound standing counterparty: a binding exists (non-zero), the ids are equal, and
+    /// the liquidated account is not the bound counterparty itself.
+    fn kernel_counterparty_is_bound(
+        bound_id: [u8; 32],
+        account_id: [u8; 32],
+        counterparty_id: [u8; 32],
+    ) -> bool {
+        bound_id != [0u8; 32] && counterparty_id == bound_id && account_id != bound_id
+    }
+
     /// A portfolio-local cache may lag a market-level B update. The canonical
     /// work predicate therefore includes the derived target delta and rejects an
     /// impossible snapshot reversal instead of hiding it as `NoAction`.
@@ -4525,6 +4540,15 @@ pub fn kani_commit_declared_liquidation_recovery(
 #[cfg(kani)]
 pub fn kani_auto_crank_lifecycle_dispatchable(lifecycle: AssetLifecycleV16) -> bool {
     V16Core::kernel_auto_crank_lifecycle_dispatchable(lifecycle)
+}
+
+#[cfg(kani)]
+pub fn kani_counterparty_is_bound(
+    bound_id: [u8; 32],
+    account_id: [u8; 32],
+    counterparty_id: [u8; 32],
+) -> bool {
+    V16Core::kernel_counterparty_is_bound(bound_id, account_id, counterparty_id)
 }
 
 #[cfg(kani)]
@@ -8300,6 +8324,36 @@ impl V16PodU64 {
     }
 }
 
+/// cpbind: a 32-byte account id stored as two 16-byte halves, so a derived `PartialEq` over a
+/// struct holding it compares at most 16 bytes at a time (the slot-equality Kani harnesses run at
+/// `unwind(32)`; a `[u8; 32]` compare would need 33).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
+pub struct V16PodId32 {
+    pub lo: V16PodU128,
+    pub hi: V16PodU128,
+}
+
+impl V16PodId32 {
+    pub fn new(id: [u8; 32]) -> Self {
+        let mut lo = [0u8; 16];
+        let mut hi = [0u8; 16];
+        lo.copy_from_slice(&id[..16]);
+        hi.copy_from_slice(&id[16..]);
+        Self {
+            lo: V16PodU128 { bytes: lo },
+            hi: V16PodU128 { bytes: hi },
+        }
+    }
+
+    pub fn get(self) -> [u8; 32] {
+        let mut id = [0u8; 32];
+        id[..16].copy_from_slice(&self.lo.bytes);
+        id[16..].copy_from_slice(&self.hi.bytes);
+        id
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct V16PodU128 {
@@ -8958,6 +9012,12 @@ pub struct EngineAssetSlotV16Account {
     /// bucket, so a provider can end below where the base engine would have left it.
     pub provider_principal_long: V16PodU128,
     pub provider_principal_short: V16PodU128,
+    /// cpbind (appended LAST, +32 B per slot): `portfolio_account_id` of the ONLY portfolio a
+    /// matched liquidation on this asset may close against (wrapper: the bound vault LP).
+    /// All zero = none bound, so every matched liquidation on the asset is refused. Changed ONLY
+    /// by `set_asset_standing_counterparty_not_atomic`: kept across retire, canonicalize,
+    /// re-activation and restart (the wrapper's vault-LP record survives all of them).
+    pub standing_counterparty_id: V16PodId32,
 }
 
 /// fix/v21-funding-scale: per-side K/F drift generation, the state behind the O(1) bound on
@@ -9137,7 +9197,10 @@ impl EngineAssetSlotV16Account {
             && self.kf_pending_credit_long.get() == 0
             && self.kf_pending_credit_short.get() == 0
             && self.provider_principal_long.get() == 0
-            && self.provider_principal_short.get() == 0)
+            && self.provider_principal_short.get() == 0
+            // cpbind: activation copies the binding, so an unconfigured or never-activated slot
+            // must not carry one.
+            && self.standing_counterparty_id == V16PodId32::default())
     }
 
     fn validate_market_id_binding(&self) -> V16Result<()> {
@@ -9180,6 +9243,7 @@ impl EngineAssetSlotV16Account {
             kf_pending_credit_short: V16PodI128::new(0),
             provider_principal_long: V16PodU128::new(0),
             provider_principal_short: V16PodU128::new(0),
+            standing_counterparty_id: V16PodId32::default(),
         }
     }
 
@@ -9846,6 +9910,9 @@ impl MarketGroupV16HeaderAccount {
             kf_pending_credit_short: V16PodI128::new(0),
             provider_principal_long: V16PodU128::new(0),
             provider_principal_short: V16PodU128::new(0),
+            // cpbind: the binding belongs to the market (the wrapper's vault-LP record), not to
+            // one activation; only the setter changes it.
+            standing_counterparty_id: slot.standing_counterparty_id,
         };
         self.next_market_id = V16PodU64::new(next_market_id);
         self.current_slot = V16PodU64::new(now_slot);
@@ -18964,9 +19031,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// counterparty bound to `counterparty_asset`. It is consulted ONLY when the engine's own plan
     /// selector picks `Liquidate` on that asset, and then only as described at
     /// `liquidate_account_against_counterparty_not_atomic` (clean close, eligible counterparty;
-    /// otherwise the unilateral close). Every other plan ignores it and never touches it. The
-    /// CALLER MUST bind the counterparty to a protocol-designated standing counterparty (the
-    /// wrapper: the market's registered vault-LP portfolio for that asset).
+    /// otherwise the unilateral close). Every other plan ignores it and never touches it. When
+    /// that liquidation runs, the counterparty must be the asset's bound standing counterparty
+    /// (`set_asset_standing_counterparty_not_atomic`), else `CounterpartyNotBound` (cpbind).
     pub fn permissionless_auto_crank_s10_with_counterparty_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -22109,6 +22176,59 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.reduce_matching_open_interest_for_unilateral_close(asset_index, leg.side, close_q)
     }
 
+    /// cpbind: bind (or, with all-zero `portfolio_account_id`, unbind) the ONLY portfolio a
+    /// matched liquidation on `asset_index` may close against. The caller authenticates who may
+    /// set it (wrapper: the vault-LP bind / unbind). A non-zero binding needs a Live market and
+    /// an Active or DrainOnly asset; clearing is always allowed on a configured slot.
+    pub fn set_asset_standing_counterparty_not_atomic(
+        &mut self,
+        asset_index: usize,
+        portfolio_account_id: [u8; 32],
+    ) -> V16Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        if portfolio_account_id != [0u8; 32] {
+            if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+                return Err(V16Error::LockActive);
+            }
+            let asset = self.asset_state(asset_index)?;
+            if asset.market_id == 0
+                || !V16Core::kernel_auto_crank_lifecycle_dispatchable(asset.lifecycle)
+            {
+                return Err(V16Error::InvalidConfig);
+            }
+        }
+        self.markets[asset_index].engine_slot_mut().standing_counterparty_id =
+            V16PodId32::new(portfolio_account_id);
+        Ok(())
+    }
+
+    /// cpbind: the identity half of the matched close, checked before anything is written.
+    /// `counterparty` must belong to this market group and be the asset's bound standing
+    /// counterparty (`kernel_counterparty_is_bound`); otherwise `CounterpartyNotBound`.
+    fn require_bound_standing_counterparty(
+        &self,
+        account: &PortfolioV16View<'_>,
+        counterparty: &PortfolioV16View<'_>,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        let bound = self.markets[asset_index]
+            .engine_slot()
+            .standing_counterparty_id
+            .get();
+        let cp = &counterparty.header.provenance_header;
+        if cp.market_group_id != self.header.market_group_id
+            || !V16Core::kernel_counterparty_is_bound(
+                bound,
+                account.header.provenance_header.portfolio_account_id,
+                cp.portfolio_account_id,
+            )
+        {
+            return Err(V16Error::CounterpartyNotBound);
+        }
+        Ok(())
+    }
+
     pub fn liquidate_account_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -22137,10 +22257,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// domain-loss barrier on its delta) it falls back to the unilateral path, so the outcome
     /// is never worse than `liquidate_account_not_atomic`.
     ///
-    /// The engine does not choose the counterparty and does not ask its consent: the CALLER
-    /// MUST bind it to a protocol-designated standing counterparty (the wrapper: the market's
-    /// registered vault-LP portfolio). An arbitrary caller-chosen counterparty would be a
-    /// targeted forced reduction of one holder instead of the pro-rata one quantity ADL applies.
+    /// The engine does not ask the counterparty's consent, so it does not trust the caller's
+    /// choice either (cpbind): `counterparty` must be the asset's bound standing counterparty
+    /// (`set_asset_standing_counterparty_not_atomic`; wrapper: the market's vault-LP portfolio),
+    /// else `CounterpartyNotBound` before any write. An arbitrary caller-chosen counterparty
+    /// would be a targeted forced reduction of one holder instead of the pro-rata one quantity
+    /// ADL applies.
     pub fn liquidate_account_against_counterparty_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -22278,6 +22400,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.require_asset_live_reducible(request.asset_index)?;
         self.validate_account_scalar_preflight(&account.as_view())?;
         Self::require_active_leg_slot_for_asset(&account.as_view(), request.asset_index)?;
+        // cpbind: a counterparty the matched close could use (bound to this asset) must be the
+        // asset's bound standing counterparty. After the read-only prechecks (their errors keep
+        // their order) and before the first write (the refresh below), so a wrong one writes
+        // nothing.
+        if let Some((cp, bound_asset)) = counterparty.as_ref() {
+            if *bound_asset == request.asset_index {
+                self.require_bound_standing_counterparty(
+                    &account.as_view(),
+                    &cp.as_view(),
+                    request.asset_index,
+                )?;
+            }
+        }
         match self.refresh_account_and_certify_not_atomic(
             account,
             None,
@@ -26919,12 +27054,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
         let band_bps = self.header.config.band_bps.get();
         let slot = self.markets[asset_index].engine_slot_mut();
+        // cpbind: the binding is the market's (the wrapper's vault-LP record survives a restart),
+        // not the old market_id's, so it is carried over like the insurance budget.
+        let standing_counterparty_id = slot.standing_counterparty_id;
         *slot = Self::restarted_asset_slot_preserving_insurance_budget(
             slot,
             market_id,
             authenticated_price,
             now_slot,
         );
+        slot.standing_counterparty_id = standing_counterparty_id;
         let mut restarted = slot.asset.try_to_runtime()?;
         band_initialize_asset(&mut restarted, band_bps, authenticated_price, now_slot)?;
         slot.asset = AssetStateV16Account::from_runtime(&restarted);
@@ -27005,8 +27144,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         self.require_empty_asset_lifecycle_state(asset_index)?;
 
+        // cpbind: carried over like on restart and re-activation (only the setter changes it).
+        let standing_counterparty_id = slot.standing_counterparty_id;
         *self.markets[asset_index].engine_slot_mut() =
             Self::canonical_retired_asset_slot(old_asset);
+        self.markets[asset_index].engine_slot_mut().standing_counterparty_id =
+            standing_counterparty_id;
         self.validate_shape()
     }
 

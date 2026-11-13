@@ -4957,10 +4957,14 @@ fn v16_canonicalize_retired_empty_asset_slot_clears_inert_domain_state() {
     let c_tot_before = header.c_tot.get();
     let insurance_before = header.insurance.get();
 
+    // cpbind: the standing-counterparty binding survives canonicalization.
+    markets[1].engine.standing_counterparty_id = percolator::V16PodId32::new([5; 32]);
+
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market
         .canonicalize_retired_empty_asset_slot_not_atomic(1)
         .unwrap();
+    assert_eq!(market.markets[1].engine.standing_counterparty_id.get(), [5; 32]);
     let asset = market.markets[1].engine.asset.try_to_runtime().unwrap();
 
     assert_eq!(asset.lifecycle, AssetLifecycleV16::Retired);
@@ -5043,7 +5047,13 @@ fn v16_retire_and_reactivate_empty_asset_after_source_credit_epoch_bump() {
         SourceCreditStateV16Account::from_runtime(&recomputed_empty_source);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    // cpbind: a binding set while active survives retire + re-activation (only the setter
+    // changes it; the wrapper's vault-LP record survives both too).
+    market
+        .set_asset_standing_counterparty_not_atomic(0, [6; 32])
+        .unwrap();
     market.retire_empty_asset_not_atomic(0, 1).unwrap();
+    assert_eq!(market.markets[0].engine.standing_counterparty_id.get(), [6; 32]);
     assert_eq!(
         market.markets[0]
             .engine
@@ -5058,6 +5068,7 @@ fn v16_retire_and_reactivate_empty_asset_after_source_credit_epoch_bump() {
         .header
         .activate_empty_market_slot_not_atomic(0, &mut market.markets[0], 200, 2)
         .unwrap();
+    assert_eq!(market.markets[0].engine.standing_counterparty_id.get(), [6; 32]);
     assert_ne!(
         market.markets[0].engine.asset.market_id.get(),
         old_market_id
