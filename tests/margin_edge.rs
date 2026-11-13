@@ -257,7 +257,7 @@ fn margin_reduce_of_a_short_below_initial_margin_is_not_blocked() {
 // ---------- flips ----------
 
 #[test]
-fn margin_flip_requires_initial_margin_on_the_new_side_exact_and_one_atom_over() {
+fn margin_flip_landing_at_exactly_ten_x_is_accepted() {
     // a is long 2 units. Flipping to short 2 (trade of 4 units, a as the seller) needs IM of 2 units.
     let run = |cap: u128| {
         let mut w = W::std();
@@ -272,19 +272,11 @@ fn margin_flip_requires_initial_margin_on_the_new_side_exact_and_one_atom_over()
 }
 
 #[test]
-fn margin_flip_with_smaller_absolute_size_still_needs_initial_margin_when_below_it() {
-    // long 10, price drops 3% (under IM), flip to short 5 (abs shrinks). Flip is NOT a reduction.
-    let mut w = W::std();
-    let (mut a, mut b) = (account(1), account(2));
-    w.deposit(&mut a, 10 * IM1);
-    w.deposit(&mut b, BIG);
-    assert!(w.trade(0, &mut a, &mut b, (10 * POS_SCALE) as i128));
-    w.move_price(0, -300);
-    w.refresh(&mut a);
-    w.refresh(&mut b);
-    // a sells 15 -> ends short 5: IM about 485k against equity about 702k
-    let ok = w.trade(0, &mut b, &mut a, (15 * POS_SCALE) as i128);
-    assert!(ok, "equity 700k covers IM 485k of the new short 5");
+fn margin_flip_with_smaller_absolute_size_is_not_a_reduction() {
+    // long 10 at -8%, flip to short 5 (abs size shrinks): refused, because a flip opens fresh
+    // opposite exposure and needs IM (about 0.46e6) against equity of about 0.2e6.
+    let (mut w, mut a, mut b) = deep_underwater_long();
+    assert!(!w.trade(0, &mut b, &mut a, (15 * POS_SCALE) as i128));
 }
 
 /// long 10 funded 10x, price -8% (equity about 2 units of IM), both refreshed
@@ -315,7 +307,7 @@ fn margin_full_close_of_an_underwater_position_is_a_reduction_not_a_flip() {
 }
 
 #[test]
-fn margin_flip_by_one_position_atom_past_flat_is_still_a_flip_and_needs_im() {
+fn margin_dust_flip_past_flat_is_covered_by_the_min_nonzero_requirement() {
     // closing 10 units plus one position atom opens a 1-atom short: not reduce-only
     let (mut w, mut a, mut b) = deep_underwater_long();
     let r = w.trade(0, &mut b, &mut a, (10 * POS_SCALE) as i128 + 1);
@@ -377,7 +369,7 @@ fn margin_after_close_the_realized_loss_comes_out_of_capital_then_withdraw_is_ca
     w.deposit(&mut a, 10 * IM1);
     w.deposit(&mut b, BIG);
     assert!(w.trade(0, &mut a, &mut b, (10 * POS_SCALE) as i128));
-    w.move_price(0, -300); // a loses 300_000
+    w.move_price(0, -300); // a loses about 297_750 (150bps steps compound)
     w.refresh(&mut a);
     w.refresh(&mut b);
     assert!(w.trade(0, &mut b, &mut a, (10 * POS_SCALE) as i128));
@@ -476,7 +468,7 @@ fn margin_cross_margin_loss_on_one_asset_shrinks_headroom_on_the_other() {
 #[test]
 fn margin_leverage_limit_is_per_notional_not_per_size_for_a_cheaper_asset() {
     let mut w = W::new(2, 1_000, 500);
-    // asset 1 is at half the price: same capital supports twice the size
+    // asset 1 is at a lower price (about -14%): same capital supports twice the size
     w.move_price(1, -1_500);
     let p1 = w.price(1) as u128;
     let (mut a, mut b) = (account(1), account(2));
@@ -542,10 +534,18 @@ fn margin_cushion_topup_restores_headroom_by_exactly_the_deposit() {
 
 #[test]
 fn margin_config_rejects_maintenance_above_initial() {
-    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 6_480_000);
-    cfg.initial_margin_bps = 500;
-    cfg.maintenance_margin_bps = 501;
-    assert!(MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 1, 0).is_err(), "MM > IM is a config error");
+    let build = |im: u64, mm: u64| {
+        let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 6_480_000);
+        cfg.max_abs_funding_e9_per_slot = 10_000;
+        cfg.max_price_move_bps_per_slot = 200;
+        cfg.initial_margin_bps = im;
+        cfg.maintenance_margin_bps = mm;
+        cfg.max_accrual_dt_slots = 2;
+        cfg.min_funding_lifetime_slots = 10_000_000;
+        MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 1, 0)
+    };
+    assert!(build(500, 500).is_ok(), "positive control: MM == IM is valid");
+    assert!(build(500, 501).is_err(), "MM > IM is a config error");
 }
 
 #[test]
