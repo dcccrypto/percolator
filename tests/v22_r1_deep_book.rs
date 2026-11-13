@@ -309,10 +309,12 @@ struct Deep {
     sum_maker_min: i128,
     sum_total_spread: i128,
     gains: u64,
+    not_zero_sum_worlds: u64,
+    maker_order_dependent_worlds: u64,
 }
 
 fn sweep(worlds: u64, seed0: u64) -> Deep {
-    let mut d = Deep { ran: 0, liened_worlds: 0, sum_maker_min: 0, sum_total_spread: 0, gains: 0 };
+    let mut d = Deep { ran: 0, liened_worlds: 0, sum_maker_min: 0, sum_total_spread: 0, gains: 0, not_zero_sum_worlds: 0, maker_order_dependent_worlds: 0 };
     for i in 0..worlds {
         let seed = seed0 * 6007 + i;
         let mut t = seed | 1;
@@ -337,13 +339,21 @@ fn sweep(worlds: u64, seed0: u64) -> Deep {
         if tmax > 8 {
             d.gains += 1;
         }
+        if tmax != 0 || tmin != 0 {
+            d.not_zero_sum_worlds += 1;
+        }
+        if rows.iter().any(|r| r.0 != rows[0].0) {
+            d.maker_order_dependent_worlds += 1;
+        }
     }
     d
 }
 
 /// S5, option B. In the deep-book worlds the maker's WORST outcome over the settle orders is
-/// never below the pre-R1 engine's worst (computed on 874fe33a), so the LP side is never below
-/// what the old engine could already do to it. Total equity never gains.
+/// never below the pre-R1 engine's worst (the summed floor was computed on 874fe33a; the
+/// per-world table below was measured on 91911d5b, whose maker worst equals it by design and
+/// adds up to the same sum), so the LP side is never below what the old engine could already do
+/// to it. Total equity never gains.
 ///
 /// Upstream #250 (+ 7b32eef2): a victim's liened face no longer haircuts the netting rate, so no
 /// face is burned: every world is now exactly zero-sum and order independent (total spread 0,
@@ -360,6 +370,11 @@ fn deep_book_maker_is_never_below_the_pre_r1_worst_order() {
     assert!(d.ran >= 150 && d.liened_worlds * 10 >= d.ran * 8, "the worlds must carry liens");
     assert_eq!(d.gains, 0, "total equity never gains");
     assert!(d.sum_total_spread <= SPREAD_RATCHET, "order spread regressed: {}", d.sum_total_spread);
+    // #250: nothing is burned, so maker + victims is exactly 0 in every world and order, and the
+    // maker's result does not depend on the settle order. These also catch a broken S5 branch
+    // (the maker floor alone no longer does: with no burn, the branch does not move the maker).
+    assert_eq!(d.not_zero_sum_worlds, 0, "a world burned or created value");
+    assert_eq!(d.maker_order_dependent_worlds, 0, "the maker's equity depends on settle order");
     assert_eq!(
         PRE_R1_MAKER_MIN_BY_WORLD.iter().map(|w| w.1).sum::<i128>(),
         PRE_R1_SUM_MAKER_MIN,

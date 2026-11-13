@@ -163,11 +163,19 @@ fn forfeit_then_withdraw_succeed_on_a_one_atom_gap() {
 /// is absorbed instead. The leg owns no more OI than the side has left, so nothing is
 /// stranded: the side's OI, leg count and weight reach 0 together, the forfeit books no
 /// value, and the owner's capital is unchanged until withdrawn.
+/// The old fail-loud protection is gone: forfeit absorbs a gap of ANY size (a corrupt
+/// aggregate is no longer detected here), and validate_shape does not check the
+/// oi_eff == floor(a * sum_w) relation either. The price never moves in this fixture, so the
+/// zero outcome only shows the clamp itself books nothing. Multi-leg sides (non-last legs
+/// that own only the remainder) are covered by tests/issue132_resolved_close_after_adl.rs.
 #[test]
 fn controls_a_gap_wider_than_the_leg_count_is_absorbed_by_min_leg_side() {
     let mut w = world(OI_EFF_LONG - 5);
     forfeit_short(&mut w);
     assert_eq!(w.asset().oi_eff_long_q, OI_EFF_LONG - 5, "6-atom ceil-over-floor gap");
+    MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets)
+        .validate_shape()
+        .expect("validate_shape accepts the wide-gap state (it does not check the floor relation)");
     let capital_before = w.long.capital.get();
     let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
     let mut long = PortfolioV16ViewMut::new(&mut w.long);

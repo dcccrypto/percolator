@@ -583,18 +583,16 @@ fn liened_scenario_try(winner_first: bool, cap: u128, sell: u128, up2: i64, step
     Some((el, es))
 }
 
-/// A victim whose loss outruns its capital and face (bad debt). The bad debt never books, so the
-/// neutral rate must not assume it does (it would over-credit the victim). Both orders agree and
-/// the numbers are pinned: dropping the bad-debt term moves the victim by ~+20,000 atoms.
+/// A LIENED victim whose loss outruns its capital and face (bad debt). It is priced at the S5
+/// protective rate, which has no bad-debt term (that term is on the neutral path, pinned by
+/// `r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1`). What this pins: both
+/// orders agree, the winner is untouched and the pair never gains.
 #[test]
 fn r1_bankrupt_victim_is_order_independent_and_not_over_credited() {
-    // (victim, winner) effective equity, pinned from the verified neutral-rate run. Dropping the
-    // bad-debt term (assuming the whole loss books) moves these by tens of thousands of atoms.
-    // Upstream #250 (+ 7b32eef2): the victim's liened face leaves the protective denominator,
-    // so less of its face is burned. The winner is unchanged and the victim's gain over the
-    // pre-#250 pin is a CONSTANT per fixture (36_997 at cap 330k, 22_571 at cap 400k) however
-    // deep the bad debt runs (6/8/10 and 8/12 steps): it is the liened face no longer burned,
-    // not the bad-debt term, which would grow with the depth.
+    // (victim, winner) effective equity. Upstream #250 (+ 7b32eef2): the victim's liened face
+    // leaves the protective denominator, so less of it is burned. Vs the pre-#250 pins
+    // (-414_343, -605_611, -804_603, -771_596, -1_279_126) the victim is +36,997 (cap 330k) /
+    // +22,571 (cap 400k) at every loss depth; the winner is unchanged.
     const PINNED: [(i128, i128); 5] = [
         (-377_346, 329_999),
         (-568_614, 329_999),
@@ -602,8 +600,6 @@ fn r1_bankrupt_victim_is_order_independent_and_not_over_credited() {
         (-749_025, 399_999),
         (-1_256_555, 399_999),
     ];
-    const PRE_250: [i128; 5] = [-414_343, -605_611, -804_603, -771_596, -1_279_126];
-    const FACE_NO_LONGER_BURNED: [i128; 5] = [36_997, 36_997, 36_997, 22_571, 22_571];
     for (n, &(cap, sell, up2, st2)) in [(330_000u128, 7u128, 200i64, 6usize), (330_000, 7, 200, 8), (330_000, 7, 200, 10), (400_000, 8, 200, 8), (400_000, 8, 200, 12)].iter().enumerate() {
         let wf = liened_scenario_try(true, cap, sell, up2, st2).expect("scenario runs");
         let lf = liened_scenario_try(false, cap, sell, up2, st2).expect("scenario runs");
@@ -612,7 +608,6 @@ fn r1_bankrupt_victim_is_order_independent_and_not_over_credited() {
         assert_eq!(wf, PINNED[n], "bankrupt victim: pinned result moved");
         assert!(wf.0 + wf.1 <= 4, "pair gained {}", wf.0 + wf.1);
         assert_eq!(wf.1, cap as i128 - 1, "the winner is untouched");
-        assert_eq!(wf.0 - PRE_250[n], FACE_NO_LONGER_BURNED[n], "#250 delta must not depend on the bad-debt depth");
     }
 }
 
