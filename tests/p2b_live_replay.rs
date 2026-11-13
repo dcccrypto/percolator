@@ -48,6 +48,8 @@ fn fixture_dir(name: &str) -> PathBuf {
 // exactly those zero words, so the replays keep exercising the live v2.1 state.
 const V22_CONFIG_EXTRA: usize = 6 * 8; // band_bps, E, Pmax, rent_max, band_max_positions_per_side, band_min_leg_notional
 const V22_ASSET_EXTRA: usize = 8 * 8 + 3 * 16; // 8 band u64 words + 3 rent u128 words
+// cpbind: `standing_counterparty_id`, appended LAST to every engine slot (zero = none bound).
+const CPBIND_SLOT_EXTRA: usize = 32;
 const V22_LEG_EXTRA: usize = 8 + 1 + 16 + 8; // band_epoch_snap, band_liq_pending, rent_snap, rent_carry
 
 fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
@@ -57,7 +59,7 @@ fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
     let config_off = core::mem::offset_of!(MarketGroupV16HeaderAccount, config);
     let old_config_end = config_off + core::mem::size_of::<V16ConfigAccount>() - V22_CONFIG_EXTRA;
     let new_slot_len = core::mem::size_of::<EngineAssetSlotV16Account>();
-    let old_slot_len = new_slot_len - V22_ASSET_EXTRA;
+    let old_slot_len = new_slot_len - V22_ASSET_EXTRA - CPBIND_SLOT_EXTRA;
     let old_asset_len = core::mem::size_of::<AssetStateV16Account>() - V22_ASSET_EXTRA;
     let old_stride = ASSET_ORACLE_WRAPPER_LEN + old_slot_len;
     let mut out = Vec::new();
@@ -88,6 +90,7 @@ fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
         if bare {
             out.extend_from_slice(&[0u8; KF_DRIFT_APPENDED]);
         }
+        out.extend_from_slice(&[0u8; CPBIND_SLOT_EXTRA]);
     }
     out
 }

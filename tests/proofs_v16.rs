@@ -1605,11 +1605,14 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
         source_credit_short: SourceCreditStateV16Account::from_runtime(&source),
         backing_long: BackingBucketV16Account::from_runtime(&old_backing),
         backing_short: BackingBucketV16Account::from_runtime(&old_backing),
+        // cpbind: any binding is carried over the re-activation unchanged.
+        standing_counterparty_id: percolator::V16PodId32::new(kani::any()),
         ..EngineAssetSlotV16Account::default()
     };
     let slot_before = slot;
 
     let result = header.activate_empty_market_slot_not_atomic(0, &mut slot, price_raw as u64, 2);
+    assert_eq!(slot.standing_counterparty_id, slot_before.standing_counterparty_id);
 
     kani::cover!(
         !nonempty_claim
@@ -1815,6 +1818,10 @@ fn proof_v16_public_restart_empty_asset_zero_preserves_budgets_and_senior_value(
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&old_asset);
     markets[0].engine.insurance_domain_budget_long = V16PodU128::new(long_budget);
     markets[0].engine.insurance_domain_budget_short = V16PodU128::new(short_budget);
+    // cpbind: the standing-counterparty binding is carried over the restart unchanged.
+    let standing_counterparty_id: [u8; 32] = kani::any();
+    markets[0].engine.standing_counterparty_id =
+        percolator::V16PodId32::new(standing_counterparty_id);
 
     let vault_before = header.vault.get();
     let insurance_before = header.insurance.get();
@@ -1850,6 +1857,7 @@ fn proof_v16_public_restart_empty_asset_zero_preserves_budgets_and_senior_value(
     assert_eq!(restarted_asset.slot_last, now_slot);
     assert_eq!(restarted.insurance_domain_budget_long.get(), long_budget);
     assert_eq!(restarted.insurance_domain_budget_short.get(), short_budget);
+    assert_eq!(restarted.standing_counterparty_id.get(), standing_counterparty_id);
     assert_eq!(restarted.insurance_domain_spent_long.get(), 0);
     assert_eq!(restarted.insurance_domain_spent_short.get(), 0);
     assert_eq!(

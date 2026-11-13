@@ -90,7 +90,7 @@ pub use v16::{
     ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account, SideModeV16, SideV16,
     SourceCreditStateV16, SourceCreditStateV16Account, TerminalSlabOutcomeV16, TradeRequestV16,
     V16ActiveBitmap, V16Config, V16ConfigAccount, V16Error, V16OptionalRecoveryReasonAccount,
-    V16PodI128, V16PodU128, V16PodU16, V16PodU32, V16PodU64, V16Result,
+    V16PodI128, V16PodId32, V16PodU128, V16PodU16, V16PodU32, V16PodU64, V16Result,
     BANKRUPTCY_HLOCK_ACTIVE_BIT, BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS,
     PORTFOLIO_LEG_V16_EMPTY_ACCOUNT, PORTFOLIO_SOURCE_DOMAIN_CAP,
     TERMINAL_SLAB_SCAN_ASSETS_PER_CALL, V16_ACCOUNT_VERSION, V16_EMPTY_ACTIVE_BITMAP,

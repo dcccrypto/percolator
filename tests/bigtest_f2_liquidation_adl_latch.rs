@@ -207,6 +207,14 @@ fn eff_q(markets: &Markets, a: &PortfolioAccountV16Account) -> u128 {
     (leg.basis_pos_q.unsigned_abs() * a_now).div_ceil(leg.a_basis)
 }
 
+/// cpbind: bind `who` as asset 0's standing counterparty (wrapper: the vault-LP bind).
+fn bind(header: &mut Header, markets: &mut Markets, who: &PortfolioAccountV16Account) {
+    let mut market = MarketGroupV16ViewMut::new(header, markets);
+    market
+        .set_asset_standing_counterparty_not_atomic(0, who.provenance_header.portfolio_account_id)
+        .unwrap();
+}
+
 struct World {
     header: Header,
     markets: Markets,
@@ -266,6 +274,7 @@ fn world() -> World {
         PRICE,
     )
     .unwrap();
+    bind(&mut header, &mut markets, &lp);
     let mut w = World {
         header,
         markets,
@@ -447,6 +456,7 @@ fn f2_counterparty_without_an_opposite_leg_falls_back_to_the_unilateral_close() 
     };
     // Hand `fb` a counterparty on the SAME side as the trader (l2 is long).
     std::mem::swap(&mut fb.lp, &mut fb.l2);
+    bind(&mut fb.header, &mut fb.markets, &fb.lp);
     let ou = uni.liquidate(false).unwrap();
     let of = fb.liquidate(true).unwrap();
     assert_eq!(of, ou);
@@ -492,6 +502,7 @@ fn f2_counterparty_too_small_falls_back_to_the_unilateral_close() {
         PRICE,
     )
     .unwrap();
+    bind(&mut header, &mut markets, &lp);
     let mut w = World {
         header,
         markets,
@@ -558,6 +569,7 @@ fn f2_bankrupt_close_keeps_the_unilateral_path() {
         refresh(&mut header, &mut markets, &mut lp);
     }
     let lp_eff0 = eff_q(&markets, &lp);
+    bind(&mut header, &mut markets, &lp);
     let o = {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut tv = PortfolioV16ViewMut::new(&mut thin);
@@ -821,6 +833,7 @@ fn world_two_traders() -> (World, PortfolioAccountV16Account) {
         PRICE,
     )
     .unwrap();
+    bind(&mut header, &mut markets, &lp);
     let mut w = World {
         header,
         markets,
@@ -929,4 +942,141 @@ fn f2_regression_unilateral_second_liquidation_deepens_the_latch() {
     let ash = w.a().1;
     liquidate_other(&mut w, &mut t2, false);
     assert!(w.a().1 < ash);
+}
+
+/// cpbind: the engine, not the caller, decides who may take a matched close. `s2` holds an
+/// eligible opposite leg but is NOT the asset's bound counterparty: the matched liquidation must
+/// be refused, and s2's position must not move. Before the fix the engine matched against
+/// whoever the caller passed, so a caller could force a targeted reduction of any holder.
+#[test]
+fn cpbind_unbound_counterparty_is_rejected() {
+    let base = world();
+    let mut w = base.fork();
+    let s2_0 = w.s2;
+    let r = {
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut tv = PortfolioV16ViewMut::new(&mut w.trader);
+        let mut cv = PortfolioV16ViewMut::new(&mut w.s2);
+        market.liquidate_account_against_counterparty_not_atomic(
+            &mut tv,
+            &mut cv,
+            LiquidationRequestV16 { asset_index: 0 },
+        )
+    };
+    assert_eq!(r, Err(V16Error::CounterpartyNotBound));
+    assert!(bytemuck_eq(&w.s2, &s2_0), "unbound counterparty was written");
+    assert!(bytemuck_eq(&w.trader, &base.trader), "refused before any write");
+    assert_eq!(w.header, base.header);
+    assert_eq!(w.markets, base.markets);
+}
+
+/// cpbind: the bound counterparty still works: matched close, no A move, LP took the close.
+#[test]
+fn cpbind_bound_counterparty_still_matches() {
+    let base = world();
+    let mut w = base.fork();
+    let lp0 = eff_q(&w.markets, &w.lp);
+    let o = w.liquidate(true).expect("bound counterparty");
+    assert!(o.closed_q > 0);
+    assert_eq!(w.a(), (ADL_ONE, ADL_ONE));
+    assert_eq!(eff_q(&w.markets, &w.lp), lp0 - o.closed_q);
+}
+
+/// cpbind: no binding at all (zero id) refuses even the account that used to be bound.
+#[test]
+fn cpbind_no_binding_refuses_every_counterparty() {
+    let base = world();
+    let mut w = base.fork();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        market
+            .set_asset_standing_counterparty_not_atomic(0, [0; 32])
+            .unwrap();
+    }
+    let lp0 = w.lp;
+    assert_eq!(w.liquidate(true), Err(V16Error::CounterpartyNotBound));
+    assert!(bytemuck_eq(&w.lp, &lp0));
+    // the plain entry is unaffected
+    assert!(w.liquidate(false).is_ok());
+}
+
+/// cpbind: the liquidated account can never be its own matched counterparty, even when it is
+/// the bound one (a second view of the same id).
+#[test]
+fn cpbind_bound_account_cannot_be_matched_against_itself() {
+    let base = world();
+    let mut w = base.fork();
+    bind(&mut w.header, &mut w.markets, &base.trader);
+    w.lp = w.trader;
+    assert_eq!(w.liquidate(true), Err(V16Error::CounterpartyNotBound));
+}
+
+/// cpbind: a counterparty from another market group with the bound id is refused.
+#[test]
+fn cpbind_counterparty_from_another_market_group_is_refused() {
+    let base = world();
+    let mut w = base.fork();
+    w.lp.provenance_header.market_group_id = [9; 32];
+    assert_eq!(w.liquidate(true), Err(V16Error::CounterpartyNotBound));
+}
+
+/// cpbind: same through the auto-crank (wrapper tag 5): when the plan is the liquidation, a
+/// counterparty that is not the bound one fails the step and is not written.
+#[test]
+fn cpbind_auto_crank_refuses_unbound_counterparty() {
+    let base = world();
+    let mut w = base.fork();
+    std::mem::swap(&mut w.lp, &mut w.s2); // pass s2 in the counterparty position
+    let s2_0 = w.lp;
+    let mut refused = false;
+    for _ in 0..8 {
+        match w.auto_crank(Some(0)) {
+            Ok(r) => assert!(
+                !matches!(r.selected, AutoCrankPlanV16::Liquidate { .. }),
+                "liquidated against an unbound counterparty: {r:?}"
+            ),
+            Err(e) => {
+                assert_eq!(e, V16Error::CounterpartyNotBound);
+                refused = true;
+                break;
+            }
+        }
+    }
+    assert!(refused, "the plan never reached the liquidation");
+    assert!(bytemuck_eq(&w.lp, &s2_0));
+}
+
+/// cpbind: binding rules. Non-zero needs a configured, active asset; clearing always works.
+#[test]
+fn cpbind_setter_guards() {
+    let (mut header, mut markets) = market_fixture_activated(2, 1, PRICE);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(
+        market.set_asset_standing_counterparty_not_atomic(1, [7; 32]),
+        Err(V16Error::InvalidConfig),
+        "asset 1 is configured but never activated"
+    );
+    assert_eq!(
+        market.set_asset_standing_counterparty_not_atomic(2, [7; 32]),
+        Err(V16Error::InvalidLeg),
+        "unconfigured slot"
+    );
+    market
+        .set_asset_standing_counterparty_not_atomic(1, [0; 32])
+        .unwrap();
+    market
+        .set_asset_standing_counterparty_not_atomic(0, [7; 32])
+        .unwrap();
+    assert_eq!(market.markets[0].engine.standing_counterparty_id.get(), [7; 32]);
+    market.validate_shape().unwrap();
+    // outside Live a non-zero binding is refused, clearing is not
+    market.header.mode = 2; // Recovery
+    assert_eq!(
+        market.set_asset_standing_counterparty_not_atomic(0, [8; 32]),
+        Err(V16Error::LockActive)
+    );
+    market
+        .set_asset_standing_counterparty_not_atomic(0, [0; 32])
+        .unwrap();
+    assert_eq!(market.markets[0].engine.standing_counterparty_id.get(), [0; 32]);
 }
