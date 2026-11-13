@@ -9028,6 +9028,8 @@ fn proof_v16_lapsed_roster_backing_defers_certified_liquidation() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: kf_epoch,
         epoch_snap: side_epoch,
         loss_weight: POS_SCALE,
@@ -9036,6 +9038,10 @@ fn proof_v16_lapsed_roster_backing_defers_certified_liquidation() {
         b_epoch_snap: side_epoch,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
     active_bitmap_set(&mut bitmap, 0).unwrap();
