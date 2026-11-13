@@ -827,6 +827,19 @@ or mode_s == ResetPending and epoch_snap_i + 1 == epoch_s
 
 `begin_full_drain_reset(side)` requires `OI_eff_side == 0` and then snapshots `K_side`/`F_side_num` to epoch-start fields, zeros live `K_side`/`F_side_num`, increments `epoch_side`, sets `A_side = ADL_ONE`, sets `stale_account_count_side = stored_pos_count_side`, clears phantom dust for that side, and enters `ResetPending`.
 
+Each leg's `effective_pos_q` is rounded up while `A_side` is rounded down, so
+the effective quantities of one side's legs can sum to more than `OI_eff_side`.
+A dead-leg exit (Recovery forfeit or resolved close) therefore removes
+`min(abs(effective_pos_q), OI_eff_side)`, the leg's remaining share of the
+aggregate, and MUST NOT fail because the side carries less. Once `OI_eff_side`
+is zero, a side without pending obligations resets and its remaining legs
+detach as prior-reset obligations. A side that still carries pending
+obligations cannot reset (§9); its remaining current-epoch legs then detach, or
+convert to pending obligations, with a zero effective-OI change. Their loss
+weight is removed or retained exactly as for any other leg. No other
+transition may clear or retain a current-epoch nonzero-basis leg without
+removing at least one effective-OI atom.
+
 When a side reset or leg clear combines two valid sub-atom social-loss carries,
 the sum is normalized modulo `SOCIAL_LOSS_DEN`. Crossing the denominator adds
 one to the side-local `explicit_unallocated_loss` audit counter; that counter
