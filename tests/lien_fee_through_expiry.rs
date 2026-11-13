@@ -63,6 +63,8 @@ struct Outcome {
     earnings: u128,
     /// Fee the lien owes for its live interval [lien slot, expiry).
     owed: u128,
+    /// Slot the lien started accruing.
+    lien_slot: u64,
     bucket_status: BackingBucketStatusV16,
 }
 
@@ -166,6 +168,7 @@ fn run(touch_before_expiry: Option<u64>, end_slot: u64) -> Outcome {
         // Aggregate of every bucket's utilization_fee_earnings (validated by validate_shape).
         earnings: market.header.backing_provider_earnings_total.get(),
         owed,
+        lien_slot,
         bucket_status: bucket.status,
     }
 }
@@ -186,7 +189,7 @@ fn lien_fee_is_collected_while_the_bucket_is_live() {
         BackingBucketStatusV16::Fresh,
         "the bucket lapsed"
     );
-    let one_slot = out.owed / (EXPIRY - 2) as u128 + 1;
+    let one_slot = out.owed / (EXPIRY - out.lien_slot) as u128 + 1;
     assert!(
         out.earnings + one_slot >= out.owed,
         "control must collect the live interval"
