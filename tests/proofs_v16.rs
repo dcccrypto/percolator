@@ -9549,6 +9549,8 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     // both cohorts stale. asset_is_loss_stale_at_slot is then true on its FIRST
     // clause and the flag is set whether or not the slot caught up -- the mirror
     // of the empty-market case above, which is clear for the same reason.
+    assert_eq!(asset_after.kf_epoch_long, expected_asset_slot);
+    assert_eq!(asset_after.kf_epoch_short, expected_asset_slot);
     assert_eq!(asset_after.stale_account_count_long, 1);
     assert_eq!(asset_after.stale_account_count_short, 1);
     assert!(outcome.loss_stale_after);
