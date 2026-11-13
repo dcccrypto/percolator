@@ -375,6 +375,16 @@ credit_rate_num_after <= credit_rate_num_before unless positive_claim_bound_num 
 ```
 A pure expiry transition that increases available backing or credit rate is invalid and MUST revert or recover. A before/after inequality alone is insufficient unless the recomputed aggregate equalities also hold.
 
+The credit rate is the rate of UNLIENED claim face (upstream #250). Liened backing is in neither term:
+```text
+unliened_claim_num = positive_claim_bound_num - valid_liened_backing_num - valid_liened_insurance_num   (saturating)
+credit_rate_num = CREDIT_RATE_SCALE                                       if positive_claim_bound_num == 0
+                = 0                                                       if available_backing_num == 0
+                = CREDIT_RATE_SCALE                                       if available_backing_num >= unliened_claim_num
+                = available_backing_num * CREDIT_RATE_SCALE / unliened_claim_num   otherwise
+```
+A lien never cuts the rate of a domain whose total backing covers its claims. The rate never exceeds the lien-free rate. In a domain that is under-backed when a lien is created, the lien locks `face = backing / rate` but only its backing leaves the denominator, so other claimants stay below the lien-free rate while it is outstanding (less of a cut than before, never an over-credit).
+
 Insurance may contribute to source credit only through a canonical live insurance-credit reservation recorded in `InsuranceLedger.source_credit_reserved_num[D]`. `SourceCreditState[D].insurance_credit_reserved_num` is a derived view of that canonical ledger entry, not a second writer.
 
 ```text
