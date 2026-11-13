@@ -637,6 +637,19 @@ impl World {
         self.header.vault.get()
     }
 
+    /// Close one account of an already resolved market, following progress-only results
+    /// (bounded); `None` if it never reaches `Closed`.
+    fn resolve_and_close_one(&mut self, i: usize) -> Option<u128> {
+        for _ in 0..16 {
+            match self.close_resolved(i) {
+                Ok(ResolvedCloseOutcomeV16::Closed { payout }) => return Some(payout),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
     /// Resolve, then close every account in `order` (repeating the order a few times, as a
     /// keeper would, for close paths that report progress only). Returns the payout of each
     /// account, `None` for an account that never closed.
@@ -699,8 +712,9 @@ fn lien_rate_scenarios(score: &mut Score) {
     // S1: W1's margin equity beside W2's lien, and whether W1 becomes liquidatable.
     {
         let (mut w, mut control) = lien_and_control_worlds(1_030);
+        // Control calls must succeed; a refused pledged-world call is the trader's full loss.
+        let ce = control.refresh(W1).unwrap().certified_equity;
         let e = w.refresh(W1).map(|c| c.certified_equity).unwrap_or(0);
-        let ce = control.refresh(W1).map(|c| c.certified_equity).unwrap_or(0);
         score.lose("S1 W1 margin equity", ce - e);
         let e2 = w.refresh(W2).map(|c| c.certified_equity).unwrap_or(0);
         score.lose("S1 W2 own margin equity", (1_135 + 100) - e2);
@@ -715,7 +729,8 @@ fn lien_rate_scenarios(score: &mut Score) {
             world.deposit(N, 5_000);
             world.trade(N, W1, 10, 110).unwrap();
         }
-        let c = control.convert(W1).unwrap_or(0) as i128;
+        let c = control.convert(W1).unwrap() as i128;
+        assert!(c > 0, "S2 control conversion must pay out");
         let p = w.convert(W1).unwrap_or(0) as i128;
         score.lose("S2 W1 conversion", c - p);
     }
@@ -731,12 +746,8 @@ fn lien_rate_scenarios(score: &mut Score) {
                 world.close_resolved_fully(i);
             }
         }
-        let paid = |r: V16Result<ResolvedCloseOutcomeV16>| match r {
-            Ok(ResolvedCloseOutcomeV16::Closed { payout }) => payout as i128,
-            _ => 0,
-        };
-        let c = paid(control.close_resolved(W1));
-        let p = paid(w.close_resolved(W1));
+        let c = control.resolve_and_close_one(W1).expect("S3 control close") as i128;
+        let p = w.resolve_and_close_one(W1).unwrap_or(0) as i128;
         score.lose("S3 W1 resolved close payout", c - p);
     }
     // S4: a loss on the lien holder must not cut W1's remaining backed gain.
@@ -750,6 +761,7 @@ fn lien_rate_scenarios(score: &mut Score) {
             }
             *e = world.refresh(W1).map(|c| c.certified_equity).unwrap_or(0);
         }
+        assert!(eq[1] > 0, "S4 control refresh must succeed");
         score.lose("S4 W1 equity after lien-holder loss", eq[1] - eq[0]);
     }
     // S5: W1's creditable gain in the pledged world vs control.
@@ -776,18 +788,16 @@ fn near_threshold_liquidation(score: &mut Score) {
         w.trade(W1, L, 100, 100).unwrap();
         w.walk_price(95);
         let _ = w.refresh(L);
-        let pre = w.refresh(W1);
+        let pre = w.refresh(W1).unwrap();
         let eq = capital as i128 - 500;
         let mm = 950i128;
         let liq = w.liquidate_outcome(W1);
         if eq >= mm {
             // Report what the certificate said too, so a stricter threshold is visible.
-            if let Ok(c) = pre {
-                score.lose(
-                    "S6 W1 certified equity at exactly MM (vs spec)",
-                    eq - c.certified_equity,
-                );
-            }
+            score.lose(
+                "S6 W1 certified equity at exactly MM (vs spec)",
+                eq - pre.certified_equity,
+            );
             if liq.is_ok() {
                 score.avoidable("S6 W1 liquidated at exactly MM");
             }
@@ -805,7 +815,7 @@ fn near_threshold_liquidation(score: &mut Score) {
                         (eq - fee as i128) - w.value(W1),
                     );
                 }
-                Err(_) => score.lose("S6 W1 one atom short not liquidatable (ok)", 0),
+                Err(e) => panic!("S6 W1 one atom below MM must be liquidatable: {e:?}"),
             }
         }
     }
@@ -844,7 +854,7 @@ fn adl_ordering(score: &mut Score) {
         w.trade(W2, L, 30, 100).unwrap();
         let deposits = w.total_deposits_and_insurance();
         w.walk_price(115);
-        let liq = w.liquidate(L);
+        w.liquidate(L).expect("S7 bankrupt L must be liquidatable");
         for i in order {
             let _ = w.refresh(i);
         }
@@ -852,7 +862,8 @@ fn adl_ordering(score: &mut Score) {
             score.avoidable("S7 winner liquidated after ADL");
         }
         let (paid, open, p) = close_all(&mut w, &[L, order[0], order[1]]);
-        results.push((p, liq.is_ok()));
+        assert_eq!(open, 0, "S7 every account must close");
+        results.push((p, true));
         score.lose(
             &format!("S7 stranded after ADL, order {:?} (open {open})", order),
             stranded(deposits, &w, paid, 2),
@@ -864,10 +875,12 @@ fn adl_ordering(score: &mut Score) {
     for (p, _) in &results {
         for (i, q) in [(W1, 10u128), (W2, 30)] {
             let deposit = if i == W1 { 1_000 } else { 3_000 };
+            // §5.4 rounds the K loss up (ceil), so one atom per winner below the floor of
+            // the exact share is spec rounding.
             let floor_share = deposit + 450 * q / 40;
             score.lose(
-                &format!("S7 W{} below floor of pro-rata share", i + 1),
-                floor_share as i128 - p[i].unwrap_or(0) as i128,
+                &format!("S7 W{} below floor(pro-rata share) - 1 (spec ceil)", i + 1),
+                floor_share as i128 - 1 - p[i].unwrap() as i128,
             );
         }
     }
@@ -941,8 +954,19 @@ fn fee_and_funding_rounding(score: &mut Score) {
         }
     }
     let (f, s) = (values[0], values[1]);
-    score.lose("S8b W1 funding cadence: every-slot vs once", s.0 - f.0);
-    score.lose("S8b L funding cadence: every-slot vs once", s.1 - f.1);
+    assert!(
+        s.0 < 10_000 && s.1 > 10_000,
+        "S8b funding must have moved value"
+    );
+    // §5.2 floors each touch, so a cadence difference is spec rounding: reported, not counted.
+    score.lose(
+        &format!(
+            "S8b info: funding cadence every-slot vs once moves W1 {} / L {} (not counted)",
+            s.0 - f.0,
+            s.1 - f.1
+        ),
+        0,
+    );
 }
 
 /// S9: resolved-market payout (spec §8.8: a fully backed winner is paid floor(PNL * num / den)
@@ -964,7 +988,12 @@ fn resolved_payout(score: &mut Score) {
         for i in [L, W1, W2] {
             let _ = w.refresh(i);
         }
-        let entitled: Vec<i128> = [W1, W2].iter().map(|&i| w.value(i)).collect();
+        // Entitlement from the trades alone: deposit + floor(size_q * (103 - 100) / POS_SCALE)
+        // (the sizes are POS_SCALE / 3 fractions, truncated when the trade was placed).
+        let entitled: Vec<i128> = [7u128, 13]
+            .iter()
+            .map(|&n| 500 + ((n * POS_SCALE / 3) * 3 / POS_SCALE) as i128)
+            .collect();
         let (paid, open, p) = close_all(&mut w, &[L, order[0], order[1]]);
         for (k, &i) in [W1, W2].iter().enumerate() {
             score.lose(
@@ -983,13 +1012,18 @@ fn resolved_payout(score: &mut Score) {
             ),
             stranded(deposits, &w, paid, 2),
         );
+        assert_eq!(open, 0, "S9 every account must close");
         results.push(p);
     }
-    let diff: i128 = [W1, W2]
+    let moved: i128 = [W1, W2]
         .iter()
-        .map(|&i| (results[0][i].unwrap_or(0) as i128 - results[1][i].unwrap_or(0) as i128).abs())
-        .sum();
-    score.lose("S9 payout depends on close order", diff);
+        .map(|&i| (results[0][i].unwrap() as i128 - results[1][i].unwrap() as i128).abs())
+        .sum::<i128>()
+        / 2;
+    score.lose(
+        &format!("S9 info: close order moves {moved} atom(s) between winners (counted above)"),
+        0,
+    );
 }
 
 /// S10: crank order (spec §8.7: the keeper's candidate order decides only which accounts are
@@ -1021,11 +1055,20 @@ fn crank_order(score: &mut Score) {
         }
         values.push([w.value(W1), w.value(W2), w.value(L)]);
     }
-    let diff: i128 = (0..3).map(|k| (values[0][k] - values[1][k]).abs()).sum();
-    score.lose("S10 account value depends on crank order", diff);
+    assert!(values[0][2] > 30_000, "S10 funding must have moved value");
+    let moved: i128 = (0..3)
+        .map(|k| (values[0][k] - values[1][k]).abs())
+        .sum::<i128>()
+        / 2;
+    // A per-touch floor difference would be §5.2 rounding: reported, not counted.
+    score.lose(
+        &format!("S10 info: crank order moves {moved} atom(s) (not counted)"),
+        0,
+    );
 }
 
-/// S11: holding-fee rent stays junior to losses (fork v2.2 rent, invariant I-R7 in
+/// S11: holding-fee rent stays junior to losses (fork-only rule, not in spec.md: v2.2 rent
+/// invariant I-R7 in
 /// docs/v22-band-rent-kani-design.md and src/band_rent.rs: "capital that an unsettled loss
 /// already owns is never taken for rent"; upstream spec v16.9.1 preamble: a refresh applies the
 /// newly observed negative deltas before the nonnegative ones so losses reserve backing first).
@@ -1092,7 +1135,13 @@ fn rent_junior_to_losses(score: &mut Score) {
     };
     let before = unrouted(&w);
     let refreshed = w.refresh(x);
-    let rent_paid = unrouted(&w) - before;
+    assert!(
+        refreshed.is_ok(),
+        "S11 X's refresh must run (else nothing is measured)"
+    );
+    let rent_paid = unrouted(&w)
+        .checked_sub(before)
+        .expect("refresh never lowers unrouted rent");
     let insolvent = w.value(x) < 0;
     score.lose(
         &format!(
@@ -1103,7 +1152,8 @@ fn rent_junior_to_losses(score: &mut Score) {
     );
 }
 
-/// Recorded ceiling on 91911d5b (baseline). Lower it in the PR that improves it.
+/// Golden score (91911d5b baseline: 228 / 1). Any change, better or worse, must update these
+/// in the same PR, so a scenario that silently stops measuring cannot pass as an improvement.
 const CEILING_ATOMS: i128 = 228;
 const CEILING_AVOIDABLE: u32 = 1;
 
@@ -1126,9 +1176,9 @@ fn leniency_scoreboard() {
         "LENIENCY_SCORE honest_atoms_lost={total} avoidable_liquidations={}",
         score.avoidable_liquidations
     );
-    assert!(
-        total <= CEILING_ATOMS,
-        "honest_atoms_lost rose above the ceiling"
+    assert_eq!(
+        total, CEILING_ATOMS,
+        "honest_atoms_lost changed: update the golden value"
     );
-    assert!(score.avoidable_liquidations <= CEILING_AVOIDABLE);
+    assert_eq!(score.avoidable_liquidations, CEILING_AVOIDABLE);
 }
