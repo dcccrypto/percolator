@@ -1080,6 +1080,16 @@ fn crank_order(score: &mut Score) {
 /// leaves it insolvent is capital its losses owned: it reaches insurance/LP instead of L, the
 /// honest counterparty whose gain those losses back.
 fn rent_junior_to_losses(score: &mut Score) {
+    let (rent_paid, insolvent) = rent_two_losing_legs(200_000);
+    score.lose(
+        &format!("S11 rent taken from loss-owned capital (X insolvent={insolvent})"),
+        if insolvent { rent_paid as i128 } else { 0 },
+    );
+}
+
+/// The S11 world with `capital` for X; returns (rent X paid in its final refresh, X
+/// insolvent after it).
+fn rent_two_losing_legs(capital: u128) -> (u128, bool) {
     let mut c = lev_config();
     c.max_portfolio_assets = 2;
     c.max_market_slots = 2;
@@ -1087,7 +1097,7 @@ fn rent_junior_to_losses(score: &mut Score) {
     let rent = band_rent::MAX_RENT_E9_PER_SLOT;
     let (x, l) = (W1, L);
     let mut w = World::with_assets(c, 100, 2, 5);
-    w.deposit(x, 200_000);
+    w.deposit(x, capital);
     w.deposit(l, 1_000_000);
     for asset in 0..2usize {
         w.exec(|m, accounts| {
@@ -1142,19 +1152,25 @@ fn rent_junior_to_losses(score: &mut Score) {
     let rent_paid = unrouted(&w)
         .checked_sub(before)
         .expect("refresh never lowers unrouted rent");
-    let insolvent = w.value(x) < 0;
-    score.lose(
-        &format!(
-            "S11 rent taken from loss-owned capital (X insolvent={insolvent}, refresh ok={})",
-            refreshed.is_ok()
-        ),
-        if insolvent { rent_paid as i128 } else { 0 },
-    );
+    (rent_paid, w.value(x) < 0)
 }
 
-/// Golden score (91911d5b baseline: 228 / 1). Any change, better or worse, must update these
+/// Rent stays junior without being forgiven: a solvent account with the same two losing legs
+/// pays every atom of its rent, exactly as when each leg was charged right after its delta.
+#[test]
+fn solvent_two_losing_legs_pay_full_rent() {
+    let (rent_paid, insolvent) = rent_two_losing_legs(1_000_000);
+    println!("RENT solvent two-leg rent paid: {rent_paid}");
+    assert!(!insolvent);
+    assert_eq!(rent_paid, SOLVENT_TWO_LEG_RENT);
+}
+
+/// Measured on 91911d5b (rent charged per leg) with the same world.
+const SOLVENT_TWO_LEG_RENT: u128 = 72;
+
+/// Golden score (91911d5b baseline: 228 / 1; 192 / 1 with the rent fix). Any change, better or worse, must update these
 /// in the same PR, so a scenario that silently stops measuring cannot pass as an improvement.
-const CEILING_ATOMS: i128 = 228;
+const CEILING_ATOMS: i128 = 192;
 const CEILING_AVOIDABLE: u32 = 1;
 
 #[test]
