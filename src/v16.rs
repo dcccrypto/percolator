@@ -16420,12 +16420,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ))
     }
 
+    /// `deferred_rent`: `None` charges the leg's rent right after its K/F delta (the single-leg
+    /// path and the multi-leg nonnegative phase). `Some` is the multi-leg negative phase: the rent due is
+    /// computed here exactly as before (same snapshot and carry) but only recorded, and the
+    /// caller charges it once every negative delta of the plan has landed, so the I-R7 cap
+    /// sees all of the losses the refresh observed (see `charge_deferred_kf_rent_not_atomic`).
     fn apply_account_kf_settlement_entry(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         entry: u64,
         prepared: AccountKfSettlementPreparedV16,
         s10_budget: &mut u8,
+        deferred_rent: Option<&mut u128>,
     ) -> V16Result<()> {
         let (phase, source_domain, leg_slot) = decode_account_kf_settlement_plan_key(entry)?;
         let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
@@ -16504,7 +16510,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.settle_kf_laggard(asset_index, &asset, &leg)?;
         // v2.2 rent (item 2): settle the leg's holding-fee rent on every touch,
         // after the K/F delta so an unsettled loss keeps its seniority over rent.
-        let rent_charged = self.settle_leg_rent_not_atomic(account, asset, &mut leg)?;
+        // In the multi-leg negative phase the charge waits for the plan's last loss.
+        let rent_charged = match deferred_rent {
+            Some(deferred) => {
+                *deferred = Self::take_leg_rent_due(asset, &mut leg)?;
+                0
+            }
+            None => self.settle_leg_rent_not_atomic(account, asset, &mut leg)?,
+        };
         if rent_charged != 0 {
             asset.rent_unrouted_atoms = asset
                 .rent_unrouted_atoms
@@ -16548,6 +16561,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset: AssetStateV16,
         leg: &mut PortfolioLegV16,
     ) -> V16Result<u128> {
+        let due = Self::take_leg_rent_due(asset, leg)?;
+        self.charge_account_rent_current_not_atomic(account, due)
+    }
+
+    /// The rent a leg owes since its snapshot (with its sub-atom carry), advancing the
+    /// snapshot to the current index. Charging is the caller's job.
+    fn take_leg_rent_due(asset: AssetStateV16, leg: &mut PortfolioLegV16) -> V16Result<u128> {
         let index = match leg.side {
             SideV16::Long => asset.rent_index_long_num,
             SideV16::Short => asset.rent_index_short_num,
@@ -16565,7 +16585,46 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         .map_err(|_| V16Error::InvalidLeg)?;
         leg.rent_snap = index;
         leg.rent_carry = carry;
-        self.charge_account_rent_current_not_atomic(account, due)
+        Ok(due)
+    }
+
+    /// Charge the rent the negative phase of a multi-leg K/F plan deferred (`plan[..len]`, due
+    /// by leg slot), in plan order, each capped (I-R7) at the capital that the plan's losses,
+    /// all of them now applied, do not own; book what was charged as that asset's unrouted LP
+    /// rent. What the cap refuses is forgiven exactly as on the immediate path (the snapshots
+    /// already advanced). When the cap binds, plan order (source domain, then slot) decides
+    /// which asset's LP rent is forgiven, exactly as on the per-leg path.
+    #[inline(never)]
+    fn charge_deferred_kf_rent_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        plan: &[Option<u64>; V16_MAX_PORTFOLIO_ASSETS_N],
+        len: usize,
+        due_by_slot: &mut [u128; V16_MAX_PORTFOLIO_ASSETS_N],
+    ) -> V16Result<()> {
+        let mut i = 0usize;
+        while i < len {
+            let (_, _, leg_slot) =
+                decode_account_kf_settlement_plan_key(plan[i].ok_or(V16Error::InvalidLeg)?)?;
+            i += 1;
+            let due = due_by_slot[leg_slot];
+            if due == 0 {
+                continue;
+            }
+            due_by_slot[leg_slot] = 0;
+            let charged = self.charge_account_rent_current_not_atomic(account, due)?;
+            if charged == 0 {
+                continue;
+            }
+            let asset_index = account.header.legs[leg_slot].try_to_runtime()?.asset_index as usize;
+            let mut asset = self.asset_state(asset_index)?;
+            asset.rent_unrouted_atoms = asset
+                .rent_unrouted_atoms
+                .checked_add(charged)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            self.set_asset_state(asset_index, asset)?;
+        }
+        Ok(())
     }
 
     /// v2.2 rent charge: `min(due, capital - max(-pnl, 0))` from capital to
@@ -16730,7 +16789,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             let (entry, prepared) =
                 self.prepare_account_kf_settlement_entry(account, slot, normalize_exhausted_sides)?;
-            return self.apply_account_kf_settlement_entry(account, entry, prepared, s10_budget);
+            return self.apply_account_kf_settlement_entry(account, entry, prepared, s10_budget, None);
         }
         let mut plan = [None; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut prepared_by_slot =
@@ -16750,16 +16809,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             slot += 1;
         }
 
+        // Rent stays junior to every loss this plan observes (I-R7): the negative phase (plan
+        // keys sort phase 0 first) records its legs' rent due, charged once that phase is done.
+        let mut deferred_rent = [0u128; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut negative_len = 0usize;
         let mut index = 0usize;
         while index < plan_len {
             let entry = plan[index].ok_or(V16Error::InvalidLeg)?;
-            let leg_slot = (entry & 0xf) as usize;
-            if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
-                return Err(V16Error::InvalidLeg);
+            let (phase, _, leg_slot) = decode_account_kf_settlement_plan_key(entry)?;
+            if phase != 0 && negative_len == index && negative_len != 0 {
+                self.charge_deferred_kf_rent_not_atomic(
+                    account,
+                    &plan,
+                    negative_len,
+                    &mut deferred_rent,
+                )?;
             }
-            self.apply_account_kf_settlement_entry(account, entry, prepared_by_slot[leg_slot], s10_budget)?;
+            let defer = if phase == 0 {
+                negative_len += 1;
+                Some(&mut deferred_rent[leg_slot])
+            } else {
+                None
+            };
+            self.apply_account_kf_settlement_entry(
+                account,
+                entry,
+                prepared_by_slot[leg_slot],
+                s10_budget,
+                defer,
+            )?;
             index += 1;
         }
+        // Unconditional: entries already charged were zeroed, so this charges exactly the
+        // deferred rent still owed (all-negative plans), and nothing is ever silently forgiven.
+        self.charge_deferred_kf_rent_not_atomic(account, &plan, plan_len, &mut deferred_rent)?;
         Ok(())
     }
 
