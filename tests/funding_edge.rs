@@ -4,7 +4,8 @@
 //! carry effective OI, and `fund_px_last > 0`; it moves `F_long` down and `F_short` up by
 //! `A_side * fund_num_total` (spec F units carry FUNDING_DEN; the engine stores
 //! `A_side * fund_num_total / FUNDING_DEN`, payer rounded up and receiver rounded down when A is
-//! below ADL_ONE, and the tests follow the engine's units). Settlement realizes `basis * (F_now - F_snap) / (a_basis * POS_SCALE)` with
+//! below ADL_ONE, and the tests follow the engine's units). Settlement realizes
+//! `basis * (F_now - F_snap) / (a_basis * POS_SCALE)` with
 //! a persistent remainder, and `record_account_funding_flow` books the gross funding leg of
 //! every settlement into the account's per-side paid/received counters.
 //!
@@ -614,8 +615,10 @@ fn funding_stale_epoch_leg_settles_against_epoch_start() {
     // 6 units * 300e-9 * 1e6 * 10 = 18 atoms.
     assert_eq!(flows(&l1), (18, 0, 0, 0));
 
-    // Whatever F the new epoch carries must not reach an old-epoch leg: plant a value worth
-    // thousands of atoms per unit before the second long settles.
+    // Negative-control probe: plant a live F the engine cannot reach (a ResetPending side has
+    // no effective OI, so its F does not move) worth thousands of atoms. An old-epoch leg must
+    // ignore it. The unplanted live F (0) would already catch a live-F read; the plant also
+    // catches a bug that adds live F on top of the epoch-start F.
     let mut a = asset(&s);
     a.f_long_num = -1_000 * exact_f(300, 10, price);
     s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
@@ -624,6 +627,11 @@ fn funding_stale_epoch_leg_settles_against_epoch_start() {
     // 4 units * 300e-9 * 1e6 * 10 = 12 atoms.
     assert_eq!(flows(&l2), (12, 0, 0, 0));
     assert_eq!(e0 - equity(&l2), 12);
+    // Restore the reachable live F (0) and check the engine's own invariants still hold.
+    let mut a = asset(&s);
+    a.f_long_num = 0;
+    s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
+    validate(&mut s, &mut [&mut l1, &mut l2, &mut short]);
 }
 
 // ---------------------------------------------------------------------------------------------
