@@ -309,10 +309,12 @@ struct Deep {
     sum_maker_min: i128,
     sum_total_spread: i128,
     gains: u64,
+    not_zero_sum_worlds: u64,
+    maker_order_dependent_worlds: u64,
 }
 
 fn sweep(worlds: u64, seed0: u64) -> Deep {
-    let mut d = Deep { ran: 0, liened_worlds: 0, sum_maker_min: 0, sum_total_spread: 0, gains: 0 };
+    let mut d = Deep { ran: 0, liened_worlds: 0, sum_maker_min: 0, sum_total_spread: 0, gains: 0, not_zero_sum_worlds: 0, maker_order_dependent_worlds: 0 };
     for i in 0..worlds {
         let seed = seed0 * 6007 + i;
         let mut t = seed | 1;
@@ -337,29 +339,105 @@ fn sweep(worlds: u64, seed0: u64) -> Deep {
         if tmax > 8 {
             d.gains += 1;
         }
+        if tmax != 0 || tmin != 0 {
+            d.not_zero_sum_worlds += 1;
+        }
+        if rows.iter().any(|r| r.0 != rows[0].0) {
+            d.maker_order_dependent_worlds += 1;
+        }
     }
     d
 }
 
 /// S5, option B. In the deep-book worlds the maker's WORST outcome over the settle orders is
-/// exactly the pre-R1 engine's worst (summed over the worlds below, computed on 874fe33a), so the
-/// LP side is never below what the old engine could already do to it, and the order spread of
-/// the total (the cranker's lever) is about 4x smaller than the pre-R1 engine's
-/// (9.37M vs 2.17M summed over the sweep). Total equity never gains.
+/// never below the pre-R1 engine's worst (the summed floor was computed on 874fe33a; the
+/// per-world table below was measured on 91911d5b, whose maker worst equals it by design and
+/// adds up to the same sum), so the LP side is never below what the old engine could already do
+/// to it. Total equity never gains.
+///
+/// Upstream #250 (+ 7b32eef2): a victim's liened face no longer haircuts the netting rate, so no
+/// face is burned: every world is now exactly zero-sum and order independent (total spread 0,
+/// was 2,174,094). The higher credit rate also lets more flips pass IM, so 372 worlds run instead
+/// of 187; a summed floor over different world sets is meaningless (the maker's sum is
+/// -124,633,648, of which -55,847,966 is the 185 new worlds, zero-sum with the victims). The floor
+/// is therefore checked per world on the 187 worlds the pre-R1 floor was taken over: there the
+/// maker is at or above the old worst in every world (summed -68,785,682 vs -78,538,861, also
+/// above the old BEST order, -75,117,201), and the victims gain too (no face burned).
 #[test]
 fn deep_book_maker_is_never_below_the_pre_r1_worst_order() {
     let d = sweep(700, 5);
     eprintln!("DEEPBOOK ran {} liened_worlds {} sum_maker_min {} sum_total_spread {} gains {}", d.ran, d.liened_worlds, d.sum_maker_min, d.sum_total_spread, d.gains);
     assert!(d.ran >= 150 && d.liened_worlds * 10 >= d.ran * 8, "the worlds must carry liens");
     assert_eq!(d.gains, 0, "total equity never gains");
-    assert!(d.sum_maker_min >= PRE_R1_SUM_MAKER_MIN, "maker's worst order fell below the pre-R1 worst: {} < {}", d.sum_maker_min, PRE_R1_SUM_MAKER_MIN);
     assert!(d.sum_total_spread <= SPREAD_RATCHET, "order spread regressed: {}", d.sum_total_spread);
+    // #250: nothing is burned, so maker + victims is exactly 0 in every world and order, and the
+    // maker's result does not depend on the settle order. These also catch a broken S5 branch
+    // (the maker floor alone no longer does: with no burn, the branch does not move the maker).
+    assert_eq!(d.not_zero_sum_worlds, 0, "a world burned or created value");
+    assert_eq!(d.maker_order_dependent_worlds, 0, "the maker's equity depends on settle order");
+    assert_eq!(
+        PRE_R1_MAKER_MIN_BY_WORLD.iter().map(|w| w.1).sum::<i128>(),
+        PRE_R1_SUM_MAKER_MIN,
+        "per-world floors add up to the pre-R1 sum"
+    );
+    let (mut checked, mut sum_now) = (0u64, 0i128);
+    for &(off, floor) in PRE_R1_MAKER_MIN_BY_WORLD.iter() {
+        let seed = 5 * 6007 + off;
+        let mut t = seed | 1;
+        let k = 3 + (rng(&mut t) % 6) as usize;
+        let mut s = seed ^ 0x5A5A;
+        let ps = perms(k + 1, 8, &mut s);
+        let makers: Vec<i128> = ps.iter().filter_map(|p| scenario(seed, p).map(|r| r.0)).collect();
+        assert!(!makers.is_empty(), "world {seed} ran on the pre-R1 engine and must still run");
+        let worst = *makers.iter().min().unwrap();
+        assert!(worst >= floor, "world {seed}: maker's worst order {worst} below the pre-R1 worst {floor}");
+        checked += 1;
+        sum_now += worst;
+    }
+    eprintln!("DEEPBOOK pre-R1 worlds {checked}: maker worst now {sum_now} vs floor {PRE_R1_SUM_MAKER_MIN}");
+    assert_eq!(checked, 187);
 }
 
 /// Sum over the 700-world sweep of the maker's worst order, computed on 874fe33a.
 const PRE_R1_SUM_MAKER_MIN: i128 = -78_538_861;
-/// Sum of the per-world order spread of the total: pre-R1 9,370,961, now 2,174,094.
-const SPREAD_RATCHET: i128 = 2_300_000;
+/// Sum of the per-world order spread of the total: pre-R1 9,370,961, R1 2,174,094, #250 0.
+const SPREAD_RATCHET: i128 = 0;
+/// (world offset from seed 5 * 6007, maker's worst order) for the 187 worlds that ran before
+/// #250, measured on 91911d5b; the sum is exactly the pre-R1 floor above.
+const PRE_R1_MAKER_MIN_BY_WORLD: [(u64, i128); 187] = [
+    (1, -966603), (2, -966603), (3, -316697), (4, -316697), (7, -918086), (8, -918086),
+    (9, -741549), (10, -741549), (11, -440820), (12, -440820), (13, -162382), (14, -162382),
+    (15, -473958), (16, -473958), (17, -403069), (18, -403069), (19, 196208), (20, 196208),
+    (21, -523018), (22, -523018), (23, -97605), (24, -97605), (25, -1033142), (26, -1033142),
+    (27, -164233), (28, -164233), (31, -760978), (32, -760978), (35, -250743), (36, -250743),
+    (41, -580714), (42, -580714), (177, -376310), (178, -376310), (181, -926911), (182, -926911),
+    (183, 145554), (184, 145554), (185, -680155), (186, -680155), (187, -441657), (188, -441657),
+    (193, 266300), (194, 266300), (197, -1451084), (198, -1451084), (207, 184506), (208, 184506),
+    (211, -531517), (212, -531517), (213, 2200), (214, 2200), (215, -454787), (216, -454787),
+    (217, 36472), (218, 36472), (219, -140128), (220, -140128), (223, -346446), (224, -346446),
+    (225, -400297), (226, -400297), (227, -22387), (228, -22387), (229, -455982), (230, -455982),
+    (231, -567685), (232, -567685), (233, -353691), (234, -353691), (235, -332908), (236, -332908),
+    (241, 263748), (242, 263748), (243, -543825), (244, -543825), (245, -555813), (246, -555813),
+    (249, -247791), (250, -247791), (251, -518118), (252, -518118), (257, 305370), (258, 305370),
+    (261, -1143134), (262, -1143134), (263, -371191), (264, -371191), (269, -590099),
+    (270, -590099), (273, -1122295), (274, -1122295), (283, -698628), (284, -698628),
+    (293, -311754), (294, -311754), (295, -291012), (296, -291012), (297, -194094), (298, -194094),
+    (433, -672352), (434, -672352), (435, -932200), (436, -932200), (437, 199296), (438, 199296),
+    (439, -356310), (440, -356310), (441, -281518), (442, -281518), (443, -737303), (444, -737303),
+    (449, -433711), (450, -433711), (451, -259128), (452, -259128), (455, -719491), (456, -719491),
+    (461, -384494), (462, -384494), (463, -952527), (464, -952527), (467, -646544), (468, -646544),
+    (469, -315112), (470, -315112), (471, -232138), (472, -232138), (473, -1135604),
+    (474, -1135604), (477, 243784), (478, 243784), (479, -665803), (480, -665803), (483, -881147),
+    (484, -881147), (485, -1248669), (486, -1248669), (489, -394518), (490, -394518),
+    (495, 376194), (496, 376194), (497, -1242902), (498, -1242902), (499, -392601), (500, -392601),
+    (503, -628046), (504, -628046), (509, -612560), (510, -612560), (511, -249511), (512, -249511),
+    (513, 18440), (514, 18440), (517, -80839), (518, -80839), (519, 23442), (520, 23442),
+    (521, 378952), (522, 378952), (523, -410136), (524, -410136), (529, 246546), (530, 246546),
+    (531, -516015), (532, -516015), (545, 35552), (546, 35552), (547, -690380), (548, -690380),
+    (549, -212766), (550, -212766), (551, -876900), (552, -876900), (553, -621621), (554, -621621),
+    (555, -355882), (556, -355882), (689, -761685), (690, -761685), (693, -295754), (694, -295754),
+    (695, -673303), (696, -673303), (697, -74782), (698, -74782), (699, -688893),
+];
 
 #[test]
 fn deep_book_dump() {

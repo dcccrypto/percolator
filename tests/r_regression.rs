@@ -627,12 +627,12 @@ fn r_regression_fresh_unexpired_backing_still_supports_in_full() {
     );
     // On a LIVE bucket both terms of `account_source_realizable_support` pay:
     //   * the gated lien term, in full            -> LIEN_EFFECTIVE            = 10
-    //   * the unliened claim term, haircut by the
-    //     domain's post-lien credit rate:
-    //     claim_num = 100*BS - 10*BS = 90*BS, rate = (100-10)/100 of scale,
-    //     credited = 90 * 0.9                     -> UNLIENED_CLAIM_SUPPORT    = 81
-    // If the fix had gated a live bucket, this certificate would read 81.
-    const UNLIENED_CLAIM_SUPPORT: u128 = 81;
+    //   * the unliened claim term at the domain's credit rate. Since upstream #250 the
+    //     rate is unliened backing / unliened claims: (100-10)/(100-10) = 1, so the
+    //     unliened 90 is credited in full        -> UNLIENED_CLAIM_SUPPORT    = 90
+    //     (before #250 the lien's face stayed in the denominator: 90 * 0.9 = 81).
+    // If the fix had gated a live bucket, this certificate would read 90.
+    const UNLIENED_CLAIM_SUPPORT: u128 = 90;
     assert_eq!(
         cert.certified_equity as u128,
         UNLIENED_CLAIM_SUPPORT + LIEN_EFFECTIVE,
@@ -644,6 +644,8 @@ fn r_regression_fresh_unexpired_backing_still_supports_in_full() {
         "…and specifically must NOT be the unliened credit alone, which is what a \
          fix that gated live backing would produce"
     );
+    // Lien + soft credit never exceed the backing that exists (#250's cap).
+    assert!(cert.certified_equity as u128 <= CLAIM, "support capped by backing = {CLAIM}");
     assert_eq!(cert.certified_liq_deficit, 0);
     assert_eq!(
         market.liquidate_account_not_atomic(&mut long, LiquidationRequestV16 { asset_index: 0 }),

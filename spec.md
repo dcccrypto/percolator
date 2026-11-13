@@ -363,6 +363,8 @@ Unliened backing in an expired bucket contributes zero. Liened backing in an exp
 
 The expiry/impairment transition is aggregate and bounded by bucket id. Individual liens referencing an impaired bucket become impaired by bucket status and settle later through bounded cranks. Impaired lien backing is not available for new credit and does not count toward `available_backing_num`.
 
+The credit-rate reads of a full account refresh are not limited to the source domains the account already holds claims in. A favorable K/F delta on an active leg is credited to that leg's source domain `(asset, opposing_side)`, and the same refresh then reads that domain's rate although the account did not reference the domain before. In Live, the permissionless refresh MUST therefore treat the source domain of every active leg, together with every domain the account holds claims in, as a domain it reads. If the bucket of any of them is still Fresh at or past its expiry slot, the refresh MUST apply rule 2 to it before settlement instead of failing on it, and the account MUST classify as refresh work while such a bucket exists, whether or not its certificate is otherwise current. The discovery is bounded by `N` plus the account's bounded claim set (the reference implementation expires one bucket per call and returns before valuation). It MUST NOT expire a bucket before its expiry slot and MUST NOT select a bucket outside those domains. Owner-initiated operations MAY keep failing closed on such a bucket, because one permissionless crank on the same account removes it. Without this rule an account about to receive its first claim in a lapsed domain can be neither refreshed nor liquidated through any permissionless route.
+
 The instruction MUST prove after expiry by independent recomputation from bucket state:
 ```text
 fresh_reserved_backing_num_after = sum_FreshBuckets(fresh_unliened + valid_liened)
@@ -372,6 +374,16 @@ available_backing_num_after <= available_backing_num_before
 credit_rate_num_after <= credit_rate_num_before unless positive_claim_bound_num also decreased by an independently valid bounded recomputation
 ```
 A pure expiry transition that increases available backing or credit rate is invalid and MUST revert or recover. A before/after inequality alone is insufficient unless the recomputed aggregate equalities also hold.
+
+The credit rate is the rate of UNLIENED claim face (upstream #250). Liened backing is in neither term:
+```text
+unliened_claim_num = positive_claim_bound_num - valid_liened_backing_num - valid_liened_insurance_num   (saturating)
+credit_rate_num = CREDIT_RATE_SCALE                                       if positive_claim_bound_num == 0
+                = 0                                                       if available_backing_num == 0
+                = CREDIT_RATE_SCALE                                       if available_backing_num >= unliened_claim_num
+                = available_backing_num * CREDIT_RATE_SCALE / unliened_claim_num   otherwise
+```
+A lien never cuts the rate of a domain whose total backing covers its claims. The rate never exceeds the lien-free rate. In a domain that is under-backed when a lien is created, the lien locks `face = backing / rate` but only its backing leaves the denominator, so other claimants stay below the lien-free rate while it is outstanding (less of a cut than before, never an over-credit). The provider-withdrawal gate is stated separately from the rate and is unchanged by it: a withdrawal of fresh counterparty backing is allowed only if `available_backing_num >= positive_claim_bound_num` afterwards, lien-covered face included (upstream 596b3d98).
 
 Insurance may contribute to source credit only through a canonical live insurance-credit reservation recorded in `InsuranceLedger.source_credit_reserved_num[D]`. `SourceCreditState[D].insurance_credit_reserved_num` is a derived view of that canonical ledger entry, not a second writer.
 
@@ -814,6 +826,19 @@ or mode_s == ResetPending and epoch_snap_i + 1 == epoch_s
 ```
 
 `begin_full_drain_reset(side)` requires `OI_eff_side == 0` and then snapshots `K_side`/`F_side_num` to epoch-start fields, zeros live `K_side`/`F_side_num`, increments `epoch_side`, sets `A_side = ADL_ONE`, sets `stale_account_count_side = stored_pos_count_side`, clears phantom dust for that side, and enters `ResetPending`.
+
+Each leg's `effective_pos_q` is rounded up while `A_side` is rounded down, so
+the effective quantities of one side's legs can sum to more than `OI_eff_side`.
+A dead-leg exit (Recovery forfeit or resolved close) therefore removes
+`min(abs(effective_pos_q), OI_eff_side)`, the leg's remaining share of the
+aggregate, and MUST NOT fail because the side carries less. Once `OI_eff_side`
+is zero, a side without pending obligations resets and its remaining legs
+detach as prior-reset obligations. A side that still carries pending
+obligations cannot reset (§9); its remaining current-epoch legs then detach, or
+convert to pending obligations, with a zero effective-OI change. Their loss
+weight is removed or retained exactly as for any other leg. No other
+transition may clear or retain a current-epoch nonzero-basis leg without
+removing at least one effective-OI atom.
 
 When a side reset or leg clear combines two valid sub-atom social-loss carries,
 the sum is normalized modulo `SOCIAL_LOSS_DEN`. Crossing the denominator adds
