@@ -7955,6 +7955,7 @@ fn proof_v16_counterparty_backing_withdraw_beside_lien_cannot_underback_claims()
         MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_withdraw_delta(
             bucket,
             source,
+            0,
             withdraw_num,
         )
         .unwrap();
@@ -8740,6 +8741,8 @@ fn proof_v16_lapsed_latent_favorable_backing_forces_live_refresh() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: kf_epoch,
         epoch_snap: side_epoch,
         loss_weight: POS_SCALE,
@@ -8748,6 +8751,10 @@ fn proof_v16_lapsed_latent_favorable_backing_forces_live_refresh() {
         b_epoch_snap: side_epoch,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
     active_bitmap_set(&mut bitmap, 0).unwrap();
