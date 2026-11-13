@@ -26686,9 +26686,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             fee_rate_per_slot,
         )?;
         self.settle_negative_pnl_from_principal_not_atomic(account)?;
-        if account.header.pnl.get() < 0 {
-            self.settle_resolved_bankruptcy_negative_pnl(account)?;
-        }
+        // Not only for a loss that is still owed: a close that began before
+        // the account paid its loss is cured here, which releases its domain
+        // barrier before the account can be paid out.
+        self.settle_resolved_bankruptcy_negative_pnl(account)?;
         self.detach_solvent_active_legs_for_resolved_close(account)?;
         if !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
             || account.header.pnl.get() < 0
