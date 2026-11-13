@@ -9,8 +9,9 @@
 //!     fee sync (`sync_account_fee_to_slot_not_atomic`);
 //!   * counterparty lien fee accrual (floored-fraction carry) and lien release.
 //!
-//! Every test name carries `fee` or `lien` so the area count is
-//! `cargo test --tests -- fee lien`.
+//! Every test name carries `fee` or `lien`, so these tests are counted by the area-wide filter
+//! `cargo test --tests -- fee lien` (which also matches fee/lien tests in other files). This
+//! file alone: `cargo test --test fees_liens_edge`.
 
 use percolator::{
     backing_domain_fee_split_for_lien_delta_num, AutoCrankObservationV16, AutoCrankPlanV16,
@@ -319,8 +320,9 @@ fn fee_batch_rounds_each_leg_up_separately() {
     assert_eq!((out.fee_a, out.fee_b), (1, 0));
 }
 
-/// The band maker-exempt entry exempts the maker from the leg-size band check only; the taker
-/// still pays the trade fee and the maker still pays nothing.
+/// The band maker-exempt entry does not exempt anyone from the trade fee: the taker still pays it
+/// and the maker still pays nothing. (The band itself is off in this config, so this checks the
+/// fee path of that entry only, not the band exemption.)
 #[test]
 fn fee_band_maker_exempt_entry_still_charges_the_taker() {
     let ((mut header, mut markets), mut la, mut sa) = funded_pair(100, 1_000, 1_000, 1_000);
@@ -447,18 +449,25 @@ fn backing_fee_unknown_domain_is_refused() {
     let ((mut header, mut markets), mut a) = backing_fee_fixture(100, 50);
     let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut acct = PortfolioV16ViewMut::new(&mut a);
-    assert!(m
-        .charge_account_backing_fee_not_atomic(&mut acct, 2, 6, 1, 4)
-        .is_err());
-    assert!(m
-        .charge_account_backing_fee_not_atomic(&mut acct, 0, 6, 2, 4)
-        .is_err());
+    assert_eq!(
+        m.charge_account_backing_fee_not_atomic(&mut acct, 2, 6, 1, 4),
+        Err(V16Error::InvalidLeg)
+    );
+    assert_eq!(
+        m.charge_account_backing_fee_not_atomic(&mut acct, 0, 6, 2, 4),
+        Err(V16Error::InvalidLeg)
+    );
     assert_eq!(acct.header.capital.get(), 100);
     assert_eq!(m.header.c_tot.get(), 100);
 }
 
 /// Fee after expiry: a provider fee is credited one slot before the bucket's expiry, and refused
 /// at the expiry slot itself (the bucket is no longer live then).
+///
+/// Note: the bucket check runs AFTER the capital / `c_tot` debit
+/// (`charge_account_backing_fee_not_atomic`), so on this refusal the in-memory account is left
+/// debited. Like every `_not_atomic` entry, the wrapper must abort the transaction on `Err`;
+/// this test only asserts that no provider earnings are credited.
 #[test]
 fn backing_fee_provider_share_refused_from_the_expiry_slot() {
     const EXPIRY: u64 = 50;
@@ -749,7 +758,8 @@ const COVERED: u128 = LIEN_CLAIM;
 /// The lien fee for one slot floors to zero at a low rate. Refreshing every slot must still
 /// collect it: the cursor does not advance on a zero quote, so the fraction carries forward and
 /// the lien is never free (upstream f7ad3ee9). Per-slot refreshing collects no more than the
-/// closed form, and loses less than one atom per collection. (The permissionless crank selects
+/// closed form, and loses less than one atom per collection (here 16 of 20; see
+/// `lien_fee_frequent_refresh_drops_the_floored_fraction_each_collection`). (The permissionless crank selects
 /// no action on an account that is already current, so this drives the refresh directly.)
 #[test]
 fn lien_fee_sub_atom_per_slot_carries_until_it_is_collected() {
@@ -809,10 +819,12 @@ fn lien_fee_sub_atom_per_slot_carries_until_it_is_collected() {
 
 /// FINDING (recorded, not fixed): when a collection does charge, the cursor jumps to the
 /// collection slot and the floored fraction is dropped. Refreshing every slot at 1.9 atoms per
-/// slot pays 1 atom per slot, so the provider collects 20 of the 38 owed over 20 slots. The
-/// loss is under one atom per collection and always in the trader's favour; the spec leaves the
-/// backing-fee schedule to wrapper policy (spec.md §2, "Backing fee schedules are
-/// wrapper/product policy"), so this is recorded for review rather than tightened here.
+/// slot pays 1 atom per slot, so the provider collects 20 of the 38 owed over 20 slots. The loss
+/// is under one atom per collection, but with refreshes timed so each quote lands between 1 and
+/// 2 atoms it approaches half the lien rent. It is always in the trader's favour. spec.md (§2.2,
+/// "Backing fee schedules are wrapper/product policy") leaves the fee schedule to the wrapper
+/// and is silent on how the engine rounds collection, so this is recorded for review rather
+/// than tightened here. A fix would advance the cursor only by the slots actually paid for.
 #[test]
 fn lien_fee_frequent_refresh_drops_the_floored_fraction_each_collection() {
     let (_, probe, _) = lien_fixture(0, NEEDED);
@@ -833,6 +845,44 @@ fn lien_fee_frequent_refresh_drops_the_floored_fraction_each_collection() {
         m.header.backing_provider_earnings_total.get(),
         20,
         "one atom per slot: the 0.9 fraction is dropped at every collection"
+    );
+    m.validate_shape().unwrap();
+}
+
+/// Lenient by design: the lien fee cursor advances before the charge, and the charge takes at
+/// most the account's capital. An account holding a lien with no capital pays nothing for the
+/// interval, and that interval is not billed again later.
+#[test]
+fn lien_fee_interval_is_forgiven_when_the_account_has_no_capital() {
+    let rate_e9 = 1_000;
+    let ((mut header, mut markets), mut la, _) = lien_fixture(rate_e9, 0);
+    assert_eq!(la.capital.get(), 0);
+    let atoms = lien_atoms(&la);
+    let start = la.source_domains[0].source_lien_fee_last_slot.get();
+    let mid = start + 400;
+    let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut la);
+    m.accrue_asset_to_not_atomic(0, mid, LIEN_PRICE, 0, true)
+        .unwrap();
+    m.full_account_refresh_not_atomic(&mut long).unwrap();
+    assert!(lien_owed(atoms, rate_e9, mid - start) > 0);
+    assert_eq!(m.header.backing_provider_earnings_total.get(), 0);
+    assert_eq!(
+        long.header.source_domains[0]
+            .source_lien_fee_last_slot
+            .get(),
+        mid,
+        "the unpaid interval is closed, not carried"
+    );
+    // Capital arrives later: only the interval after `mid` is billed.
+    m.deposit_not_atomic(&mut long, NEEDED).unwrap();
+    let end = mid + 100;
+    m.accrue_asset_to_not_atomic(0, end, LIEN_PRICE, 0, true)
+        .unwrap();
+    m.full_account_refresh_not_atomic(&mut long).unwrap();
+    assert_eq!(
+        m.header.backing_provider_earnings_total.get(),
+        lien_owed(atoms, rate_e9, end - mid)
     );
     m.validate_shape().unwrap();
 }
