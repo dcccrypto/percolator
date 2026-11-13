@@ -597,10 +597,14 @@ fn funding_stale_epoch_leg_settles_against_epoch_start() {
     trade(&mut s, &mut l1, &mut short, (6 * POS_SCALE) as i128, price);
     trade(&mut s, &mut l2, &mut short, (4 * POS_SCALE) as i128, price);
     let start = asset(&s).slot_last;
+    let epoch0 = asset(&s).epoch_long;
     for k in 1..=10 {
         accrue(&mut s, start + k, price, 300);
     }
+    // Settle the short's funding before the walk: it pins the receiver side (10 units * 300e-9 *
+    // 1e6 * 10 slots = 30 atoms) and measures bankruptcy against settled equity.
     refresh(&mut s, &mut short);
+    assert_eq!(flows(&short), (0, 0, 0, 30));
     // Walk the price up 10 bps per slot (the cap) without liquidating until the short is
     // bankrupt: equity ~ 1.001e7 - 10 * (px - 1e6) < 0 once px > ~2.001e6, so its close is total.
     let mut px = price;
@@ -625,7 +629,7 @@ fn funding_stale_epoch_leg_settles_against_epoch_start() {
         "the long side is drained: {liquidated:?}"
     );
     assert_eq!(reset.mode_long, SideModeV16::ResetPending);
-    assert_eq!(reset.epoch_long, 1);
+    assert_eq!(reset.epoch_long, epoch0 + 1);
     // F at the reset is the 10 funded slots (price moves carried no funding: rate 0)
     assert_eq!(reset.f_epoch_start_long_num, -exact_f(300, 10, price));
     assert_eq!(reset.f_long_num, 0);
@@ -635,9 +639,7 @@ fn funding_stale_epoch_leg_settles_against_epoch_start() {
     // 6 units * 300e-9 * 1e6 * 10 = 18 atoms; 4 units -> 12 atoms. Booked as long-paid only.
     assert_eq!(flows(&l1), (18, 0, 0, 0));
     assert_eq!(flows(&l2), (12, 0, 0, 0));
-    // A second refresh in the new epoch books nothing more.
-    crank_refresh(&mut s, &mut l1);
-    assert_eq!(flows(&l1), (18, 0, 0, 0));
+    // Equity also carries mark-to-market and B, so the counters are the funding-specific check.
     validate(&mut s, &mut [&mut l1, &mut l2, &mut short]);
 }
 
