@@ -2743,6 +2743,9 @@ impl V16Core {
     /// The first sparse-tail entry terminates the scan; otherwise the first
     /// occupied lapsed Fresh bucket is selected and terminates the scan.
     /// (upstream c09d4575)
+    /// The latent-domain scan over active legs takes the same step with no
+    /// sparse tail: `occupied` is the leg's active flag and `domain` the leg's
+    /// favorable source domain (#243).
     fn kernel_lapsed_source_backing_scan_step(
         selected: Option<usize>,
         sparse_tail: bool,
@@ -11495,7 +11498,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// First occupied source domain of the account whose backing bucket is
     /// Fresh and lapsed at `now_slot`; the sparse tail ends the scan.
-    /// (upstream c09d4575 / 867fbdc9)
+    /// (upstream c09d4575 / 867fbdc9). Then each active leg's latent favorable
+    /// domain (see `first_lapsed_latent_source_backing_for_account_at_slot`, #243).
     fn first_lapsed_source_backing_for_account_at_slot(
         &self,
         account: &PortfolioV16View<'_>,
@@ -11518,6 +11522,73 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 selected,
                 sparse_tail,
                 occupied,
+                domain,
+                bucket_status,
+                expiry_slot,
+                now_slot,
+            );
+            selected = next_selected;
+            if stop {
+                break;
+            }
+            slot += 1;
+        }
+        if selected.is_some() {
+            return Ok(selected);
+        }
+        self.first_lapsed_latent_source_backing_for_account_at_slot(account, now_slot)
+    }
+
+    /// A favorable K/F delta on an active leg is credited to that leg's source domain
+    /// `(asset, opposite side)`, and the claim is created by the same refresh that then reads
+    /// the domain's credit rate. Until then the account's roster does not name the domain, so
+    /// the roster scan cannot see a lapsed Fresh bucket there and the settlement's
+    /// ledger-currency check rejects it with `Stale`. Without this scan no step of the
+    /// account's own crank expires it: the account can be neither refreshed nor liquidated
+    /// while the leg's pending delta stays positive, until another account's settlement
+    /// happens to normalize the bucket (#243).
+    ///
+    /// Select the first active leg, in leg-slot order, whose latent domain bucket is Fresh at
+    /// or past its expiry. These are the domains `ensure_source_domain_capacity_for_new_exposure`
+    /// reserves roster capacity for. The scan does not look at the sign of the pending delta
+    /// (a lapsed bucket backs nothing whichever way the leg settles) and is bounded by
+    /// `V16_MAX_PORTFOLIO_ASSETS_N`: three leg fields and two bucket fields per active leg
+    /// (full leg validation stays with the callers' own leg pass), and no work at all while
+    /// the market holds no Fresh backing.
+    fn first_lapsed_latent_source_backing_for_account_at_slot(
+        &self,
+        account: &PortfolioV16View<'_>,
+        now_slot: u64,
+    ) -> V16Result<Option<usize>> {
+        // A Fresh bucket always holds fresh reserved backing.
+        if self.header.source_fresh_backing_total_num.get() == 0 {
+            return Ok(None);
+        }
+        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        let mut selected = None;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = &account.header.legs[slot];
+            let active = active_bitmap_get(bitmap, slot) && decode_bool(leg.active)?;
+            let (domain, bucket_status, expiry_slot) = if active {
+                let domain = self.insurance_domain_index(
+                    leg.asset_index.get() as usize,
+                    opposite_side(decode_side(leg.side)?),
+                )?;
+                let (raw_status, expiry_slot) =
+                    self.backing_bucket_raw_status_expiry_for_domain(domain)?;
+                (
+                    domain,
+                    decode_backing_bucket_status(raw_status)?,
+                    expiry_slot,
+                )
+            } else {
+                (0, BackingBucketStatusV16::Empty, 0)
+            };
+            let (next_selected, stop) = V16Core::kernel_lapsed_source_backing_scan_step(
+                selected,
+                false,
+                active,
                 domain,
                 bucket_status,
                 expiry_slot,
@@ -16900,7 +16971,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // A source-backed winner can remain Live past the backing bucket's expiry.
         // The permissionless path commits exactly one canonical expiry transition
         // per call, then returns before valuation. Repeated cranks drain the
-        // bounded domain set without an O(source-domains) CU cliff.
+        // bounded domain set without an O(source-domains) CU cliff. The set is the
+        // account's roster plus each active leg's latent favorable domain, which the
+        // settlement below can credit a gain to and then reads the credit rate of.
         // (upstream c09d4575)
         if allow_b_chunk {
             if let Some(domain) =
@@ -18429,7 +18502,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// GATED so every flag that can be set has a currently-valid dispatch target:
     ///   stale            — Live, health cert not current, a settled prior-reset
     ///                      obligation needs permissionless detachment, or source
-    ///                      backing used by the account has reached expiry
+    ///                      backing the account's refresh reads (a roster domain
+    ///                      or an active leg's latent favorable domain) has
+    ///                      reached expiry
     ///   b_stale          — Live, some active leg has a cached or derived pending B settlement
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
