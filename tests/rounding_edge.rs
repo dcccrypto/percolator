@@ -11,7 +11,7 @@ use percolator::{
     kani_adl_effective_quantity_ceil, kani_funding_index_deltas, kani_mul_div_ceil_u128_or_wide,
     kani_mul_div_ceil_u128_wide_reference, kani_mul_div_floor_u128_or_wide,
     kani_mul_div_floor_u128_wide_reference, kani_raw_basis_for_adl_effective_quantity, V16Error,
-    ADL_ONE, FUNDING_DEN, MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MIN_A_SIDE, POS_SCALE,
+    ADL_ONE, FUNDING_DEN, MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MIN_A_SIDE,
 };
 
 /// Deterministic xorshift so the loops are reproducible without extra deps.
@@ -50,7 +50,11 @@ fn rounding_mul_div_floor_ceil_bracket_the_exact_quotient() {
         let c = kani_mul_div_ceil_u128_or_wide(a, b, d);
         if f.is_err() || c.is_err() {
             // Quotient does not fit u128: both must fail, never wrap.
-            assert!(f.is_err() && kani_mul_div_floor_u128_wide_reference(a, b, d).is_err());
+            assert!(
+                f.is_err()
+                    && c.is_err()
+                    && kani_mul_div_floor_u128_wide_reference(a, b, d).is_err()
+            );
             continue;
         }
         let (f, c) = (f.unwrap(), c.unwrap());
@@ -59,7 +63,7 @@ fn rounding_mul_div_floor_ceil_bracket_the_exact_quotient() {
         assert_eq!(Ok(c), kani_mul_div_ceil_u128_wide_reference(a, b, d));
         // ceil - floor is 0 (exact) or 1, never more.
         assert!(c == f || c == f + 1, "a={a} b={b} d={d} f={f} c={c}");
-        // floor never over-credits, ceil never under-charges (u128 here: a*b fits, since args < 2^66 each... use checked).
+        // floor never over-credits, ceil never under-charges (only checkable when a*b fits u128).
         if let Some(p) = a.checked_mul(b) {
             assert!(f.checked_mul(d).unwrap() <= p);
             assert_eq!(c == f, p % d == 0);
@@ -89,7 +93,7 @@ fn rounding_mul_div_one_atom_and_max_value() {
     // Result that does not fit must error, not wrap.
     assert!(kani_mul_div_floor_u128_or_wide(u128::MAX, 2, 1).is_err());
     assert!(kani_mul_div_ceil_u128_or_wide(u128::MAX, 2, 1).is_err());
-    // Ceil at the top edge: (MAX*MAX - 1) / MAX is MAX-1 + a remainder -> ceil MAX, floor MAX-1.
+    // Wide product MAX*(MAX-1) divides exactly: floor == ceil == MAX-1.
     assert_eq!(
         kani_mul_div_floor_u128_or_wide(u128::MAX, u128::MAX - 1, u128::MAX),
         Ok(u128::MAX - 1)
@@ -138,7 +142,8 @@ fn rounding_adl_effective_quantity_never_below_exact_and_never_grows() {
         // Effective size is a ceil: never smaller than exact, within 1 atom of it,
         // and never larger than the raw basis (ADL only shrinks).
         let exact_floor = raw * cur / a_basis;
-        assert!(eff == exact_floor || eff == exact_floor + 1);
+        let exact_ceil = exact_floor + u128::from((raw * cur) % a_basis != 0);
+        assert_eq!(eff, exact_ceil, "must be a ceil, not a floor");
         assert!(eff <= raw);
         // A non-zero position cannot be rounded to nothing while A > 0.
         if raw > 0 {
@@ -185,8 +190,7 @@ fn rounding_adl_raw_basis_floor_then_effective_ceil_does_not_exceed_target() {
             continue;
         };
         let eff = kani_adl_effective_quantity_ceil(raw, a_basis, cur).unwrap();
-        // eff is within 1 of target (ceil of floor).
-        assert!(eff <= target + 1, "target={target} eff={eff}");
+        assert_eq!(eff, target, "floor then ceil must round-trip exactly");
         if raw > 0 {
             assert!(eff >= 1);
         }
@@ -196,7 +200,7 @@ fn rounding_adl_raw_basis_floor_then_effective_ceil_does_not_exceed_target() {
 // ---- funding index deltas: payer ceil, receiver floor ------------------------------
 
 #[test]
-fn rounding_funding_payer_never_pays_less_than_receiver_gets() {
+fn rounding_funding_payer_ceil_receiver_floor() {
     let mut rng = Rng(2026);
     for _ in 0..30_000 {
         let funding_num =
@@ -251,7 +255,7 @@ fn rounding_funding_one_atom_rate_is_charged_to_payer_not_credited_to_receiver()
 fn rounding_funding_max_rate_overflow_is_an_error_not_a_wrap() {
     let r = kani_funding_index_deltas(i128::MAX, ADL_ONE, ADL_ONE);
     assert!(r.is_err());
-    // i128::MIN magnitude cannot be negated safely either.
+    // i128::MIN: 2^127 * 1e6 overflows, so it errors.
     let r = kani_funding_index_deltas(i128::MIN, ADL_ONE, ADL_ONE);
     assert!(r.is_err());
 }
@@ -379,5 +383,4 @@ fn rounding_rent_chargeable_never_exceeds_free_capital() {
     // Capital below the loss it already owes: no rent taken, no underflow.
     assert_eq!(rent_chargeable_atoms(10, 5, -100), 0);
     assert_eq!(rent_chargeable_atoms(10, 5, i128::MIN), 0);
-    let _ = POS_SCALE;
 }
