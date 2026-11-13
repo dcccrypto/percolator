@@ -1174,6 +1174,7 @@ fn div_rem_u256_slow(num: U256, den: U256) -> (U256, U256) {
 // ============================================================================
 
 /// U256 -> eight little-endian 32-bit digits.
+#[cfg(not(kani))]
 fn u256_to_digits(v: U256) -> [u32; 8] {
     let lo = v.lo();
     let hi = v.hi();
@@ -1190,6 +1191,7 @@ fn u256_to_digits(v: U256) -> [u32; 8] {
 }
 
 /// Eight little-endian 32-bit digits -> U256.
+#[cfg(not(kani))]
 fn u256_from_digits(d: &[u32]) -> U256 {
     let lo = (d[0] as u128) | ((d[1] as u128) << 32) | ((d[2] as u128) << 64) | ((d[3] as u128) << 96);
     let hi = (d[4] as u128) | ((d[5] as u128) << 32) | ((d[6] as u128) << 64) | ((d[7] as u128) << 96);
@@ -1197,6 +1199,7 @@ fn u256_from_digits(d: &[u32]) -> U256 {
 }
 
 /// Number of significant digits (index of the highest non-zero digit + 1; 0 for zero).
+#[cfg(not(kani))]
 fn sig_digits(d: &[u32]) -> usize {
     let mut n = d.len();
     while n > 0 && d[n - 1] == 0 {
@@ -1213,6 +1216,7 @@ fn sig_digits(d: &[u32]) -> usize {
 /// remainder to `r[..n]` (other digits untouched). Exact integer division: the results are
 /// floor(u / v) and u mod v. All intermediates are bounded (see inline notes), so no
 /// operation can overflow.
+#[cfg(not(kani))]
 fn divmnu32(q: &mut [u32; 16], r: &mut [u32; 8], u: &[u32; 16], m: usize, v: &[u32; 8], n: usize) {
     const B: u64 = 1u64 << 32;
     assert!(n >= 1 && n <= 8 && m >= n && m <= 16, "divmnu32: bad digit counts");
@@ -1261,12 +1265,13 @@ fn divmnu32(q: &mut [u32; 16], r: &mut [u32; 8], u: &[u32; 16], m: usize, v: &[u
     let mut j = m - n + 1;
     while j > 0 {
         j -= 1;
-        // D3: estimate. num < 2^64; qhat <= B (un[j+n] <= vtop by the D-loop invariant), and
-        // rhat < vtop < B on entry.
+        // D3: estimate. num < 2^64; qhat <= B + 1 (un[j+n] <= vtop by the D-loop invariant and
+        // vtop >= 2^31), and rhat < vtop < B on entry.
         let num = ((un[j + n] as u64) << 32) | un[j + n - 1] as u64;
         let mut qhat = num / vtop;
         let mut rhat = num - qhat * vtop;
-        // qhat <= B and vnext < B, so qhat * vnext < 2^64; rhat < B here so rhat << 32 < 2^64.
+        // `qhat * vnext` is only evaluated once qhat < B (the `||` short-circuits), so it is
+        // < 2^64; rhat < B whenever `rhat << 32` is evaluated. After the loop qhat < B.
         while qhat >= B || qhat * vnext > ((rhat << 32) | un[j + n - 2] as u64) {
             qhat -= 1;
             rhat += vtop;
