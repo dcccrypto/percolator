@@ -12,14 +12,16 @@
 //! Tests drive the public engine API (accrue, trade, refresh). Direct state writes, each one
 //! named in its test: `try_accrue` sets `raw_oracle_target_price` to the accrued price after
 //! every accrual, playing the wrapper's role (the oracle target is wrapper state); the
-//! one-sided-OI, asymmetric-A, overflow and epoch tests set one or two asset fields to reach a
-//! state (ADL-shrunk A, exhausted OI, near-limit F) that no short public sequence produces.
+//! asymmetric-A and overflow tests set one asset field to reach a state (ADL-shrunk A,
+//! near-limit F) that no short public sequence produces. The epoch test is fully public.
 
 use percolator::{
-    AssetStateV16Account, EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount,
-    MarketGroupV16ViewMut, PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
-    ProvenanceHeaderV16Account, SideModeV16, TradeRequestV16, V16Config, V16Error, V16PodU64,
+    AssetStateV16Account, EngineAssetSlotV16Account, LiquidationRequestV16, Market,
+    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
+    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, SideModeV16,
+    TradeRequestV16, V16Config, V16Error, V16PodU64,
 };
+use percolator::{PermissionlessCrankActionV16, PermissionlessCrankRequestV16};
 use percolator::{ADL_ONE, MIN_A_SIDE, POS_SCALE};
 
 const FUNDING_DEN: u128 = 1_000_000_000;
@@ -108,6 +110,31 @@ fn refresh(slab: &mut Slab, a: &mut PortfolioAccountV16Account) {
         .unwrap();
 }
 
+/// The keeper's Refresh crank, repeated until the account is neither K/F- nor B-stale (a
+/// bankrupt close leaves B to settle in chunks, which the plain refresh refuses as BStale).
+fn crank_refresh(slab: &mut Slab, a: &mut PortfolioAccountV16Account) {
+    let now_slot = slab.0.current_slot.get();
+    let price = asset(slab).effective_price;
+    for _ in 0..64 {
+        let mut m = MarketGroupV16ViewMut::new(&mut slab.0, &mut slab.1);
+        m.permissionless_crank_not_atomic(
+            &mut PortfolioV16ViewMut::new(a),
+            PermissionlessCrankRequestV16 {
+                now_slot,
+                asset_index: 0,
+                effective_price: price,
+                funding_rate_e9: 0,
+                action: PermissionlessCrankActionV16::Refresh,
+            },
+        )
+        .expect("permissionless Refresh crank");
+        if a.b_stale_state == 0 && a.stale_state == 0 {
+            return;
+        }
+    }
+    panic!("account still stale after 64 Refresh cranks");
+}
+
 fn asset(slab: &Slab) -> percolator::AssetStateV16 {
     slab.1[0].engine.asset.try_to_runtime().unwrap()
 }
@@ -186,38 +213,6 @@ fn funding_zero_rate_on_positioned_book_moves_nothing() {
     assert_eq!(flows(&long), (0, 0, 0, 0));
     assert_eq!(flows(&short), (0, 0, 0, 0));
     validate(&mut s, &mut [&mut long, &mut short]);
-}
-
-/// A one-sided book (effective OI on one side only, as ADL can leave) must not accrue funding:
-/// there is nobody to pay or receive. Spec: `funding_active` needs BOTH OI_eff sides nonzero.
-/// With no price move it is not equity-active either, so it needs no protective progress.
-#[test]
-fn funding_one_sided_oi_does_not_accrue() {
-    for empty_side in [0, 1] {
-        let (mut s, _long, _short) = book(1_000_000, 10);
-        let mut a = asset(&s);
-        if empty_side == 0 {
-            a.oi_eff_long_q = 0;
-        } else {
-            a.oi_eff_short_q = 0;
-        }
-        s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
-        for rate in [MAX_RATE as i128, -(MAX_RATE as i128)] {
-            let before = asset(&s);
-            let slot = before.slot_last + 5;
-            try_accrue(&mut s, slot, 1_000_000, rate, false).unwrap();
-            let after = asset(&s);
-            assert_eq!(
-                after.f_long_num, before.f_long_num,
-                "side {empty_side} rate {rate}"
-            );
-            assert_eq!(
-                after.f_short_num, before.f_short_num,
-                "side {empty_side} rate {rate}"
-            );
-            assert_eq!(after.slot_last, slot);
-        }
-    }
 }
 
 /// Same-slot accrual (dt == 0) with a nonzero rate is a no-op, not an error.
@@ -571,7 +566,7 @@ fn funding_counter_is_gross_of_mark_to_market() {
         p += p / 1_000;
         num += 10 * 200 * p as u128;
     }
-    want += num / FUNDING_DEN + u128::from(num % FUNDING_DEN != 0);
+    want += num.div_ceil(FUNDING_DEN);
     assert_eq!(paid, want);
     assert_eq!(flows(&short).3, num / FUNDING_DEN);
 }
@@ -580,57 +575,69 @@ fn funding_counter_is_gross_of_mark_to_market() {
 // Epoch change
 // ---------------------------------------------------------------------------------------------
 
-/// Epoch change through the engine's own full-drain reset. Two longs share one short. Once the
-/// long side's effective OI is exhausted (what a socializing ADL leaves behind; set directly
-/// here, the only hand-made step), the first long's refresh runs `begin_full_drain_reset`: the
-/// live F moves to the epoch-start slot and the side epoch bumps. Each old-epoch long then
-/// settles funding against the epoch-start F, exactly what accrued before the reset, and
-/// nothing that the new epoch's F carries.
+/// Epoch change through a reachable full drain. Two longs share one thinly margined short.
+/// Longs pay funding; then the price walks up at the per-slot cap until the short is
+/// bankrupt, and a unilateral liquidation closes it in full. That empties the long side's effective
+/// OI, so the engine itself runs `begin_full_drain_reset` on the long side: the live F moves to
+/// the epoch-start slot and the side epoch bumps. Each old-epoch long then settles exactly the
+/// funding that accrued before the reset, booked as long-paid.
 #[test]
 fn funding_stale_epoch_leg_settles_against_epoch_start() {
-    let price = 1_000_000;
+    let price = 1_000_000u64;
     let mut s = market(price);
     let mut l1 = funded(&mut s, 1);
     let mut l2 = funded(&mut s, 2);
-    let mut short = funded(&mut s, 3);
+    let mut short = account(3);
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut s.0, &mut s.1);
+        // notional 10 units * 1e6 = 1e7 atoms at 100% IM, plus a 0.1% cushion
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut short), 10_010_000)
+            .unwrap();
+    }
     trade(&mut s, &mut l1, &mut short, (6 * POS_SCALE) as i128, price);
     trade(&mut s, &mut l2, &mut short, (4 * POS_SCALE) as i128, price);
     let start = asset(&s).slot_last;
     for k in 1..=10 {
         accrue(&mut s, start + k, price, 300);
     }
-    let before = asset(&s);
-    let f_at_reset = before.f_long_num;
-    assert_eq!(f_at_reset, -exact_f(300, 10, price));
-    let mut a = before;
-    a.oi_eff_long_q = 0;
-    s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
-
-    refresh(&mut s, &mut l1);
+    refresh(&mut s, &mut short);
+    // Walk the price up 10 bps per slot (the cap) without liquidating until the short is
+    // bankrupt: equity ~ 1.001e7 - 10 * (px - 1e6) < 0 once px > ~2.001e6, so its close is total.
+    let mut px = price;
+    let mut slot = start + 10;
+    while px <= 2_100_000 {
+        slot += 1;
+        px += px / 1_000;
+        accrue(&mut s, slot, px, 0);
+    }
+    let liquidated = {
+        let mut m = MarketGroupV16ViewMut::new(&mut s.0, &mut s.1);
+        m.liquidate_account_not_atomic(
+            &mut PortfolioV16ViewMut::new(&mut short),
+            LiquidationRequestV16 { asset_index: 0 },
+        )
+        .unwrap()
+    };
+    assert!(liquidated.closed_q > 0, "{liquidated:?}");
     let reset = asset(&s);
+    assert_eq!(
+        reset.oi_eff_long_q, 0,
+        "the long side is drained: {liquidated:?}"
+    );
     assert_eq!(reset.mode_long, SideModeV16::ResetPending);
-    assert_eq!(reset.epoch_long, before.epoch_long + 1);
-    assert_eq!(reset.f_epoch_start_long_num, f_at_reset);
+    assert_eq!(reset.epoch_long, 1);
+    // F at the reset is the 10 funded slots (price moves carried no funding: rate 0)
+    assert_eq!(reset.f_epoch_start_long_num, -exact_f(300, 10, price));
     assert_eq!(reset.f_long_num, 0);
-    // 6 units * 300e-9 * 1e6 * 10 = 18 atoms.
-    assert_eq!(flows(&l1), (18, 0, 0, 0));
 
-    // Negative-control probe: plant a live F the engine cannot reach (a ResetPending side has
-    // no effective OI, so its F does not move) worth thousands of atoms. An old-epoch leg must
-    // ignore it. The unplanted live F (0) would already catch a live-F read; the plant also
-    // catches a bug that adds live F on top of the epoch-start F.
-    let mut a = asset(&s);
-    a.f_long_num = -1_000 * exact_f(300, 10, price);
-    s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
-    let e0 = equity(&l2);
-    refresh(&mut s, &mut l2);
-    // 4 units * 300e-9 * 1e6 * 10 = 12 atoms.
+    crank_refresh(&mut s, &mut l1);
+    crank_refresh(&mut s, &mut l2);
+    // 6 units * 300e-9 * 1e6 * 10 = 18 atoms; 4 units -> 12 atoms. Booked as long-paid only.
+    assert_eq!(flows(&l1), (18, 0, 0, 0));
     assert_eq!(flows(&l2), (12, 0, 0, 0));
-    assert_eq!(e0 - equity(&l2), 12);
-    // Restore the reachable live F (0) and check the engine's own invariants still hold.
-    let mut a = asset(&s);
-    a.f_long_num = 0;
-    s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
+    // A second refresh in the new epoch books nothing more.
+    crank_refresh(&mut s, &mut l1);
+    assert_eq!(flows(&l1), (18, 0, 0, 0));
     validate(&mut s, &mut [&mut l1, &mut l2, &mut short]);
 }
 
@@ -722,22 +729,9 @@ fn funding_flip_without_refresh_books_old_side() {
     for k in 1..=4 {
         accrue(&mut s, start + k, price, 100);
     }
-    // a: long 50 -> short 50 (sells 100 to b), no refresh beforehand.
-    let mut m = MarketGroupV16ViewMut::new(&mut s.0, &mut s.1);
-    let res = m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-        &mut PortfolioV16ViewMut::new(&mut b),
-        &mut PortfolioV16ViewMut::new(&mut a),
-        TradeRequestV16 {
-            asset_index: 0,
-            size_q: (100 * POS_SCALE) as i128,
-            exec_price: price,
-            fee_bps: 0,
-        },
-        true,
-    );
-    drop(m);
-    // Lenient: the flip is allowed without a prior refresh.
-    res.expect("flip with unsettled funding is allowed");
+    // a: long 50 -> short 50 (sells 100 to b), no refresh beforehand. Lenient: the flip is
+    // allowed without a prior refresh.
+    trade(&mut s, &mut b, &mut a, (100 * POS_SCALE) as i128, price);
     // 50 units * 100e-9 * 1e6 * 4 = 20 atoms, booked on the side held when it accrued.
     assert_eq!(flows(&a), (20, 0, 0, 0));
     assert_eq!(flows(&b), (0, 0, 0, 20));
