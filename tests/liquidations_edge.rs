@@ -497,8 +497,7 @@ fn liq_edge_repeated_partial_closes_on_a_falling_price() {
 /// That term is upstream spec section 7 (aeyakovenko/percolator master: `portfolio_maintenance_req
 /// = gross_mm + target_effective_lag_penalty`) and upstream's engine; this repo's older spec.md
 /// section 7 does not list it yet. The engine's partial close sizes against the penalised
-/// requirement,
-/// so the account is healthy against it afterwards, and the close is still minimal.
+/// requirement, so the account is healthy against it afterwards, and the close is still minimal.
 #[test]
 fn liq_edge_partial_close_accounts_for_target_lag_penalty() {
     let c = Cfg::default();
@@ -567,7 +566,8 @@ fn liq_edge_zero_fee_partial_close() {
         "no value moved by a zero-fee close"
     );
     assert_eq!(post.certified_liq_deficit, 0);
-    // the 8_000 loss is settled from principal: 15_000 - 8_000, nothing else taken
+    // current engine timing: the 8_000 loss is settled from principal by the liquidation's
+    // refresh (15_000 - 8_000); nothing else is taken
     assert_eq!(w.tgt.capital.get(), 7_000);
     assert_eq!(w.tgt.pnl.get(), 0);
     w.assert_sound();
@@ -697,9 +697,10 @@ fn liq_edge_full_insurance_cover_hlock_waits_only_for_winner_claim() {
     );
     let hlock = w.header.bankruptcy_hlock_active;
     assert_ne!(hlock, 0, "the bankruptcy is recorded");
-    assert_ne!(
-        hlock, 1,
-        "attributed to a domain, not the global (unattributed) lock"
+    assert_eq!(
+        percolator::bankruptcy_hlock_domain_mask(hlock),
+        1 << 0,
+        "attributed to domain 0 (asset 0, Long: the winners' claim source), not unattributed"
     );
     assert!(w.cp.pnl.get() > 0, "the winner still holds its claim");
     let cleared = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets)
@@ -1116,8 +1117,8 @@ fn liq_edge_cross_margin_bankrupt_two_legs_resolves_without_recovery() {
                 "order {order:?}: closing leg {pick} touched the other asset's loss indices"
             );
             if pick == 0 {
-                // the residual lands on asset 0's SHORT (winners) B; closing the only long then
-                // resets that side, so the booked B survives as the short side's epoch start
+                // the residual lands on asset 0's SHORT (winners) B; closing the only long drains
+                // both sides, which reset, so the booked B survives as `b_epoch_start_short_num`
                 let after = loss_of(&w, 0);
                 assert_eq!(own_before.1, (0, 0));
                 assert_eq!(after.1 .0, 0, "order {order:?}: asset 0 long B untouched");
