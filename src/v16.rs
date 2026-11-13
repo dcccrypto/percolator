@@ -6311,7 +6311,47 @@ impl<'a> PortfolioV16ViewMut<'a> {
         false
     }
 
+    /// Read-only: true when `compact_source_domains` would leave every byte unchanged, i.e. the
+    /// occupied slots form a contiguous prefix with no descending domain pair and every slot
+    /// after them is already `PortfolioSourceDomainV16Account::default()` (all-zero:
+    /// `is_sparse_tail_default` covers every field). In that state the compaction loop below
+    /// only ever writes a value equal to the one already there (`write == read` throughout,
+    /// default over default, no sort), so skipping it is behaviour-identical. Scans by
+    /// reference, without the per-slot by-value copies of the compaction loop (v22-cu-1113).
+    fn source_domains_already_compact(&self) -> bool {
+        let mut slot = 0usize;
+        let mut previous_domain: Option<u32> = None;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = &self.header.source_domains[slot];
+            if !source.is_occupied() {
+                break;
+            }
+            let domain = source.domain.get();
+            if previous_domain.is_some_and(|previous| previous > domain) {
+                return false;
+            }
+            previous_domain = Some(domain);
+            slot += 1;
+        }
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            if !self.header.source_domains[slot].is_sparse_tail_default() {
+                return false;
+            }
+            slot += 1;
+        }
+        true
+    }
+
     fn compact_source_domains(&mut self) {
+        // Kani verifies the full compaction unchanged; the skip is a BPF/host CU saving.
+        #[cfg(not(kani))]
+        if self.source_domains_already_compact() {
+            return;
+        }
+        self.compact_source_domains_full();
+    }
+
+    fn compact_source_domains_full(&mut self) {
         let mut write = 0usize;
         let mut read = 0usize;
         let mut ordered = true;
@@ -30784,5 +30824,121 @@ mod rent_not_kf_cohort_tests {
                 "an older K/F epoch is not current"
             );
         }
+    }
+}
+
+#[cfg(all(test, not(kani)))]
+mod compact_source_domains_fast_path_tests {
+    use super::*;
+
+    struct XorShift(u64);
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// Byte layout: domain 0..4, source_claim_market_id 4..12, the "occupied" fields after.
+    const TAG_BYTES: usize = 12;
+
+    fn occupied_slot(r: &mut XorShift, domain: u32) -> PortfolioSourceDomainV16Account {
+        let mut s = PortfolioSourceDomainV16Account::default();
+        let b = bytemuck::bytes_of_mut(&mut s);
+        b[..4].copy_from_slice(&domain.to_le_bytes());
+        if r.below(2) == 0 {
+            b[4 + r.below(8) as usize] = (r.next() as u8) | 1;
+        }
+        let len = b.len();
+        for _ in 0..=r.below(3) {
+            let at = TAG_BYTES + r.below((len - TAG_BYTES) as u64) as usize;
+            b[at] = (r.next() as u8) | 1;
+        }
+        s
+    }
+
+    /// Unoccupied but not default: a reserved sparse tag (domain / market id set).
+    fn tagged_empty_slot(r: &mut XorShift) -> PortfolioSourceDomainV16Account {
+        let mut s = PortfolioSourceDomainV16Account::default();
+        let b = bytemuck::bytes_of_mut(&mut s);
+        b[r.below(TAG_BYTES as u64) as usize] = (r.next() as u8) | 1;
+        s
+    }
+
+    fn random_table(r: &mut XorShift) -> [PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP] {
+        let mut t = [PortfolioSourceDomainV16Account::default(); PORTFOLIO_SOURCE_DOMAIN_CAP];
+        let n = r.below(PORTFOLIO_SOURCE_DOMAIN_CAP as u64 + 1) as usize;
+        if r.below(2) == 0 {
+            // Canonical shape (the common on-chain state), nondecreasing domains incl. ties.
+            let mut d = r.below(4) as u32;
+            for slot in t.iter_mut().take(n) {
+                *slot = occupied_slot(r, d);
+                d += r.below(3) as u32;
+            }
+            // Optionally perturb it one way.
+            match r.below(6) {
+                0 if n >= 2 => t.swap(0, n - 1),
+                1 if n < PORTFOLIO_SOURCE_DOMAIN_CAP => {
+                    let at = n + r.below((PORTFOLIO_SOURCE_DOMAIN_CAP - n) as u64) as usize;
+                    t[at] = tagged_empty_slot(r);
+                }
+                2 if n < PORTFOLIO_SOURCE_DOMAIN_CAP && n > 0 => {
+                    let at = r.below(n as u64) as usize;
+                    t[at] = PortfolioSourceDomainV16Account::default();
+                }
+                3 if n < PORTFOLIO_SOURCE_DOMAIN_CAP => {
+                    let at = n + r.below((PORTFOLIO_SOURCE_DOMAIN_CAP - n) as u64) as usize;
+                    let d = r.below(64) as u32;
+                    t[at] = occupied_slot(r, d);
+                }
+                _ => {}
+            }
+        } else {
+            for slot in t.iter_mut() {
+                *slot = match r.below(4) {
+                    0 => PortfolioSourceDomainV16Account::default(),
+                    1 => tagged_empty_slot(r),
+                    _ => {
+                        let d = r.below(64) as u32;
+                        occupied_slot(r, d)
+                    }
+                };
+            }
+        }
+        t
+    }
+
+    /// The fast path (skip when already compact) leaves exactly the bytes the full compaction
+    /// produces, on canonical, perturbed and arbitrary tables.
+    #[test]
+    fn compact_fast_path_equals_full_compaction() {
+        let mut r = XorShift(0x9E37_79B9_7F4A_7C15);
+        let mut skipped = 0u32;
+        let mut ran = 0u32;
+        for _ in 0..200_000 {
+            let table = random_table(&mut r);
+            let mut a: PortfolioAccountV16Account = bytemuck::Zeroable::zeroed();
+            a.source_domains = table;
+            let mut b = a;
+            let mut va = PortfolioV16ViewMut { header: &mut a };
+            if va.source_domains_already_compact() {
+                skipped += 1;
+            } else {
+                ran += 1;
+            }
+            va.compact_source_domains();
+            let mut vb = PortfolioV16ViewMut { header: &mut b };
+            vb.compact_source_domains_full();
+            assert!(a == b, "fast path diverged from full compaction");
+            // Idempotence: after a full compaction the fast path always applies.
+            let vb = PortfolioV16ViewMut { header: &mut b };
+            assert!(vb.source_domains_already_compact());
+        }
+        assert!(skipped > 30_000 && ran > 100_000, "skipped {skipped} ran {ran}");
     }
 }
