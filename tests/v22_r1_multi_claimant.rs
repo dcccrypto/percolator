@@ -554,11 +554,20 @@ fn mixed_liened_and_rich_flippers_ratchets() {
     assert_eq!(worlds, 173);
     assert_eq!(gains, 0);
     // pre-R1 engine: sum of per-account worst -14,995,914, total spread 4,160,314 (all 173 worlds
-    // order dependent, as they still are here: a liened domain stays order dependent)
-    assert!(sum_worst >= -11_300_000, "per-account worst orders regressed: {sum_worst}");
-    assert!(spread <= 1_750_000, "order spread regressed: {spread}");
-    // the rich UNliened flipper in the locked domain: pre-R1 worst 8,599,318 summed; priced on the
-    // domain's lien state it ends at 10.77M; priced on its own (empty) entry it would get the
-    // neutral windfall (11.31M). Pin the domain-level value.
-    assert!((8_599_318..=10_800_000).contains(&rich_worst), "rich flipper priced outside the protective branch: {rich_worst}");
+    // order dependent). R1 at 91911d5b: -11,221,444 / 1,690,883 (the stored rate still
+    // understated unliened claims while a lien sat in the domain).
+    // Upstream #250 (+ 7b32eef2): a lien's face leaves the rate denominator, so nothing is
+    // burned. Every world is exactly zero-sum and order independent, and every account is at or
+    // above its 91911d5b worst order in all 173 worlds (losing shorts lose less, longs gain more).
+    assert_eq!(sum_worst, 0, "per-account worst orders regressed: {sum_worst}");
+    assert_eq!(spread, 0, "order spread regressed: {spread}");
+    // The rich UNliened flipper in the locked domain: pre-R1 worst 8,599,318 summed, R1 10.77M on
+    // the domain's protective branch (10,773,008 at 91911d5b; 11.31M neutral). With #250 it is
+    // 15,427,446: its full mark-to-market, not a windfall, since every world is zero-sum and its
+    // counterparties are above their old worst (the extra is face that is no longer burned).
+    // NOTE: these worlds no longer tell the S8 branches apart. Choosing the branch on the
+    // account's own entry gives the same numbers, because valid-lien face is out of the stored
+    // rate's denominator. The branches still differ for impaired face, which this fixture has none of.
+    assert!(rich_worst >= 8_599_318, "rich flipper below the pre-R1 worst: {rich_worst}");
+    assert_eq!(rich_worst, 15_427_446, "rich flipper pricing moved: {rich_worst}");
 }
