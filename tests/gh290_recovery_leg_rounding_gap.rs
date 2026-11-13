@@ -8,13 +8,14 @@
 //! stored leg when the leg is detached (detach clamps the OI subtraction to the aggregate).
 //!
 //! The mirror direction (side OI exceeds its legs) is aeyakovenko/percolator#238 and is
-//! deliberately untouched: `controls_*` pin that the clamp never fires there.
+//! deliberately untouched: `controls_oi_exceeding_the_leg_is_not_touched` pins that the clamp
+//! never fires there. Upstream #132 later widened the Recovery forfeit clamp to min(leg, side).
 
 use percolator::{
     AssetLifecycleV16, AssetStateV16, EngineAssetSlotV16Account, Market,
     MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
-    V16Config, V16Error,
+    V16Config,
 };
 use percolator::ADL_ONE;
 
@@ -157,17 +158,45 @@ fn forfeit_then_withdraw_succeed_on_a_one_atom_gap() {
     assert_eq!(asset.loss_weight_sum_long, 0);
 }
 
-/// Control: a gap larger than the side's leg count is NOT absorbed (fail loud, not silent).
+/// Control, re-pinned for upstream #132: Recovery forfeit now removes min(leg, side), so a
+/// gap wider than the leg count (6 atoms on one leg; GH#290 alone failed it CounterUnderflow)
+/// is absorbed instead. The leg owns no more OI than the side has left, so nothing is
+/// stranded: the side's OI, leg count and weight reach 0 together, the forfeit books no
+/// value, and the owner's capital is unchanged until withdrawn.
 #[test]
-fn controls_a_gap_wider_than_the_leg_count_still_fails_closed() {
+fn controls_a_gap_wider_than_the_leg_count_is_absorbed_by_min_leg_side() {
     let mut w = world(OI_EFF_LONG - 5);
     forfeit_short(&mut w);
+    assert_eq!(w.asset().oi_eff_long_q, OI_EFF_LONG - 5, "6-atom ceil-over-floor gap");
+    let capital_before = w.long.capital.get();
     let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
     let mut long = PortfolioV16ViewMut::new(&mut w.long);
-    let err = m
+    let outcome = m
         .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
-        .err();
-    assert_eq!(err, Some(V16Error::CounterUnderflow));
+        .expect("#132: min(leg, side) absorbs the gap instead of CounterUnderflow");
+    assert!(outcome.detached, "{outcome:?}");
+    assert_eq!(
+        (
+            outcome.positive_pnl_forfeited,
+            outcome.loss_settled,
+            outcome.support_consumed,
+            outcome.junior_face_burned,
+            outcome.principal_used,
+            outcome.insurance_used,
+            outcome.residual_booked,
+            outcome.explicit_loss,
+        ),
+        (0, 0, 0, 0, 0, 0, 0, 0),
+        "absorbing the OI gap moves no value"
+    );
+    m.validate_shape().unwrap();
+    drop(long);
+    drop(m);
+    let asset = w.asset();
+    assert_eq!(asset.oi_eff_long_q, 0, "no orphan OI left on the side");
+    assert_eq!(asset.stored_pos_count_long, 0);
+    assert_eq!(asset.loss_weight_sum_long, 0);
+    assert_eq!(w.long.capital.get(), capital_before, "capital untouched by the forfeit");
 }
 
 /// Control (upstream #238 direction): aggregate >= leg => nothing is clamped, the exact
@@ -186,3 +215,4 @@ fn controls_oi_exceeding_the_leg_is_not_touched() {
     assert_eq!(w.asset().oi_eff_long_q, before - (OI_EFF_LONG + 1));
     assert_eq!(w.asset().oi_eff_long_q, 999);
 }
+
