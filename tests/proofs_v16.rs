@@ -18,6 +18,7 @@ use percolator::v16::{
     kani_insert_account_kf_settlement_plan_entry, kani_kernel_accumulate_batch_trade,
     kani_kernel_advance_close_ledger, kani_kernel_advance_leg_b_snap,
     kani_kernel_initial_margin_gate, kani_kernel_locked_margin_gate,
+    kani_kernel_principal_cure_close_ledger,
     kani_kernel_settle_close_ledger_principal, kani_kernel_settle_principal,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
@@ -20367,4 +20368,86 @@ fn closure_expired_counterparty_lien_cannot_remain_favorable_account_credit() {
         "mixed lien retains only independently valid insurance support"
     );
     assert_eq!(support, insurance_atoms);
+}
+
+/// Upstream #204 (re-derived from aeyakovenko/percolator e918e954, upstream
+/// `src/v16_proofs.rs::proof_principal_cure_preserves_close_ledger_partition`; moved here
+/// because the fork keeps its proofs out of crate). A cure keeps the close ledger's partition
+/// identity, reduces gross loss and residual by exactly `min(paid, residual, gross)`, releases
+/// the domain barrier exactly when the residual reaches zero, and leaves every other field
+/// unchanged. Adapted: no `contracts` feature in the fork; `has_irreversible_progress` is
+/// private, so it is spelled out; covers added so a vacuous run is detectable.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_principal_cure_preserves_close_ledger_partition() {
+    let mut before = CloseProgressLedgerV16::EMPTY;
+    before.active = true;
+    before.close_id = kani::any();
+    before.asset_index = kani::any();
+    before.market_id = kani::any();
+    before.drift_reference_slot = kani::any();
+    before.max_close_slot = kani::any();
+    before.support_consumed = kani::any::<u64>() as u128;
+    before.junior_face_burned = kani::any::<u64>() as u128;
+    before.insurance_spent = kani::any::<u64>() as u128;
+    before.b_loss_booked = kani::any::<u64>() as u128;
+    before.explicit_loss_assigned = kani::any::<u64>() as u128;
+    before.quantity_adl_applied_q = kani::any::<u64>() as u128;
+    before.drift_consumed = kani::any::<u64>() as u128;
+    before.gross_loss_at_close_start = kani::any::<u64>() as u128;
+    let progress = before.support_consumed
+        + before.insurance_spent
+        + before.b_loss_booked
+        + before.explicit_loss_assigned;
+    let total = before.gross_loss_at_close_start + before.drift_consumed;
+    kani::assume(progress < total);
+    before.residual_remaining = total - progress;
+    let paid = kani::any::<u64>() as u128;
+
+    let (after, released) = kani_kernel_principal_cure_close_ledger(before, paid).unwrap();
+    let cure = paid
+        .min(before.residual_remaining)
+        .min(before.gross_loss_at_close_start);
+    let irreversible = before.support_consumed != 0
+        || before.junior_face_burned != 0
+        || before.insurance_spent != 0
+        || before.b_loss_booked != 0
+        || before.explicit_loss_assigned != 0
+        || before.quantity_adl_applied_q != 0
+        || before.drift_consumed != 0;
+
+    assert_eq!(after.residual_remaining, before.residual_remaining - cure);
+    assert_eq!(
+        after.gross_loss_at_close_start,
+        before.gross_loss_at_close_start - cure
+    );
+    assert_eq!(
+        after.residual_remaining,
+        after.gross_loss_at_close_start + after.drift_consumed - progress
+    );
+    assert_eq!(released, cure != 0 && after.residual_remaining == 0);
+    kani::cover!(released && irreversible, "cure finalizes a close with progress");
+    kani::cover!(released && !irreversible, "cure cancels a close with no progress");
+    kani::cover!(!released && cure != 0, "partial cure keeps the close pending");
+    if released {
+        if irreversible {
+            assert!(after.active && after.finalized && !after.canceled);
+        } else {
+            assert!(!after.active && !after.finalized && after.canceled);
+            // Canceled ledgers must carry no progress and residual == gross (both zero here).
+            assert_eq!(after.residual_remaining, after.gross_loss_at_close_start);
+        }
+    } else {
+        assert_eq!(
+            (after.active, after.finalized, after.canceled),
+            (before.active, before.finalized, before.canceled)
+        );
+    }
+    let mut after_masked = after;
+    after_masked.residual_remaining = before.residual_remaining;
+    after_masked.gross_loss_at_close_start = before.gross_loss_at_close_start;
+    after_masked.active = before.active;
+    after_masked.finalized = before.finalized;
+    after_masked.canceled = before.canceled;
+    assert_eq!(after_masked, before);
 }

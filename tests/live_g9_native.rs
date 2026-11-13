@@ -495,7 +495,10 @@ fn g9_r1_control_without_barrier_the_crank_liquidates() {
     assert!(cert(&t).certified_liq_deficit != 0);
     let before = abs_basis_total(&t);
     let r = auto_crank(&mut h, &mut m, &mut t).expect("crank liquidates");
-    assert!(matches!(r.selected, AutoCrankPlanV16::Liquidate { asset_index: 0 }));
+    // Upstream #176 (a5e0de73), merged into F-LIVE-1's selector: with no barrier both legs are
+    // unblocked, so the crank picks the higher ADL-effective notional, not slot 0. Asset 1
+    // (2 units after 5 x -4.9%, ~1.56 x P0) outweighs asset 0 (1 unit after 4 x +4.9%, ~1.21 x P0).
+    assert!(matches!(r.selected, AutoCrankPlanV16::Liquidate { asset_index: 1 }));
     assert!(abs_basis_total(&t) < before);
 }
 
@@ -666,10 +669,12 @@ fn leg_basis_for_asset(a: &PortfolioAccountV16Account, asset: u32) -> i128 {
 }
 
 /// R2 (F-LIVE-1, mirrored side, three legs): on 1c96c22f the crank selects asset 0 and returns
-/// LockActive; with the fix it liquidates asset 1 (the first leg the kernel accepts), leaves the
-/// barrier leg and the barrier untouched, and repeated cranks keep making progress.
+/// LockActive; with F-LIVE-1 it liquidates an unblocked leg, leaves the barrier leg and the
+/// barrier untouched, and repeated cranks keep making progress. Since the upstream #176 merge
+/// (a5e0de73) the unblocked leg chosen is the riskiest one: asset 2 (2 units) over asset 1
+/// (1 unit, same price), no longer the first unblocked slot.
 #[test]
-fn g9_livefix_r2_short_barrier_three_legs_crank_liquidates_the_first_unblocked_leg() {
+fn g9_livefix_r2_short_barrier_three_legs_crank_liquidates_the_riskiest_unblocked_leg() {
     let mut w = r2_world();
     let c0 = cert(&w.t);
     eprintln!("R2 cert: equity={} mm={} deficit={}", c0.certified_equity, c0.certified_maintenance_req, c0.certified_liq_deficit);
@@ -689,17 +694,17 @@ fn g9_livefix_r2_short_barrier_three_legs_crank_liquidates_the_first_unblocked_l
         );
     }
     let basis0 = leg_basis_for_asset(&w.t, 0);
-    let basis1 = leg_basis_for_asset(&w.t, 1);
+    let basis2 = leg_basis_for_asset(&w.t, 2);
     let vault_before = w.h.vault.get();
     let r = auto_crank(&mut w.h, &mut w.m, &mut w.t);
     eprintln!("R2 auto-crank: {r:?}");
     assert!(
-        matches!(r, Ok(ref x) if x.selected == AutoCrankPlanV16::Liquidate { asset_index: 1 }
+        matches!(r, Ok(ref x) if x.selected == AutoCrankPlanV16::Liquidate { asset_index: 2 }
             && matches!(x.outcome, AutoCrankOutcomeV16::Progressed(_))),
-        "public crank must liquidate the first unblocked leg: {r:?}"
+        "public crank must liquidate the riskiest unblocked leg: {r:?}"
     );
     assert_eq!(leg_basis_for_asset(&w.t, 0), basis0, "the barrier leg is not touched");
-    assert!(leg_basis_for_asset(&w.t, 1).unsigned_abs() < basis1.unsigned_abs(), "asset-1 leg reduced");
+    assert!(leg_basis_for_asset(&w.t, 2).unsigned_abs() < basis2.unsigned_abs(), "asset-2 leg reduced");
     assert_eq!(w.m[0].engine.pending_domain_loss_barrier_short.get(), 1, "the barrier stays up");
     assert_eq!(w.h.vault.get(), vault_before, "no external value moves (fee 0)");
     // keep cranking (keeper loop) until T is healthy or only the barrier leg is left
@@ -721,10 +726,12 @@ fn g9_livefix_r2_short_barrier_three_legs_crank_liquidates_the_first_unblocked_l
     let _ = &w.l2;
 }
 
-/// R2 control: the same world without L2's bankruptcy (no barrier): selection is unchanged
-/// (slot 0, asset 0), exactly as on 1c96c22f.
+/// R2 control: the same world without L2's bankruptcy (no barrier). On 1c96c22f and under
+/// F-LIVE-1 alone this selected slot 0 (asset 0). Since the upstream #176 merge (a5e0de73)
+/// every leg is unblocked, so the riskiest leg is selected: asset 2 (2 units at ~0.78 x P0)
+/// over asset 0 (1 unit at ~0.82 x P0) and asset 1 (1 unit at ~0.78 x P0).
 #[test]
-fn g9_livefix_r2_control_without_barrier_selection_is_unchanged() {
+fn g9_livefix_r2_control_without_barrier_selects_the_riskiest_leg() {
     let c = Cfg { n: 3, fee_bps: 0, min_liq_abs: 0, lifetime: 1_000 };
     let (mut h, mut m) = market(c).expect("config");
     let mut t = account(20);
@@ -749,7 +756,7 @@ fn g9_livefix_r2_control_without_barrier_selection_is_unchanged() {
     refresh(&mut h, &mut m, &mut t, 0).unwrap();
     assert!(cert(&t).certified_liq_deficit != 0);
     let r = auto_crank(&mut h, &mut m, &mut t).expect("crank liquidates");
-    assert_eq!(r.selected, AutoCrankPlanV16::Liquidate { asset_index: 0 }, "first liquidatable leg, as before");
+    assert_eq!(r.selected, AutoCrankPlanV16::Liquidate { asset_index: 2 }, "riskiest liquidatable leg (#176)");
 }
 
 /// R3 fallback: when EVERY liquidatable leg is behind a barrier the selector falls back to the

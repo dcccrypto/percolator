@@ -92,6 +92,13 @@ fn f02_second_chunk_books_fresh_residual_not_stale_ledger() {
 
     // CHUNK 1 — opens the close ledger capturing residual = OPENING_RESIDUAL and books one
     // capped chunk, leaving the ledger open with a large residual_remaining.
+    //
+    // The account must actually OWE the opening residual: since upstream #204's
+    // `clamp_close_residual_to_account_loss` runs in this booking core, a ledger larger than
+    // the account's own loss is cured down to that loss before anything is booked (here
+    // pnl would otherwise be 0 and the whole close would cure to nothing). Same raw pnl
+    // write this test already uses for the mid-close settlement below.
+    taker.pnl = V16PodI128::new(-(OPENING_RESIDUAL as i128));
     {
         let mut t = PortfolioV16ViewMut::new(&mut taker);
         let (booked1, explicit1) = m

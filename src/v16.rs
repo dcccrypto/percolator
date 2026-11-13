@@ -1657,6 +1657,54 @@ impl V16Core {
         Ok(ledger)
     }
 
+    /// PRODUCTION KERNEL (upstream #204, re-derived from aeyakovenko/percolator e918e954):
+    /// credit the closing account cures by itself lowers its close ledger's gross loss and
+    /// remaining residual by the same amount, preserving
+    /// `residual = gross + drift - progress`. When the residual reaches zero the domain
+    /// barrier is released: with booked progress the close finalizes; with none it is cured
+    /// exactly as CureAndCancelClose would leave it. Returns the ledger and whether the
+    /// barrier is released.
+    ///
+    /// Fork note: the principal half of this cure already runs at payment time through
+    /// `kernel_settle_close_ledger_principal` (F-02, ledger half). This kernel is the
+    /// general clamp keyed off `account.pnl`, so it also covers credit that does NOT arrive
+    /// through principal settlement. When F-02 already brought the residual down to the
+    /// debt still owed, the clamp is a no-op.
+    pub(crate) fn kernel_principal_cure_close_ledger(
+        mut ledger: CloseProgressLedgerV16,
+        paid: u128,
+    ) -> V16Result<(CloseProgressLedgerV16, bool)> {
+        if paid == 0 || !ledger.has_pending_residual() {
+            return Ok((ledger, false));
+        }
+        // A cure never exceeds the gross loss it pays down (drift is never funded today, but
+        // residual may exceed gross by drift, which principal does not cure).
+        let cure = paid
+            .min(ledger.residual_remaining)
+            .min(ledger.gross_loss_at_close_start);
+        if cure == 0 {
+            return Ok((ledger, false));
+        }
+        ledger.gross_loss_at_close_start = ledger
+            .gross_loss_at_close_start
+            .checked_sub(cure)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        ledger.residual_remaining = ledger
+            .residual_remaining
+            .checked_sub(cure)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if ledger.residual_remaining != 0 {
+            return Ok((ledger, false));
+        }
+        if ledger.has_irreversible_progress() {
+            ledger.finalized = true;
+        } else {
+            ledger.active = false;
+            ledger.canceled = true;
+        }
+        Ok((ledger, true))
+    }
+
     /// PRODUCTION KERNEL: the attach-leg core — snapshot the side's basis
     /// anchors, gate the a-basis range, add open interest, and construct the
     /// new leg. Pure on (AssetStateV16, scalars); the attach glue calls
@@ -2895,24 +2943,44 @@ impl V16Core {
         None
     }
 
-    /// PRODUCTION KERNEL (F-LIVE-1, v22live): the auto-crank's liquidation leg. The FIRST
-    /// liquidatable leg that is not behind a pending domain-loss barrier on its own side, else
-    /// the FIRST liquidatable leg (whose liquidation the kernel then refuses with `LockActive`,
-    /// exactly as before). `unblocked` is masked by `liquidatable` here, so the kernel is total
-    /// and the result is `Some` iff some leg is liquidatable: the summary's `has_open_risk` and
-    /// the plan priority are unchanged, and an account with no barrier leg gets the same slot as
-    /// before. Deterministic, O(legs). Proof: tests/proofs_v22_livefix.rs.
+    /// PRODUCTION KERNEL (F-LIVE-1, v22live + upstream #176): the auto-crank's liquidation
+    /// leg. In priority order:
+    /// 1. among liquidatable legs that are not behind a pending domain-loss barrier on their
+    ///    own side AND that the liquidation can actually reduce (`risk[slot]` is `Some`: non-zero
+    ///    position and non-zero unilateral close capacity), the one with the HIGHEST risk
+    ///    (ADL-effective notional); exactly equal risk keeps the FIRST slot (upstream #176,
+    ///    re-derived from aeyakovenko/percolator a5e0de73: liquidation order must not depend on
+    ///    physical slot order, which a BatchTradeCpi taker controls for an unsigned LP);
+    /// 2. else the FIRST liquidatable unblocked leg (F-LIVE-1);
+    /// 3. else the FIRST liquidatable leg (whose liquidation the kernel then refuses with
+    ///    `LockActive`, exactly as before).
+    ///
+    /// `unblocked`/`risk` are masked by `liquidatable` here, so the kernel is total and the
+    /// result is `Some` iff some leg is liquidatable: the summary's `has_open_risk` and the plan
+    /// priority are unchanged. Deterministic, O(legs). Proof: tests/proofs_v22_livefix.rs.
     pub(crate) fn kernel_auto_crank_liquidation_slot(
         unblocked: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
         liquidatable: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
+        risk: [Option<u128>; V16_MAX_PORTFOLIO_ASSETS_N],
     ) -> Option<usize> {
         let mut preferred = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut riskiest: Option<(u128, usize)> = None;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             preferred[slot] = unblocked[slot] && liquidatable[slot];
+            if preferred[slot] {
+                if let Some(r) = risk[slot] {
+                    if riskiest.is_none_or(|(best, _)| r > best) {
+                        riskiest = Some((r, slot));
+                    }
+                }
+            }
             slot += 1;
         }
-        Self::first_actionable_slot(preferred).or(Self::first_actionable_slot(liquidatable))
+        riskiest
+            .map(|(_, s)| s)
+            .or(Self::first_actionable_slot(preferred))
+            .or(Self::first_actionable_slot(liquidatable))
     }
 
 
@@ -4468,8 +4536,9 @@ pub fn kani_first_actionable_slot(flags: [bool; V16_MAX_PORTFOLIO_ASSETS_N]) -> 
 pub fn kani_auto_crank_liquidation_slot(
     unblocked: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
     liquidatable: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
+    risk: [Option<u128>; V16_MAX_PORTFOLIO_ASSETS_N],
 ) -> Option<usize> {
-    V16Core::kernel_auto_crank_liquidation_slot(unblocked, liquidatable)
+    V16Core::kernel_auto_crank_liquidation_slot(unblocked, liquidatable, risk)
 }
 
 #[cfg(kani)]
@@ -4536,6 +4605,16 @@ pub fn kani_kernel_settle_close_ledger_principal(
     principal_paid: u128,
 ) -> V16Result<CloseProgressLedgerV16> {
     V16Core::kernel_settle_close_ledger_principal(ledger, principal_paid)
+}
+
+/// Proof shim for the upstream #204 close-ledger cure kernel (`pub(crate)`), so the
+/// out-of-crate proof file can call it.
+#[cfg(kani)]
+pub fn kani_kernel_principal_cure_close_ledger(
+    ledger: CloseProgressLedgerV16,
+    paid: u128,
+) -> V16Result<(CloseProgressLedgerV16, bool)> {
+    V16Core::kernel_principal_cure_close_ledger(ledger, paid)
 }
 
 #[cfg(kani)]
@@ -12902,30 +12981,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             //
             // Proof: `closure_expired_counterparty_lien_cannot_remain_favorable_account_credit`
             // in `tests/proofs_v16.rs`, ported from `faa3bcf9`'s `src/v16_proofs.rs`.
-            let counterparty_backing_num = source.source_lien_counterparty_backing_num.get();
-            let current_counterparty_backing_num = if counterparty_backing_num == 0 {
-                0
-            } else {
-                let bucket = self.backing_bucket_for_domain(d)?;
-                if bucket.status == BackingBucketStatusV16::Fresh
-                    && bucket.expiry_slot > self.header.current_slot.get()
-                {
-                    counterparty_backing_num
-                } else {
-                    0
-                }
-            };
-            let valid_lien_effective_num = current_counterparty_backing_num
-                .checked_add(source.source_lien_insurance_backing_num.get())
-                .ok_or(V16Error::ArithmeticOverflow)?
-                .min(
-                    source
-                        .source_lien_effective_reserved
-                        .get()
-                        .checked_mul(BOUND_SCALE)
-                        .ok_or(V16Error::ArithmeticOverflow)?,
-                )
-                .min(remaining_num);
+            //
+            // The lane rebuild now lives in `source_lien_valid_support_num` (unchanged
+            // semantics), so the IM source-credit sizing (upstream #105 residual) applies
+            // exactly the same validity rule.
+            let valid_lien_effective_num =
+                self.source_lien_valid_support_num(&source, d)?.min(remaining_num);
             if valid_lien_effective_num != 0 {
                 support = support
                     .checked_add(valid_lien_effective_num / BOUND_SCALE)
@@ -13004,7 +13065,79 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
-    fn valid_source_lien_effective_reserved_sum(account: &PortfolioV16View<'_>) -> V16Result<u128> {
+    /// C-S-04 lane rebuild (upstream faa3bcf9), shared with the IM source-credit sizing
+    /// (upstream #105 residual, re-derived from aeyakovenko/percolator d2f363ab): the lien
+    /// reserve, in BOUND_SCALE units, that may still support this account. The counterparty
+    /// share counts only while its backing bucket is live-Fresh (`Fresh` and
+    /// `expiry_slot > current_slot`); an impaired or lapsed bucket's share is impaired by spec
+    /// and cannot support risk, even before a normalization transition moves it into the
+    /// account's impaired fields. The insurance share is unaffected by bucket expiry. The
+    /// `.min(effective * BOUND_SCALE)` is the defensive ceiling C-S-04 documents. An
+    /// insurance-only lien never touches the market (`counterparty == 0` short-circuit).
+    fn source_lien_valid_support_num(
+        &self,
+        source: &PortfolioSourceDomainV16Account,
+        domain: usize,
+    ) -> V16Result<u128> {
+        let counterparty_backing_num = source.source_lien_counterparty_backing_num.get();
+        let current_counterparty_backing_num = if counterparty_backing_num == 0 {
+            0
+        } else {
+            let bucket = self.backing_bucket_for_domain(domain)?;
+            if bucket.status == BackingBucketStatusV16::Fresh
+                && bucket.expiry_slot > self.header.current_slot.get()
+            {
+                counterparty_backing_num
+            } else {
+                0
+            }
+        };
+        Ok(current_counterparty_backing_num
+            .checked_add(source.source_lien_insurance_backing_num.get())
+            .ok_or(V16Error::ArithmeticOverflow)?
+            .min(
+                source
+                    .source_lien_effective_reserved
+                    .get()
+                    .checked_mul(BOUND_SCALE)
+                    .ok_or(V16Error::ArithmeticOverflow)?,
+            ))
+    }
+
+    /// Effective lien reserve (atoms) that may still support this account: every occupied
+    /// source domain's `source_lien_valid_support_num`, floored per domain exactly as the
+    /// health-cert support path floors it. Upstream #105 (d2f363ab): the IM source-credit
+    /// sizing used to sum the raw `source_lien_effective_reserved`, so an expired or impaired
+    /// counterparty lien still read as "covered" and new risk was admitted under-reserved.
+    fn valid_source_lien_effective_reserved_sum(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<u128> {
+        let mut sum = 0u128;
+        let mut d = 0usize;
+        while d < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[d];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() {
+                let support_num =
+                    self.source_lien_valid_support_num(&source, source.domain.get() as usize)?;
+                sum = sum
+                    .checked_add(support_num / BOUND_SCALE)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+            }
+            d += 1;
+        }
+        Ok(sum)
+    }
+
+    /// Raw recorded lien reserve, valid or not. Used only as a "does any lien remain"
+    /// test (lien release before PnL conversion, conversion refusal): an impaired lien
+    /// still has to be released, so these callers must NOT use the valid-support sum.
+    fn recorded_source_lien_effective_reserved_sum(
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<u128> {
         let mut sum = 0u128;
         let mut d = 0usize;
         while d < PORTFOLIO_SOURCE_DOMAIN_CAP {
@@ -13021,6 +13154,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn incremental_initial_margin_source_credit_needed(
+        &self,
         account: &PortfolioV16View<'_>,
         no_positive_equity: i128,
     ) -> V16Result<u128> {
@@ -13028,7 +13162,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !cert.valid {
             return Err(V16Error::Stale);
         }
-        let existing_lien = Self::valid_source_lien_effective_reserved_sum(account)?;
+        let existing_lien = self.valid_source_lien_effective_reserved_sum(account)?;
         if no_positive_equity >= 0 {
             let covered = (no_positive_equity as u128)
                 .checked_add(existing_lien)
@@ -14603,7 +14737,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 return Err(V16Error::Stale);
             }
             let no_positive = Self::account_no_positive_credit_equity(&account.as_view())?;
-            let required_credit = Self::incremental_initial_margin_source_credit_needed(
+            let required_credit = self.incremental_initial_margin_source_credit_needed(
                 &account.as_view(),
                 no_positive,
             )?;
@@ -18546,8 +18680,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// the FIRST active leg with pending B settlement (either a cached stale bit or
     /// a current B target above its snapshot), the FIRST accrual-dispatchable
     /// active leg (falling back to the FIRST Recovery leg for committed-state
-    /// refresh), and the FIRST live-reducible leg (liquidation), preferring one whose side has
-    /// no pending domain-loss barrier (`kernel_auto_crank_liquidation_slot`). A prior-epoch
+    /// refresh), and for liquidation the highest-risk reducible leg whose side has no
+    /// pending domain-loss barrier, else the first such leg, else the first live-reducible leg
+    /// (`kernel_auto_crank_liquidation_slot`, F-LIVE-1 + upstream #176). A prior-epoch
     /// ResetPending leg is still refreshable, but
     /// its effective OI was already removed by ADL; selecting it for liquidation
     /// would fail before a later current-epoch leg could make progress. Recovery
@@ -18578,6 +18713,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut refresh_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut liquidation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut liquidation_unblocked_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut liquidation_risk: [Option<u128>; V16_MAX_PORTFOLIO_ASSETS_N] =
+            [None; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut reset_obligation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut b_stale_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut recovery_refresh_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
@@ -18620,6 +18757,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 // kernel's own refusal are unchanged.
                 liquidation_unblocked_flags[slot] = liquidatable
                     && !self.has_pending_domain_loss_barrier(leg.asset_index as usize, leg.side)?;
+                // Upstream #176: the risk contribution (ADL-effective notional) of a leg this
+                // liquidation can actually reduce. A leg with no position or no unilateral close
+                // capacity does not compete (the crank would revert on it while a smaller leg
+                // could progress). Computed only for unblocked liquidatable legs. Fail-soft: this
+                // runs on EVERY classification (upstream computes it only for a Liquidate plan),
+                // so a leg whose effective quantity cannot be derived simply does not compete
+                // instead of turning classification into an error.
+                if liquidation_unblocked_flags[slot] && leg.basis_pos_q != 0 {
+                    if let Ok(effective_q) = V16Core::effective_abs_quantity_for_leg(asset, leg) {
+                        let capacity = V16Core::kernel_unilateral_close_capacity(
+                            effective_q,
+                            asset.oi_eff_long_q,
+                            asset.oi_eff_short_q,
+                        );
+                        if capacity != 0 {
+                            liquidation_risk[slot] =
+                                Some(effective_q.saturating_mul(u128::from(asset.effective_price)));
+                        }
+                    }
+                }
                 // A legacy Normal-mode leg whose effective OI is already exhausted
                 // is a reset obligation too, or it stays uncrankable after upgrade.
                 // (upstream 9ffc4749)
@@ -18660,6 +18817,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let liquidatable_asset = asset_of(V16Core::kernel_auto_crank_liquidation_slot(
             liquidation_unblocked_flags,
             liquidation_flags,
+            liquidation_risk,
         ))?;
         let reset_obligation_asset =
             asset_of(V16Core::first_actionable_slot(reset_obligation_flags))?;
@@ -19092,6 +19250,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     < self.header.config.max_market_slots.get() as usize
                     && Self::active_leg_slot_for_asset(&account.as_view(), request.asset_index)?
                         .is_some();
+                // Upstream #248 (re-derived from aeyakovenko/percolator 01883784): the mark
+                // must move BEFORE the refresh settles it, and the certificate must be
+                // stamped AFTER the epoch bump. The old order (refresh -> accrue) stamped
+                // `cert_oracle_epoch` from the PRE-accrue header epoch and the trailing
+                // accrual then incremented `header.oracle_epoch`, so the crank's own
+                // certificate was stale the moment the crank returned. The next
+                // classification requires `cert_current` for `liquidatable`, so in a market
+                // that keeps moving the `Liquidate` arm was unreachable.
+                self.accrue_asset_to_not_atomic(
+                    request.asset_index,
+                    request.now_slot,
+                    request.effective_price,
+                    request.funding_rate_e9,
+                    selected_leg_before,
+                )?;
                 match self.refresh_account_and_certify_not_atomic(
                     account,
                     Some((request.asset_index, request.effective_price)),
@@ -19122,7 +19295,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     self.validate_shape_audit_scan()?;
                     return Ok(PermissionlessProgressOutcomeV16::AccountCurrent);
                 }
-                selected_leg_before
+                // No trailing accrual: the mark already moved above, and a second accrual
+                // would invalidate the certificate again (upstream #248). The S10 retry
+                // that used to follow the trailing accrual still runs here, so the refresh
+                // crank keeps its unclaimed-backing move for an unpositioned asset; it only
+                // fires when the asset stores no position (so not for a leg this cert
+                // covers) and it does not touch the account's certificate.
+                self.s10_retry_for_unpositioned_asset(request.asset_index, &mut s10_budget)?;
+                return Ok(PermissionlessProgressOutcomeV16::AccountCurrent);
             }
             PermissionlessCrankActionV16::SettleB { asset_index } => {
                 let out = self.settle_account_b_chunk(
@@ -20906,6 +21086,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let empty_slot = lookup.empty_slot.ok_or(V16Error::InvalidLeg)?;
             return self.attach_leg_at_slot(account, asset_index, side, new, empty_slot);
         }
+        // A same-side resize rewrites `loss_weight`, so it can only run once the
+        // deferred B delta has been settled: while `B_remaining > 0` no
+        // user-favorable action may continue (spec §8). Clear and Flip enforce
+        // this inside `clear_leg_at_slot_inner`; Resize keeps its leg, so the gate
+        // has to live here. Without it a winner can shrink its weight after a
+        // residual booking and push its share of B onto the other winners.
+        if self.b_target_for_leg(asset_index, current_leg)? != current_leg.b_snap {
+            return Err(V16Error::Stale);
+        }
         let preserve_pending_obligation_weight =
             same_side_risk_reduction_or_flat_obligation(current_effective, new_effective)
                 && self.has_pending_domain_loss_barrier(asset_index, current_leg.side)?;
@@ -21162,6 +21351,49 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.set_pending_domain_loss_barrier_count(
                 asset_index,
                 domain_side,
+                count.checked_sub(1).ok_or(V16Error::CounterUnderflow)?,
+            )?;
+        }
+        account.header.close_progress = CloseProgressLedgerV16Account::from_runtime(&ledger);
+        account.header.health_cert.valid = 0;
+        Ok(())
+    }
+
+    /// Upstream #204 (re-derived from aeyakovenko/percolator e918e954): a close ledger must
+    /// never book more residual than the account still owes. Principal, backed gains, or any
+    /// other credit can lower the account's negative PnL after the close began; the
+    /// difference is cured by the account itself, so gross loss and residual drop by it
+    /// together (partition preserved) before anything is booked to the opposite side. A loss
+    /// booked on another leg after the close began raises |pnl| and so never reads as a
+    /// cure. When the residual reaches zero the domain barrier is released.
+    ///
+    /// Runs AFTER `credit_close_progress_principal_settlement` (F-02) on every path: for a
+    /// principal-only cure F-02 has already lowered the residual to the debt owed, so this
+    /// is a no-op there and nothing is cured twice.
+    fn clamp_close_residual_to_account_loss(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<()> {
+        let before = account.header.close_progress.try_to_runtime()?;
+        if !before.has_pending_residual() {
+            return Ok(());
+        }
+        let owed = account.header.pnl.get().min(0).unsigned_abs();
+        if before.residual_remaining <= owed {
+            return Ok(());
+        }
+        let excess = before.residual_remaining - owed;
+        let (ledger, barrier_released) =
+            V16Core::kernel_principal_cure_close_ledger(before, excess)?;
+        if ledger == before {
+            return Ok(());
+        }
+        if barrier_released {
+            let asset_index = ledger.asset_index as usize;
+            let count = self.pending_domain_loss_barrier_count(asset_index, ledger.domain_side)?;
+            self.set_pending_domain_loss_barrier_count(
+                asset_index,
+                ledger.domain_side,
                 count.checked_sub(1).ok_or(V16Error::CounterUnderflow)?,
             )?;
         }
@@ -21485,6 +21717,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if ledger.asset_index as usize != asset_index || ledger.domain_side != domain_side {
             return Err(V16Error::LockActive);
         }
+        // Upstream #204: cure any excess of the ledger over the debt still owed before
+        // booking anything to the opposite side.
+        self.clamp_close_residual_to_account_loss(account)?;
+        let ledger = account.header.close_progress.try_to_runtime()?;
+        if !ledger.has_pending_residual() {
+            return Ok(BResidualBookingOutcomeV16 {
+                booked_loss: 0,
+                explicit_loss: 0,
+                delta_b: 0,
+                remaining_after: 0,
+            });
+        }
         self.ensure_open_close_snapshot_current_or_recovery(&account.as_view(), ledger)?;
         let outcome = self.book_bankruptcy_residual_chunk_internal(
             asset_index,
@@ -21533,8 +21777,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if insurance_used != 0 {
             self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
         }
+        // Upstream #204: credit that reached the account without going through principal
+        // settlement cures the ledger here, so a cured close finalizes/cancels and releases
+        // its barrier instead of reporting NonProgress forever.
+        self.clamp_close_residual_to_account_loss(account)?;
 
-        let residual = if account.header.pnl.get() < 0 {
+        let residual = if account.header.pnl.get() < 0
+            && account
+                .header
+                .close_progress
+                .try_to_runtime()?
+                .has_pending_residual()
+        {
             account.header.pnl.get().unsigned_abs()
         } else {
             0
@@ -23844,7 +24098,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<()> {
         if account.header.pnl.get() >= 0 {
-            return Ok(());
+            // Upstream #204: a pending close whose loss was cured after it began books
+            // nothing more.
+            return self.clamp_close_residual_to_account_loss(account);
         }
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
@@ -24547,7 +24803,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     // Kani-only entry to the bare negative-PnL principal-settlement transition,
     // bypassing the O(N) loop-based shape validation so an inductive proof can
     // assume a decomposed loop-free invariant and apply just this transition.
-    #[cfg(kani)]
+    // Also built under `fuzz` so the #204 regression can drive a principal settlement
+    // in isolation (tests/v16_spec_tests.rs, fuzz-gated); absent from the wrapper build.
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn kani_settle_negative_pnl_from_principal_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -25026,7 +25284,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // Mirrors upstream av/codex/blocker-dos-flat-source-lien-convert-20260728
         // ("Release flat source liens before PnL conversion", 4d4f9ed8), minus the
         // contracts layer this fork does not carry.
-        if Self::valid_source_lien_effective_reserved_sum(&account.as_view())? != 0 {
+        if Self::recorded_source_lien_effective_reserved_sum(&account.as_view())? != 0 {
             self.release_account_source_credit_liens_if_unneeded_not_atomic(account)?;
         }
         self.preflight_convert_released_pnl_to_capital(&account.as_view())?;
@@ -25068,7 +25326,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if released == 0
             || !Self::account_has_source_claims(account)?
             || Self::account_has_source_liens(account)
-            || Self::valid_source_lien_effective_reserved_sum(account)? != 0
+            || Self::recorded_source_lien_effective_reserved_sum(account)? != 0
         {
             return Ok(0);
         }
