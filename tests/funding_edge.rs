@@ -2,14 +2,17 @@
 //!
 //! Spec §5.3 (spec.md:1093-1138): funding is active only when the rate is nonzero, BOTH sides
 //! carry effective OI, and `fund_px_last > 0`; it moves `F_long` down and `F_short` up by
-//! `A_side * fund_num_total / FUNDING_DEN` (payer rounded up, receiver rounded down when A is
-//! below ADL_ONE). Settlement realizes `basis * (F_now - F_snap) / (a_basis * POS_SCALE)` with
+//! `A_side * fund_num_total` (spec F units carry FUNDING_DEN; the engine stores
+//! `A_side * fund_num_total / FUNDING_DEN`, payer rounded up and receiver rounded down when A is
+//! below ADL_ONE, and the tests follow the engine's units). Settlement realizes `basis * (F_now - F_snap) / (a_basis * POS_SCALE)` with
 //! a persistent remainder, and `record_account_funding_flow` books the gross funding leg of
 //! every settlement into the account's per-side paid/received counters.
 //!
-//! Every test here drives the public engine API (accrue, trade, refresh). The one epoch test
-//! applies the engine's own full-drain step by hand, because no small public sequence drains a
-//! funded side to an epoch change.
+//! Tests drive the public engine API (accrue, trade, refresh). Direct state writes, each one
+//! named in its test: `try_accrue` sets `raw_oracle_target_price` to the accrued price after
+//! every accrual, playing the wrapper's role (the oracle target is wrapper state); the
+//! one-sided-OI, asymmetric-A, overflow and epoch tests set one or two asset fields to reach a
+//! state (ADL-shrunk A, exhausted OI, near-limit F) that no short public sequence produces.
 
 use percolator::{
     AssetStateV16Account, EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount,
@@ -184,22 +187,35 @@ fn funding_zero_rate_on_positioned_book_moves_nothing() {
     validate(&mut s, &mut [&mut long, &mut short]);
 }
 
-/// A one-sided book (effective OI on one side only) must not accrue funding: there is nobody
-/// to pay or receive. Spec: `funding_active` needs both OI_eff sides nonzero.
+/// A one-sided book (effective OI on one side only, as ADL can leave) must not accrue funding:
+/// there is nobody to pay or receive. Spec: `funding_active` needs BOTH OI_eff sides nonzero.
+/// With no price move it is not equity-active either, so it needs no protective progress.
 #[test]
 fn funding_one_sided_oi_does_not_accrue() {
-    let (mut s, _long, _short) = book(1_000_000, 10);
-    let mut a = asset(&s);
-    a.oi_eff_short_q = 0;
-    s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
-    for rate in [MAX_RATE as i128, -(MAX_RATE as i128)] {
-        let before = asset(&s);
-        let slot = before.slot_last + 5;
-        accrue(&mut s, slot, 1_000_000, rate);
-        let after = asset(&s);
-        assert_eq!(after.f_long_num, before.f_long_num, "rate {rate}");
-        assert_eq!(after.f_short_num, before.f_short_num, "rate {rate}");
-        assert_eq!(after.slot_last, slot);
+    for empty_side in [0, 1] {
+        let (mut s, _long, _short) = book(1_000_000, 10);
+        let mut a = asset(&s);
+        if empty_side == 0 {
+            a.oi_eff_long_q = 0;
+        } else {
+            a.oi_eff_short_q = 0;
+        }
+        s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
+        for rate in [MAX_RATE as i128, -(MAX_RATE as i128)] {
+            let before = asset(&s);
+            let slot = before.slot_last + 5;
+            try_accrue(&mut s, slot, 1_000_000, rate, false).unwrap();
+            let after = asset(&s);
+            assert_eq!(
+                after.f_long_num, before.f_long_num,
+                "side {empty_side} rate {rate}"
+            );
+            assert_eq!(
+                after.f_short_num, before.f_short_num,
+                "side {empty_side} rate {rate}"
+            );
+            assert_eq!(after.slot_last, slot);
+        }
     }
 }
 
@@ -291,6 +307,8 @@ fn funding_index_move_is_exact_and_opposite() {
 
 /// A gap longer than `max_accrual_dt_slots` is charged one capped segment per call: the clock
 /// moves by exactly the cap and F by exactly one cap's worth, never the whole gap at once.
+/// Spec §5.3 text says to *require* `dt <= cfg_max_accrual_dt_slots`; the engine (like
+/// upstream) clamps to one segment instead, which is the lenient reading pinned here.
 #[test]
 fn funding_long_gap_is_charged_one_capped_segment_per_call() {
     let price = 1_000_000;
@@ -358,13 +376,14 @@ fn funding_asymmetric_a_rounds_payer_up_receiver_down() {
                 assert_eq!(after.f_long_num, floor_long as i128, "a_long {a_long}");
                 assert_eq!(after.f_short_num, -(exact_short as i128));
             }
-            // Per unit of effective position the payer never pays less than the receiver gets.
-            let paid_per_unit = after.f_long_num.unsigned_abs() as f64 / a_long as f64;
-            let recv_per_unit = after.f_short_num.unsigned_abs() as f64 / ADL_ONE as f64;
+            // Per unit of effective position (|F| / A) the payer never pays less than the
+            // receiver gets; compared exactly by cross-multiplying.
+            let long_scaled = after.f_long_num.unsigned_abs() * ADL_ONE;
+            let short_scaled = after.f_short_num.unsigned_abs() * a_long;
             if rate > 0 {
-                assert!(paid_per_unit >= recv_per_unit);
+                assert!(long_scaled >= short_scaled, "payer (long) below receiver");
             } else {
-                assert!(recv_per_unit >= paid_per_unit);
+                assert!(short_scaled >= long_scaled, "payer (short) below receiver");
             }
         }
     }
@@ -408,8 +427,9 @@ fn funding_flow_counters_match_settled_equity_both_signs() {
 /// counters, even when one slot of funding is a fraction of an atom (the F remainder carries).
 #[test]
 fn funding_settlement_cadence_invariant_with_sub_atom_slots() {
-    // 1 unit * 3e-9 * 77 price = 2.31e-7 atoms per slot: every per-slot settle floors to 0
-    // unless the remainder carries.
+    // 1 unit * 3e-9 * 77 price = 2.31e-7 atoms per slot. The long's first per-slot settle
+    // floors to -1 and the Euclidean remainder then absorbs later slots; without the carry
+    // the per-slot path would charge 49 atoms instead of 1.
     let (price, rate, units, slots) = (77u64, 3i128, 1u128, 49u64);
     let (mut a, mut al, mut as_) = book(price, units);
     let (mut b, mut bl, mut bs) = book(price, units);
@@ -469,7 +489,7 @@ fn funding_late_entrant_pays_only_from_entry() {
     for k in 1..=10 {
         accrue(&mut s, start + k, price, 500);
     }
-    // settle the existing book so the late trade is not blocked by a stale cohort
+    // settle the existing book first so its counters are final before the late trade
     refresh(&mut s, &mut long);
     refresh(&mut s, &mut short);
     let mut late_long = funded(&mut s, 3);
@@ -540,7 +560,9 @@ fn funding_counter_is_gross_of_mark_to_market() {
     assert!(equity(&long) > e0, "long should be up on the price move");
     let (paid, recv, sp, sr) = flows(&long);
     assert!(paid > 0 && recv == 0 && sp == 0 && sr == 0);
-    // funding is priced at each segment's price (as upstream): sum 10 * 200e-9 * px_k
+    // sum 10 * 200e-9 * px_k over the new segment prices. Pricing at the previous price
+    // (spec text's fund_px_last) gives the same rounded totals here, so this test does not
+    // pin either price choice.
     let mut want = 0u128;
     let mut p = price;
     let mut num = 0u128;
@@ -557,35 +579,51 @@ fn funding_counter_is_gross_of_mark_to_market() {
 // Epoch change
 // ---------------------------------------------------------------------------------------------
 
-/// A leg from the previous side epoch settles funding against the epoch-start F, not against
-/// whatever the new epoch accrues after the reset.
+/// Epoch change through the engine's own full-drain reset. Two longs share one short. Once the
+/// long side's effective OI is exhausted (what a socializing ADL leaves behind; set directly
+/// here, the only hand-made step), the first long's refresh runs `begin_full_drain_reset`: the
+/// live F moves to the epoch-start slot and the side epoch bumps. Each old-epoch long then
+/// settles funding against the epoch-start F, exactly what accrued before the reset, and
+/// nothing that the new epoch's F carries.
 #[test]
 fn funding_stale_epoch_leg_settles_against_epoch_start() {
     let price = 1_000_000;
-    let (mut s, mut long, _short) = book(price, 6);
+    let mut s = market(price);
+    let mut l1 = funded(&mut s, 1);
+    let mut l2 = funded(&mut s, 2);
+    let mut short = funded(&mut s, 3);
+    trade(&mut s, &mut l1, &mut short, (6 * POS_SCALE) as i128, price);
+    trade(&mut s, &mut l2, &mut short, (4 * POS_SCALE) as i128, price);
     let start = asset(&s).slot_last;
     for k in 1..=10 {
         accrue(&mut s, start + k, price, 300);
     }
-    let f_at_reset = asset(&s).f_long_num;
-    // Apply the engine's full-drain reset to the long side (kernel_begin_full_drain_reset):
-    // F moves to the epoch-start slot, the live F restarts at 0 and the side epoch bumps.
-    let mut a = asset(&s);
-    a.f_epoch_start_long_num = a.f_long_num;
-    a.k_epoch_start_long = a.k_long;
-    a.b_epoch_start_long_num = a.b_long_num;
-    a.f_long_num = -123_456_789; // anything the new epoch accrued must not reach the old leg
-    a.k_long = 0;
-    a.b_long_num = 0;
-    a.epoch_long += 1;
-    a.mode_long = SideModeV16::ResetPending;
-    s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
-    let e0 = equity(&long);
-    refresh(&mut s, &mut long);
-    // 6 units * 300e-9 * 1e6 * 10 = 18 atoms, exactly the F up to the reset.
+    let before = asset(&s);
+    let f_at_reset = before.f_long_num;
     assert_eq!(f_at_reset, -exact_f(300, 10, price));
-    assert_eq!(flows(&long), (18, 0, 0, 0));
-    assert_eq!(e0 - equity(&long), 18);
+    let mut a = before;
+    a.oi_eff_long_q = 0;
+    s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
+
+    refresh(&mut s, &mut l1);
+    let reset = asset(&s);
+    assert_eq!(reset.mode_long, SideModeV16::ResetPending);
+    assert_eq!(reset.epoch_long, before.epoch_long + 1);
+    assert_eq!(reset.f_epoch_start_long_num, f_at_reset);
+    assert_eq!(reset.f_long_num, 0);
+    // 6 units * 300e-9 * 1e6 * 10 = 18 atoms.
+    assert_eq!(flows(&l1), (18, 0, 0, 0));
+
+    // Whatever F the new epoch carries must not reach an old-epoch leg: plant a value worth
+    // thousands of atoms per unit before the second long settles.
+    let mut a = asset(&s);
+    a.f_long_num = -1_000 * exact_f(300, 10, price);
+    s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
+    let e0 = equity(&l2);
+    refresh(&mut s, &mut l2);
+    // 4 units * 300e-9 * 1e6 * 10 = 12 atoms.
+    assert_eq!(flows(&l2), (12, 0, 0, 0));
+    assert_eq!(e0 - equity(&l2), 12);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -652,9 +690,10 @@ fn funding_index_overflow_is_refused_atomically() {
         s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
         let before = s.1[0].engine.asset;
         let slot = a.slot_last + 1;
-        assert!(
-            try_accrue(&mut s, slot, price, rate, true).is_err(),
-            "rate {rate}: overflowing accrual must be refused"
+        assert_eq!(
+            try_accrue(&mut s, slot, price, rate, true),
+            Err(V16Error::ArithmeticOverflow),
+            "rate {rate}: overflowing accrual must be refused by the F overflow guard"
         );
         assert_eq!(
             s.1[0].engine.asset, before,
