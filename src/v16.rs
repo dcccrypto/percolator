@@ -6318,6 +6318,7 @@ impl<'a> PortfolioV16ViewMut<'a> {
     /// only ever writes a value equal to the one already there (`write == read` throughout,
     /// default over default, no sort), so skipping it is behaviour-identical. Scans by
     /// reference, without the per-slot by-value copies of the compaction loop (v22-cu-1113).
+    #[cfg(not(kani))]
     fn source_domains_already_compact(&self) -> bool {
         let mut slot = 0usize;
         let mut previous_domain: Option<u32> = None;
