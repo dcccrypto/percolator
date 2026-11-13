@@ -4210,8 +4210,9 @@ impl V16Core {
             .checked_add(Self::bound_num_from_amount(booked_loss)?)
             .and_then(|v| v.checked_add(pending_other_num))
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let denominator = state
-            .positive_claim_bound_num
+        // #250 adaptation: price against the claims that valid liens do not cover, the same
+        // denominator as the stored (lien-aware) rate this is floored by.
+        let denominator = Self::unliened_claim_bound_num_for_source_credit_state(state)?
             .checked_add(extra_claims_num)
             .ok_or(V16Error::ArithmeticOverflow)?;
         if denominator == 0 || numerator >= denominator {
@@ -4251,7 +4252,9 @@ impl V16Core {
             return Ok(state.credit_rate_num);
         }
         let available = Self::available_backing_num_for_source_credit_state(state)?;
-        let denominator = state.positive_claim_bound_num.saturating_sub(pending_num);
+        // #250 adaptation: the loser-first stored rate is now available / unliened claims.
+        let denominator = Self::unliened_claim_bound_num_for_source_credit_state(state)?
+            .saturating_sub(pending_num);
         if denominator == 0 || available >= denominator {
             return Ok(CREDIT_RATE_SCALE);
         }
