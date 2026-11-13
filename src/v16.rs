@@ -9197,7 +9197,10 @@ impl EngineAssetSlotV16Account {
             && self.kf_pending_credit_long.get() == 0
             && self.kf_pending_credit_short.get() == 0
             && self.provider_principal_long.get() == 0
-            && self.provider_principal_short.get() == 0)
+            && self.provider_principal_short.get() == 0
+            // cpbind: activation copies the binding, so an unconfigured or never-activated slot
+            // must not carry one.
+            && self.standing_counterparty_id == V16PodId32::default())
     }
 
     fn validate_market_id_binding(&self) -> V16Result<()> {
