@@ -223,3 +223,19 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn funding_den_split_is_exact_for_the_odd_rate_shelf() {
+    // the shelf stays exact when the rate is applied before the price is rounded; every
+    // rung is a rate whose product with the price straddles a FUNDING_DEN boundary
+    let shelf: [(i128, i128); 5] = [(7, 142_857_143), (999_983, 1_013), (1, 999_999_999), (65_537, 15_259), (3, 333_333_334)];
+    for (rate, price) in shelf {
+        let exact = rate * price;
+        let floor = exact.div_euclid(FUNDING_DEN);
+        let rem = exact.rem_euclid(FUNDING_DEN);
+        assert_eq!(floor * FUNDING_DEN + rem, exact, "rate {rate} price {price}");
+        assert!((0..FUNDING_DEN).contains(&rem));
+        let mirrored = (-exact).div_euclid(FUNDING_DEN);
+        assert_eq!(mirrored, -floor - i128::from(rem != 0), "mirror at rate {rate}");
+    }
+}
