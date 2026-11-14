@@ -22,17 +22,17 @@
 //!
 //! RESULTS (see each test):
 //!  * non-bankrupt (equity >= 0, full close requested): the capped close of eff-1 succeeds, the
-//!    last 1-atom leg is absorbed by the detach rule, the account is flat, no Recovery. The
+//!    side reaches oi 0 and is reset (ResetPending), and the next touch settles the 1-atom prior-epoch leg away: flat, no Recovery. The
 //!    second call is InvalidLeg (flat), never a `close_budget == 0` NonProgress. Progress.
 //!  * bankrupt (equity < 0): the capped close leaves 1 atom of open risk beside uncovered loss,
 //!    :22424 declares Recovery (ActiveBankruptCloseCannotProgress) and returns RecoveryRequired;
-//!    every later call is LockActive. STUCK in Live. Pinned as `#[ignore]` tests below.
+//!    every later call is LockActive. The market leaves Live (mode Recovery), so liquidation is stuck. Pinned as `#[ignore]` tests below.
 //!  * Toly (b97e1746, src/v16.rs:13420 `liquidate_account_not_atomic`): NO capacity cap at all;
 //!    close_q = min(request, basis). So there is no `close_budget == 0` NonProgress and no
 //!    capped-bankrupt Recovery. Upstream has no ceil-effective-quantity either (it closes the
 //!    stored basis), so the one-atom gap that triggers the cap here is specific to this fork.
 //!    Upstream instead calls `liquidation_close_would_leave_uncovered_loss_with_open_risk`
-//!    (:13472) for the same Recovery rule, which a full-basis close never trips.
+//!    (:13481) for the same Recovery rule, which a full-basis close never trips.
 //!    (Read-only comparison, upstream not run.)
 //!
 //! Every test name contains `nonprogress_liveness`.
@@ -219,6 +219,19 @@ fn setup(tgt_long: bool, price: u64, lag_bps: u64, cap_b: u128) -> W {
 }
 
 impl W {
+    /// Really advance the clock one slot at the current price (accrue), not just the test field.
+    fn advance_slot(&mut self) {
+        self.slot += 1;
+        let mut g = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let price = g.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .effective_price;
+        g.accrue_asset_to_not_atomic(0, self.slot, price, 0, true)
+            .unwrap();
+    }
     fn is_flat(&self, i: usize) -> bool {
         !self.accts[i].legs[0].try_to_runtime().unwrap().active
     }
@@ -238,7 +251,8 @@ impl W {
     }
 }
 
-/// b: equity ~0 but not bankrupt, so the engine requests a FULL close; the cap clips it to eff-1.
+/// b: equity ~0 but not bankrupt, so the engine requests a close of ~everything; the cap clips it to eff-1
+/// (the test asserts the outcome, not the request: closed_q == eff-1 with the book emptied).
 fn capped_nonbankrupt_close_progresses(tgt_long: bool, lag_bps: u64) {
     let mut w = setup(tgt_long, 820, lag_bps, 8_000);
     let (eff, oi_l, oi_s) = w.gap(1);
@@ -276,7 +290,7 @@ fn capped_nonbankrupt_close_progresses(tgt_long: bool, lag_bps: u64) {
     // Across further slots nothing is stuck: a flat account is refused as InvalidLeg (never a
     // `close_budget == 0` NonProgress) and the market stays Live.
     for _ in 0..3 {
-        w.slot += 1;
+        w.advance_slot();
         assert_eq!(w.liq(1).unwrap_err(), V16Error::InvalidLeg);
     }
     w.assert_sound();
@@ -313,19 +327,19 @@ fn nonprogress_liveness_uncapped_partial_then_second_call_is_healthy_refusal() {
     let cap0 = w.accts[1].capital.get();
     assert_eq!(w.refresh(1).certified_liq_deficit, 0);
     for _ in 0..3 {
-        w.slot += 1;
+        w.advance_slot();
         assert_eq!(w.liq(1).unwrap_err(), V16Error::NonProgress);
     }
-    assert_eq!(w.accts[1].capital.get(), cap0, "no second fee");
+    assert_eq!(w.accts[1].capital.get(), cap0, "capital unchanged");
     w.assert_sound();
 }
 
 /// b is BANKRUPT (equity < 0): the full close is requested, the cap clips it to eff-1, one atom
 /// of open risk remains beside uncovered loss, and src/v16.rs:22424-22431 declares Recovery
-/// (ActiveBankruptCloseCannotProgress). From then on every liquidation is LockActive (:22190ff
+/// (ActiveBankruptCloseCannotProgress). From then on every liquidation is LockActive (:22186
 /// Live gate) so b can never be liquidated in the live market, for the sake of ONE atom of
-/// rounding. Desired: the capped bankrupt close completes (the last leg absorbed as the
-/// detach rule does for non-bankrupt accounts, :2496) and the loss is charged normally.
+/// rounding. Desired: the capped bankrupt close completes (the 1-atom remainder settled away by the
+/// side reset, as for non-bankrupt accounts) and the loss is charged normally.
 /// Toly b97e1746 has no cap (close_q = min(request, basis), :13420-13470), so this path does
 /// not exist there; it is specific to this fork's CEIL-eff + capacity cap.
 fn capped_bankrupt_close_progresses(tgt_long: bool, lag_bps: u64) {
@@ -344,7 +358,7 @@ fn capped_bankrupt_close_progresses(tgt_long: bool, lag_bps: u64) {
         if w.is_flat(1) {
             break;
         }
-        w.slot += 1;
+        w.advance_slot();
     }
     assert!(
         w.is_flat(1),
