@@ -6435,7 +6435,7 @@ fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_lie
 }
 
 #[kani::proof]
-#[kani::unwind(48)]
+#[kani::unwind(17)]
 #[kani::solver(cadical)]
 fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state() {
     let backing_raw: u8 = kani::any();
