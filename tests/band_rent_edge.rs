@@ -3,6 +3,8 @@
 //! this file does not repeat its cases, it covers boundaries, zero and max inputs,
 //! carry behaviour, and rent on legs that change or close mid-period.
 
+#![allow(dead_code)]
+
 use percolator::band_rent::{
     band_bounds, band_d1_pinned_step, band_duration_pinned, band_genesis_price_ok,
     band_min_wide_anchor, band_width_ok, band_worst_adverse_bps, clamp_to_band, price_in_band,
@@ -421,4 +423,594 @@ fn chargeable_never_exceeds_due_nor_capital_nor_leaves_loss_uncovered() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Engine fixtures (copied from tests/v22_band_rent.rs so this file stands alone)
+// ---------------------------------------------------------------------------
+
+use percolator::{
+    EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
+    PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
+    ProvenanceHeaderV16Account, TradeRequestV16, V16Config, V16Error,
+};
+
+const P0: u64 = 1_000_000;
+const MARKET_ID: [u8; 32] = [7; 32];
+const OWNER: [u8; 32] = [9; 32];
+
+/// A 10x band market: MMR 5%, IMR 10%, liquidation fee 50 bps, funding <= 111 e9,
+/// rent <= 23 e9 (~50 bps/day), cap 100 bps/slot over <= 3 slots, d = 130 bps,
+/// E = 600 slots, Pmax = 9,000 slots (the design's 10x preset).
+fn band_cfg(band_bps: u64) -> V16Config {
+    let mut c = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    c.maintenance_margin_bps = 500;
+    c.initial_margin_bps = 1_000;
+    // Floors large enough that integer rounding of loss + fee cannot exceed the
+    // maintenance requirement at small notionals (the exact §1.6 law checks it).
+    c.min_nonzero_mm_req = 10_000;
+    c.min_nonzero_im_req = 20_000;
+    c.liquidation_fee_bps = 50;
+    c.liquidation_fee_cap = 1_000_000_000_000;
+    c.min_liquidation_abs = 0;
+    c.max_abs_funding_e9_per_slot = 111;
+    c.max_price_move_bps_per_slot = 100;
+    c.max_accrual_dt_slots = 3;
+    c.min_funding_lifetime_slots = 3;
+    c.max_trading_fee_bps = 100;
+    c.rent_max_e9_per_slot = 23;
+    // Counterparty backing stays fresh for the whole test (freshness horizon =
+    // max(max_accrual_dt, h_max, max_bankrupt_close_lifetime)); with the 10-slot
+    // default a winner's claim lapses and its refresh reports
+    // SourceBackingExpired every time, so it could never be certified.
+    c.max_bankrupt_close_lifetime_slots = 1_000_000;
+    c.band_bps = band_bps;
+    if band_bps != 0 {
+        c.band_max_epoch_slots = 600;
+        c.band_max_pin_slots = 9_000;
+        c.band_max_positions_per_side = percolator::band_rent::BAND_MAX_POSITIONS_PER_SIDE;
+        // Engine minimum (the wrapper floors it at whole tokens): fixture trades stay valid.
+        c.band_min_leg_notional = 1;
+    }
+    c
+}
+
+struct World {
+    header: MarketGroupV16HeaderAccount,
+    markets: Vec<Market<u64>>,
+    accounts: Vec<PortfolioAccountV16Account>,
+    now: u64,
+}
+
+impl World {
+    fn new(cfg: V16Config, n_accounts: usize, deposit: u128) -> Self {
+        Self::new_at(cfg, n_accounts, deposit, P0)
+    }
+
+    /// A World launched at `P0` whose (still empty) asset is then moved to `price` by a state
+    /// poke, bypassing the N-2 genesis rule: for tests that need a book near the width floor.
+    fn new_poked_at(cfg: V16Config, n_accounts: usize, deposit: u128, price: u64) -> Self {
+        let mut w = Self::new(cfg, n_accounts, deposit);
+        let mut a = w.asset();
+        a.effective_price = price;
+        a.raw_oracle_target_price = price;
+        a.fund_px_last = price;
+        a.band_anchor_price = price;
+        w.markets[0].engine.asset = percolator::AssetStateV16Account::from_runtime(&a);
+        w
+    }
+
+    fn new_at(cfg: V16Config, n_accounts: usize, deposit: u128, price: u64) -> Self {
+        cfg.validate_public_user_fund()
+            .expect("fixture config validates");
+        let mut header = MarketGroupV16HeaderAccount::new_dynamic(MARKET_ID, cfg, 1, 0).unwrap();
+        let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+        header
+            .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, price, 1)
+            .unwrap();
+        let mut accounts = Vec::new();
+        for i in 0..n_accounts {
+            let prov = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+                MARKET_ID,
+                {
+                    // > 255 accounts (re-review cap tests): two key bytes.
+                    let mut k = [1u8; 32];
+                    k[0] = (i % 256) as u8;
+                    k[1] = (i / 256) as u8 + 1;
+                    k
+                },
+                OWNER,
+            ));
+            let mut a = PortfolioAccountV16Account::default();
+            a.init_empty_in_place(prov).unwrap();
+            accounts.push(a);
+        }
+        let mut w = Self {
+            header,
+            markets,
+            accounts,
+            now: 1,
+        };
+        for i in 0..n_accounts {
+            w.with(i, |m, a| m.deposit_not_atomic(a, deposit)).unwrap();
+        }
+        w
+    }
+
+    fn with<R>(
+        &mut self,
+        i: usize,
+        f: impl FnOnce(&mut MarketGroupV16ViewMut<'_, u64>, &mut PortfolioV16ViewMut<'_>) -> R,
+    ) -> R {
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut a = PortfolioV16ViewMut::new(&mut self.accounts[i]);
+        f(&mut m, &mut a)
+    }
+
+    fn market<R>(&mut self, f: impl FnOnce(&mut MarketGroupV16ViewMut<'_, u64>) -> R) -> R {
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        f(&mut m)
+    }
+
+    fn asset(&self) -> percolator::AssetStateV16 {
+        self.markets[0].engine.asset.try_to_runtime().unwrap()
+    }
+
+    /// A fill whose MAKER (the non-taker account) is exempt from the band minimum-leg check:
+    /// the engine entry the wrapper uses for matcher-LP fills, the dust sweep and eviction.
+    fn trade_maker_exempt(
+        &mut self,
+        long: usize,
+        short: usize,
+        q: u128,
+        taker_is_long: bool,
+    ) -> Result<(), V16Error> {
+        let price = self.asset().effective_price;
+        let (lo, hi) = if long < short {
+            (long, short)
+        } else {
+            (short, long)
+        };
+        let (left, right) = self.accounts.split_at_mut(hi);
+        let (a_lo, a_hi) = (&mut left[lo], &mut right[0]);
+        let (l, s) = if long < short {
+            (a_lo, a_hi)
+        } else {
+            (a_hi, a_lo)
+        };
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut lv = PortfolioV16ViewMut::new(l);
+        let mut sv = PortfolioV16ViewMut::new(s);
+        m.execute_trade_band_maker_exempt_not_atomic(
+            &mut lv,
+            &mut sv,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: q as i128,
+                exec_price: price,
+                fee_bps: 0,
+            },
+            taker_is_long,
+        )
+        .map(|_| ())
+    }
+
+    fn trade(&mut self, long: usize, short: usize, q: u128) -> Result<(), V16Error> {
+        assert_ne!(long, short);
+        let price = self.asset().effective_price;
+        let (lo, hi) = if long < short {
+            (long, short)
+        } else {
+            (short, long)
+        };
+        let (left, right) = self.accounts.split_at_mut(hi);
+        let (a_lo, a_hi) = (&mut left[lo], &mut right[0]);
+        let (l, s) = if long < short {
+            (a_lo, a_hi)
+        } else {
+            (a_hi, a_lo)
+        };
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut lv = PortfolioV16ViewMut::new(l);
+        let mut sv = PortfolioV16ViewMut::new(s);
+        m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut lv,
+            &mut sv,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: q as i128,
+                exec_price: price,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .map(|_| ())
+    }
+
+    /// The wrapper's price recipe for a single-segment accrual to `self.now`:
+    /// capped staircase toward the target, then the band (edge clamp / duration
+    /// pin) against the anchor the engine will use after any re-anchor.
+    fn wrapper_price(&self) -> (u64, bool) {
+        let a = self.asset();
+        let cfg = self.header.config.try_to_runtime_shape().unwrap();
+        let dt = (self.now - a.slot_last).min(cfg.max_accrual_dt_slots);
+        let target = a.raw_oracle_target_price;
+        let p = a.effective_price;
+        let exposed = a.oi_eff_long_q != 0 || a.oi_eff_short_q != 0;
+        let capped = if !exposed {
+            target
+        } else {
+            let max_delta =
+                (p as u128 * cfg.max_price_move_bps_per_slot as u128 * dt as u128 / 10_000) as u64;
+            if target > p {
+                p + max_delta.min(target - p)
+            } else {
+                p - max_delta.min(p - target)
+            }
+        };
+        let mut header = self.header;
+        let mut markets = self.markets.clone();
+        let m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        match m.band_accrual_preview(0, a.slot_last + dt).unwrap() {
+            None => (capped, false),
+            Some((anchor, d, governing, e)) => {
+                let pinned = band_duration_pinned(a.slot_last + dt, governing, e);
+                let (price, _) = band_d1_pinned_step(p, capped, anchor, d, pinned).unwrap();
+                (price, pinned)
+            }
+        }
+    }
+
+    fn accrue(&mut self, funding: i128, rent_long: u64, rent_short: u64) -> Result<(), V16Error> {
+        let (price, pinned) = self.wrapper_price();
+        let (f, rl, rs) = if pinned {
+            (0, 0, 0)
+        } else {
+            (funding, rent_long, rent_short)
+        };
+        let now = self.now;
+        self.market(|m| m.accrue_asset_to_with_rent_not_atomic(0, now, price, f, rl, rs, true))
+            .map(|_| ())
+    }
+
+    fn set_target(&mut self, target: u64) {
+        self.market(|m| m.set_asset_raw_oracle_target_not_atomic(0, target))
+            .unwrap();
+    }
+
+    /// A keeper refresh. `Stale` from a full refresh is the engine reporting that
+    /// it expired one lapsed source-backing bucket (committed progress); the
+    /// keeper simply retries, exactly as the auto-crank treats
+    /// `SourceBackingExpired` as progress.
+    fn refresh(&mut self, i: usize) -> Result<percolator::HealthCertV16, V16Error> {
+        let mut last = Err(V16Error::Stale);
+        for _ in 0..8 {
+            last = self.with(i, |m, a| m.full_account_refresh_not_atomic(a));
+            if last != Err(V16Error::Stale) {
+                break;
+            }
+        }
+        last
+    }
+
+    fn positioned(&self, i: usize) -> bool {
+        self.accounts[i].legs[0].try_to_runtime().unwrap().active
+    }
+
+    /// I-B2: the band counters equal the leg census over every portfolio.
+    fn assert_census(&self) {
+        let a = self.asset();
+        let (mut unc_l, mut unc_s, mut lp_l, mut lp_s, mut n_l, mut n_s) = (0, 0, 0, 0, 0, 0);
+        for acct in &self.accounts {
+            let leg = acct.legs[0].try_to_runtime().unwrap();
+            if !leg.active {
+                continue;
+            }
+            let long = leg.side == percolator::SideV16::Long;
+            if long {
+                n_l += 1
+            } else {
+                n_s += 1
+            }
+            if a.band_epoch != 0 && leg.band_epoch_snap < a.band_epoch {
+                if long {
+                    unc_l += 1
+                } else {
+                    unc_s += 1
+                }
+            }
+            if leg.band_liq_pending {
+                if long {
+                    lp_l += 1
+                } else {
+                    lp_s += 1
+                }
+            }
+            assert!(leg.band_epoch_snap <= a.band_epoch);
+        }
+        assert_eq!(
+            (a.stored_pos_count_long, a.stored_pos_count_short),
+            (n_l, n_s)
+        );
+        assert_eq!(
+            (a.band_uncertified_long, a.band_uncertified_short),
+            (unc_l, unc_s),
+            "uncertified cohort census (I-B2)"
+        );
+        assert_eq!(
+            (a.band_liq_pending_long, a.band_liq_pending_short),
+            (lp_l, lp_s),
+            "liq-pending cohort census (I-B2)"
+        );
+    }
+
+    fn assert_conservation(&self) {
+        let v = self.header.vault.get();
+        let c = self.header.c_tot.get();
+        let i = self.header.insurance.get();
+        assert!(v >= c + i, "V >= C_tot + I violated: {v} < {c} + {i}");
+    }
+}
+
+fn open_book(w: &mut World, pairs: usize, q: u128) {
+    for k in 0..pairs {
+        w.trade(2 * k, 2 * k + 1, q).expect("open pair");
+    }
+}
+
+/// Advance `slots` slots (3 at a time, the config's max dt) accruing rent.
+fn run_rent(w: &mut World, slots: u64, rent_long: u64, rent_short: u64) {
+    let mut t = 0;
+    while t < slots {
+        w.now += 3;
+        t += 3;
+        w.accrue(0, rent_long, rent_short).unwrap();
+    }
+}
+
+/// Sum of account capital equals C_tot, and V >= C_tot + I.
+fn assert_books(w: &World) {
+    let sum: u128 = w.accounts.iter().map(|a| a.capital.get()).sum();
+    assert_eq!(sum, w.header.c_tot.get(), "sum(capital) == C_tot");
+    w.assert_conservation();
+}
+
+// ---------------------------------------------------------------------------
+// Engine: accrual shape
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rent_index_uses_the_fed_price_per_segment() {
+    let mut w = World::new(band_cfg(130), 2, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    // Move the mark up inside the band; the segment's index uses the price it was fed.
+    w.set_target(P0 + P0 / 200); // +50 bps, reachable in one 3-slot step at 100 bps/slot
+    let before = w.asset().rent_index_long_num;
+    w.now += 3;
+    w.accrue(0, 10, 0).unwrap();
+    let a = w.asset();
+    assert_eq!(
+        a.rent_index_long_num - before,
+        a.effective_price as u128 * 10 * 3
+    );
+}
+
+#[test]
+fn rent_rates_apply_per_side_and_only_where_there_is_open_interest() {
+    let mut w = World::new(band_cfg(130), 2, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    w.now += 3;
+    w.accrue(0, 7, 11).unwrap();
+    let a = w.asset();
+    assert_eq!(a.rent_index_long_num, P0 as u128 * 7 * 3);
+    assert_eq!(a.rent_index_short_num, P0 as u128 * 11 * 3);
+}
+
+#[test]
+fn rent_accrual_with_empty_book_leaves_the_indices_alone() {
+    let mut w = World::new(band_cfg(130), 2, 10_000_000);
+    w.now += 3;
+    w.accrue(0, 23, 23).unwrap();
+    let a = w.asset();
+    assert_eq!((a.rent_index_long_num, a.rent_index_short_num), (0, 0));
+}
+
+#[test]
+fn rent_rate_above_config_max_is_refused_and_changes_nothing() {
+    let mut w = World::new(band_cfg(130), 2, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    let (price, _) = w.wrapper_price();
+    let now = w.now + 3;
+    let r = w.market(|m| m.accrue_asset_to_with_rent_not_atomic(0, now, price, 0, 24, 0, true));
+    assert_eq!(r.map(|_| ()), Err(V16Error::InvalidConfig));
+    let r = w.market(|m| m.accrue_asset_to_with_rent_not_atomic(0, now, price, 0, 0, 24, true));
+    assert_eq!(r.map(|_| ()), Err(V16Error::InvalidConfig));
+    let a = w.asset();
+    assert_eq!((a.rent_index_long_num, a.rent_index_short_num), (0, 0));
+    // Exactly the max is fine.
+    w.now += 3;
+    w.accrue(0, 23, 23).unwrap();
+    assert!(w.asset().rent_index_long_num > 0);
+}
+
+#[test]
+fn rent_index_never_decreases_through_a_long_mixed_schedule() {
+    let mut w = World::new(band_cfg(130), 2, 100_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    let (mut l, mut s) = (0u128, 0u128);
+    for k in 0..60u64 {
+        w.now += 3;
+        w.accrue(0, k % 24, (k * 5) % 24).unwrap();
+        let a = w.asset();
+        assert!(a.rent_index_long_num >= l && a.rent_index_short_num >= s);
+        l = a.rent_index_long_num;
+        s = a.rent_index_short_num;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Engine: legs that change or close mid-period
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rent_closed_leg_pays_only_for_the_time_it_was_open() {
+    let mut w = World::new(band_cfg(130), 4, 10_000_000);
+    let q = 10 * POS_SCALE;
+    open_book(&mut w, 1, q);
+    run_rent(&mut w, 150, 20, 20);
+    let idx_at_close = w.asset().rent_index_long_num;
+    // Certify, then close the whole pair at the current price.
+    w.refresh(0).unwrap();
+    w.refresh(1).unwrap();
+    w.trade(1, 0, q).expect("close");
+    assert!(!w.positioned(0) && !w.positioned(1), "both legs closed");
+    let cap0 = w.accounts[0].capital.get();
+    let cap1 = w.accounts[1].capital.get();
+    // Open a second pair so the index keeps moving, and run a lot more time.
+    w.trade(2, 3, q).unwrap();
+    run_rent(&mut w, 150, 20, 20);
+    w.refresh(0).unwrap();
+    w.refresh(1).unwrap();
+    assert_eq!(w.accounts[0].capital.get(), cap0, "closed long pays nothing after close");
+    assert_eq!(w.accounts[1].capital.get(), cap1, "closed short pays nothing after close");
+    // The first period charged exactly floor(q * idx / DEN) to account 0 (deposit - paid).
+    let paid0 = 10_000_000 - cap0;
+    assert_eq!(paid0, rent_due_atoms(q, idx_at_close, 0).unwrap());
+    assert_books(&w);
+}
+
+#[test]
+fn rent_reopened_leg_starts_from_the_current_index() {
+    let mut w = World::new(band_cfg(130), 4, 10_000_000);
+    let q = 10 * POS_SCALE;
+    open_book(&mut w, 1, q);
+    run_rent(&mut w, 60, 20, 20);
+    w.refresh(0).unwrap();
+    w.refresh(1).unwrap();
+    w.trade(1, 0, q).expect("close");
+    // Keep a second pair open so the book is never empty, accrue, then reopen 0/1.
+    w.trade(2, 3, q).unwrap();
+    run_rent(&mut w, 90, 20, 20);
+    w.refresh(2).unwrap();
+    w.refresh(3).unwrap();
+    w.trade(0, 1, q).expect("reopen");
+    let idx = w.asset().rent_index_long_num;
+    let leg = w.accounts[0].legs[0].try_to_runtime().unwrap();
+    assert_eq!(leg.rent_snap, idx, "snapshot is the index at reopen");
+    assert_eq!(leg.rent_carry, 0, "a fresh leg starts with no carry");
+}
+
+#[test]
+fn rent_partial_close_charges_the_remaining_size_afterwards() {
+    let mut w = World::new(band_cfg(130), 2, 100_000_000);
+    let q = 40 * POS_SCALE;
+    w.trade(0, 1, q).unwrap();
+    run_rent(&mut w, 90, 20, 0);
+    let idx1 = w.asset().rent_index_long_num;
+    w.refresh(0).unwrap();
+    w.refresh(1).unwrap();
+    // Close half: account 0 sells 10 units back to account 1.
+    let half = 10 * POS_SCALE;
+    w.trade(1, 0, half).unwrap();
+    let cap_mid = w.accounts[0].capital.get();
+    run_rent(&mut w, 90, 20, 0);
+    let idx2 = w.asset().rent_index_long_num;
+    w.refresh(0).unwrap();
+    let paid_second = cap_mid - w.accounts[0].capital.get();
+    let remaining = q - half;
+    // Floor of the exact total: first segment on q, second on the remaining size.
+    let exact_first = rent_due_with_carry(q, idx1, 0, 0).unwrap();
+    let (_, carry_mid) = exact_first;
+    let (due2, _) = rent_due_with_carry(remaining, idx2, idx1, carry_mid).unwrap();
+    assert_eq!(paid_second, due2, "second period charged on the remaining size only");
+    assert_books(&w);
+}
+
+#[test]
+fn rent_flat_account_pays_nothing_while_the_index_grows() {
+    let mut w = World::new(band_cfg(130), 3, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    let flat_cap = w.accounts[2].capital.get();
+    run_rent(&mut w, 120, 23, 23);
+    w.refresh(2).unwrap();
+    assert_eq!(w.accounts[2].capital.get(), flat_cap);
+    assert_eq!(w.header.insurance.get(), 0, "nobody was charged yet");
+}
+
+#[test]
+fn rent_second_refresh_in_the_same_slot_is_a_no_op() {
+    let mut w = World::new(band_cfg(130), 2, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    run_rent(&mut w, 120, 23, 23);
+    w.refresh(0).unwrap();
+    let snapshot = (
+        w.accounts[0].capital.get(),
+        w.header.insurance.get(),
+        w.header.c_tot.get(),
+        w.asset().rent_unrouted_atoms,
+    );
+    w.refresh(0).unwrap();
+    w.refresh(0).unwrap();
+    assert_eq!(
+        snapshot,
+        (
+            w.accounts[0].capital.get(),
+            w.header.insurance.get(),
+            w.header.c_tot.get(),
+            w.asset().rent_unrouted_atoms
+        )
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Engine: rent never creates or destroys value
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rent_moves_capital_to_insurance_one_for_one() {
+    let mut w = World::new(band_cfg(130), 2, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    let total_before = w.header.c_tot.get() + w.header.insurance.get();
+    let vault_before = w.header.vault.get();
+    run_rent(&mut w, 240, 23, 23);
+    w.refresh(0).unwrap();
+    w.refresh(1).unwrap();
+    let paid = w.header.insurance.get();
+    assert!(paid > 0);
+    assert_eq!(w.header.c_tot.get() + w.header.insurance.get(), total_before);
+    assert_eq!(w.header.vault.get(), vault_before, "rent never touches the vault");
+    assert_eq!(w.asset().rent_unrouted_atoms, paid, "every atom is booked as LP rent");
+    assert_books(&w);
+}
+
+#[test]
+fn rent_routing_twice_pays_out_once() {
+    let mut w = World::new(band_cfg(130), 3, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    run_rent(&mut w, 240, 23, 23);
+    w.refresh(0).unwrap();
+    w.refresh(1).unwrap();
+    let claim = w.asset().rent_unrouted_atoms;
+    let first = w.with(2, |m, a| m.route_rent_to_account_not_atomic(0, a)).unwrap();
+    let second = w.with(2, |m, a| m.route_rent_to_account_not_atomic(0, a)).unwrap();
+    assert_eq!((first, second), (claim, 0));
+    assert_books(&w);
+}
+
+#[test]
+fn rent_lowest_capital_account_cannot_be_driven_negative() {
+    // Capital just above margin, huge rent for a long time: capital floors at 0, never wraps.
+    let mut w = World::new(band_cfg(130), 4, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    // Give the long side a very small cushion by withdrawing is not available; use a thin pair.
+    let mut t = World::new(band_cfg(130), 2, 60_000);
+    t.trade(0, 1, 5 * POS_SCALE).unwrap();
+    for _ in 0..200 {
+        t.now += 3;
+        t.accrue(0, 23, 23).unwrap();
+        let _ = t.refresh(0);
+        let _ = t.refresh(1);
+        assert_books(&t);
+    }
+    assert!(t.accounts[0].capital.get() <= 60_000);
 }
