@@ -299,7 +299,8 @@ fn liq_fee_credits_insolvent_account_pays_no_fee() {
     }
 }
 
-/// The cap bounds the fee on a partial close, and a bigger cap changes only the fee.
+/// The cap bounds the fee on a partial close. (The cap also changes how much the engine closes,
+/// because the fee is part of the close sizing, so only the fee and capital are pinned here.)
 #[test]
 fn liq_fee_credits_cap_limits_the_fee() {
     let (mut w, mut a, _b) = setup(config(243, 50, 0), DEPOSIT, 830);
@@ -347,7 +348,7 @@ fn liq_fee_credits_partial_vs_full_close_fee() {
 }
 
 /// `min_liquidation_abs` needs a bigger `min_nonzero_mm_req` to validate (floor 2 rejects
-/// min_abs >= 2; floor 100 takes up to 50 at 50 bps). With floor 100 / min 50: a PARTIAL close
+/// min_abs >= 2; floor 100 with min 50 validates at 50 bps). With floor 100 / min 50: a PARTIAL close
 /// is never charged less than the minimum (the engine closes more to get there; the refusal at
 /// src/v16.rs:28954 is the backstop), and above the minimum the raw fee is charged.
 #[test]
@@ -363,16 +364,14 @@ fn liq_fee_credits_min_liquidation_abs_floors_partial_fee() {
     // px 840: with min 0 the engine closes 5_309_524 and pays 23. With min 50 it sizes the
     // partial close up so the fee reaches the minimum (11_666_667 closed, fee 50) instead of
     // refusing, and it never charges below the minimum on a partial close.
-    let (mut w, mut a, b) = setup(cfg(0), DEPOSIT, 840);
+    let (mut w, mut a, _b) = setup(cfg(0), DEPOSIT, 840);
     w.refresh(&mut a);
-    let p0 = pools(&w, &a, &b);
     let o0 = w.liquidate(&mut a).unwrap();
     assert_eq!((o0.closed_q, o0.fee_charged), (5_309_524, 23));
     let (mut w, mut a, _b) = setup(cfg(50), DEPOSIT, 840);
     w.refresh(&mut a);
     let o = w.liquidate(&mut a).unwrap();
     assert_eq!((o.closed_q, o.fee_charged), (11_666_667, 50));
-    assert!(o.closed_q < Q && o.fee_charged >= 50);
     assert_eq!(a.capital.get(), DEPOSIT - 16_000 - 50);
     // px 810 is still a partial close; its raw fee 339 is above the minimum, so the raw fee is charged
     let (mut w, mut a, _b) = setup(cfg(50), DEPOSIT, 810);
@@ -407,7 +406,7 @@ fn liq_fee_credits_repeated_cranks_do_not_charge_twice() {
                         action: PermissionlessCrankActionV16::Liquidate(LiquidationRequestV16 { asset_index: 0 }),
                     },
                 );
-                assert!(r.is_err(), "{ctx}: {r:?}");
+                assert_eq!(r, Err(V16Error::NonProgress), "{ctx}: {r:?}");
             }
             for _ in 0..3 {
                 let cert = w.refresh(&mut a);
@@ -478,6 +477,7 @@ fn liq_fee_credits_matched_close_charges_same_fee_to_insurance() {
             let p1 = pools(&w, &a, &b);
             let ctx = format!("fee {fee} px {px}");
             assert_eq!(o, direct, "{ctx}: same outcome as the unilateral close");
+            assert_eq!(pos(&b), -((Q - o.closed_q) as i128), "{ctx}: b's leg shrank (matched path taken)");
             assert_eq!(p1.insurance - p0.insurance, o.fee_charged, "{ctx}");
             assert_eq!(p0.a_cap - p1.a_cap, o.fee_charged, "{ctx}");
             assert_eq!((p1.b_cap, p1.b_pnl, p1.b_fc), (p0.b_cap, p0.b_pnl, 0), "{ctx}");
@@ -489,7 +489,7 @@ fn liq_fee_credits_matched_close_charges_same_fee_to_insurance() {
 
 /// Conservation across vault, insurance, trader and counterparty for a whole episode (trade,
 /// fall, liquidate, refresh both sides): the vault only changes by the deposits, insurance gets
-/// exactly the fees, and total claims (capital + insurance + settled pnl) never exceed the vault.
+/// exactly the fees, and capital + insurance never exceed the vault, and C_tot is exactly the two capitals.
 #[test]
 fn liq_fee_credits_value_is_conserved_across_the_episode() {
     for fee in FEES {
