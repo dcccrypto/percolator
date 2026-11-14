@@ -4,7 +4,7 @@
 //! `accrue_asset_to_not_atomic` (funding, capped per call by `max_accrual_dt_slots`),
 //! `sync_account_fee_to_slot_not_atomic` (maintenance fee, anchored to the loss-currentness
 //! slot), `resolve_market_not_atomic` / `advance_resolved_slot_not_atomic` (resolved clock) and
-//! `band_pin_expired_at`. Cases here are the ones the funding / fees / band-rent / crank edge
+//! `band_pin_expired_at` (config-off path only). Cases here are the ones the funding / fees / band-rent / crank edge
 //! files do not hold: slot 0, slot regression, gaps up to `u64::MAX`, catch-up in capped
 //! segments, the fee anchor on a stale asset, and the resolved fee cap.
 //!
@@ -12,8 +12,8 @@
 //! `raw_oracle_target_price`, which is wrapper state).
 
 use percolator::{
-    AssetStateV16Account, EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount,
-    MarketGroupV16ViewMut, PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
+    EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
+    PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
     ProvenanceHeaderV16Account, TradeRequestV16, V16Config, V16Error, V16PodU64,
 };
 use percolator::{ADL_ONE, POS_SCALE};
@@ -207,7 +207,6 @@ fn accrue_repeated_calls_to_one_target_catch_up_in_capped_segments() {
     assert_eq!(a.slot_last, target);
     let f = exact_f(250, target - 1);
     assert_eq!((a.f_long_num, a.f_short_num), (-f, f));
-    assert_eq!(a.f_long_num + a.f_short_num, 0);
     let frozen = s.1[0].engine.asset;
     try_accrue(&mut s, target, 250).unwrap();
     try_accrue(&mut s, target, -250).unwrap();
@@ -215,7 +214,7 @@ fn accrue_repeated_calls_to_one_target_catch_up_in_capped_segments() {
     validate(&mut s, &mut [&mut long, &mut short]);
 }
 
-/// Funding settled after a huge-gap catch-up is zero-sum between the two counterparties.
+/// Funding settled after four capped catch-up calls toward a ~1M-slot target is zero-sum between the two counterparties.
 #[test]
 fn accrue_gap_funding_settlement_is_zero_sum() {
     let (mut s, mut long, mut short) = book(1);
@@ -307,7 +306,7 @@ fn fee_sync_is_additive_across_midpoints_and_conserves_value() {
 }
 
 /// With an open position on an asset whose clock lags (`slot_last` behind the caller's slot),
-/// the fee is only charged up to the asset's slot, and the rest once it catches up. Charging to
+/// the fee is only charged up to the asset's slot, and the rest once it catches up (checked below). Charging to
 /// the caller's slot would bill time the market has not priced yet.
 #[test]
 fn fee_sync_with_open_position_stops_at_stale_asset_slot() {
@@ -331,6 +330,14 @@ fn fee_sync_with_open_position_stops_at_stale_asset_slot() {
     assert_eq!(long.capital.get(), c0 - first);
     assert_eq!(m.header.insurance.get(), ins0 + first);
     m.validate_shape().unwrap();
+    // The asset catches up by one capped segment; the next sync bills exactly that remainder.
+    try_accrue(&mut s, 20 + MAX_DT, 0).unwrap();
+    let mut m = MarketGroupV16ViewMut::new(&mut s.0, &mut s.1);
+    let rest = m
+        .sync_account_fee_to_slot_not_atomic(&mut PortfolioV16ViewMut::new(&mut long), 500, 3)
+        .unwrap();
+    assert_eq!(rest, 3 * MAX_DT as u128);
+    assert_eq!(long.last_fee_slot.get(), 20 + MAX_DT);
     validate(&mut s, &mut [&mut long, &mut short]);
 }
 
@@ -345,12 +352,15 @@ fn resolve_slot_bounds() {
     let mut s = market(5);
     let mut m = MarketGroupV16ViewMut::new(&mut s.0, &mut s.1);
     let cur = m.header.current_slot.get();
-    for bad in [0, cur.saturating_sub(1)] {
-        if bad < cur {
-            assert_eq!(m.resolve_market_not_atomic(bad), Err(V16Error::Stale));
-        }
+    assert!(cur > 1);
+    for bad in [0, cur - 1] {
+        assert_eq!(m.resolve_market_not_atomic(bad), Err(V16Error::Stale));
     }
     assert_eq!(m.header.resolved_slot.get(), 0);
+    assert_eq!(
+        m.header.mode, 0,
+        "refused resolve must leave the market Live"
+    );
     m.resolve_market_not_atomic(cur).unwrap();
     assert_eq!(m.header.resolved_slot.get(), cur);
 
@@ -423,6 +433,3 @@ fn band_pin_expired_is_false_when_band_is_off() {
     assert_eq!(v.band_pin_expired_at(1), Ok(false));
     assert_eq!(v.band_pin_expired_at(u64::MAX), Ok(false));
 }
-
-#[allow(dead_code)]
-fn _unused(_: AssetStateV16Account) {}
