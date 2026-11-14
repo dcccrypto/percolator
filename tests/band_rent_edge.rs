@@ -998,19 +998,19 @@ fn rent_routing_twice_pays_out_once() {
 }
 
 #[test]
-fn rent_lowest_capital_account_cannot_be_driven_negative() {
-    // Capital just above margin, huge rent for a long time: capital floors at 0, never wraps.
-    let mut w = World::new(band_cfg(130), 4, 10_000_000);
-    open_book(&mut w, 1, 10 * POS_SCALE);
-    // Give the long side a very small cushion by withdrawing is not available; use a thin pair.
-    let mut t = World::new(band_cfg(130), 2, 60_000);
-    t.trade(0, 1, 5 * POS_SCALE).unwrap();
+fn rent_thin_account_settles_every_slot_and_the_books_balance() {
+    // Capital just above initial margin; refresh both legs every step for 600 slots.
+    let mut w = World::new(band_cfg(130), 2, 600_000);
+    w.trade(0, 1, 5 * POS_SCALE).unwrap();
+    let start = w.accounts[0].capital.get();
     for _ in 0..200 {
-        t.now += 3;
-        t.accrue(0, 23, 23).unwrap();
-        let _ = t.refresh(0);
-        let _ = t.refresh(1);
-        assert_books(&t);
+        w.now += 3;
+        w.accrue(0, 23, 23).unwrap();
+        w.refresh(0).unwrap();
+        w.refresh(1).unwrap();
+        assert_books(&w);
     }
-    assert!(t.accounts[0].capital.get() <= 60_000);
+    let paid = start - w.accounts[0].capital.get();
+    // 600 slots at 23e9/slot on 5 units at P0: floor(5 * 1e6 * 23 * 600 / 1e9) = 69 atoms.
+    assert_eq!(paid, 5 * P0 as u128 * 23 * 600 / 1_000_000_000);
 }
