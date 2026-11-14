@@ -114,7 +114,7 @@ fn worst_adverse_rejects_bad_d_and_is_strictly_above_two_d() {
     let mut prev = 0;
     for d in 1..=MAX_BAND_BPS {
         let g = band_worst_adverse_bps(d).unwrap();
-        assert!(g >= 2 * d, "G must cover two band widths at d={d}");
+        assert!(g > 2 * d, "G must exceed two band widths at d={d}");
         assert!(g >= prev, "G is monotone in d at d={d}");
         prev = g;
     }
@@ -909,7 +909,7 @@ fn rent_partial_close_charges_the_remaining_size_afterwards() {
     let idx1 = w.asset().rent_index_long_num;
     w.refresh(0).unwrap();
     w.refresh(1).unwrap();
-    // Close half: account 0 sells 10 units back to account 1.
+    // Close part: account 0 sells 10 units back to account 1.
     let half = 10 * POS_SCALE;
     w.trade(1, 0, half).unwrap();
     let cap_mid = w.accounts[0].capital.get();
@@ -993,6 +993,7 @@ fn rent_routing_twice_pays_out_once() {
     let claim = w.asset().rent_unrouted_atoms;
     let first = w.with(2, |m, a| m.route_rent_to_account_not_atomic(0, a)).unwrap();
     let second = w.with(2, |m, a| m.route_rent_to_account_not_atomic(0, a)).unwrap();
+    assert!(claim > 0);
     assert_eq!((first, second), (claim, 0));
     assert_books(&w);
 }
@@ -1070,12 +1071,11 @@ fn rent_short_leg_pays_the_short_index_and_a_winner_still_pays() {
     let paid = cap1 - w.accounts[1].capital.get();
     let owed = rent_due_atoms(q, a.rent_index_short_num, 0).unwrap();
     assert_eq!(paid, owed, "winner pays rent on the short index");
-    assert!(w.accounts[1].pnl.get() >= 0 || w.accounts[1].capital.get() > 0);
+    assert!(paid > 0);
     // The long side's index never moved, so the long pays nothing.
     assert_eq!(a.rent_index_long_num, 0);
     // The long's capital moves only by its price loss (0.5% of 10 units at P0 is
     // not rent), so check the long owes zero rent on its index.
     assert_eq!(rent_due_atoms(q, a.rent_index_long_num, 0).unwrap(), 0);
-    w.refresh(0).unwrap();
     assert_books(&w);
 }
