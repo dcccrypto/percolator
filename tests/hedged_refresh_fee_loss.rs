@@ -3,12 +3,13 @@
 //!
 //! #346 ran with `liquidation_fee_bps = 0` because a non-zero fee gave `InvalidConfig`. The cause is
 //! `min_nonzero_mm_req` (see `fee_config_*` tests below and the file:line notes there): with the
-//! floor at 1 the solvency envelope cannot hold at one-atom notionals. Floor 2 (and IM 3) is enough.
+//! floor at 1 the solvency envelope cannot hold in the floor region. Floor 2 (and IM 3) is enough
+//! for fees up to 243 bps at MM 5%.
 //!
 //! Same hedge as #346: account `a` long asset 0 and short asset 1, 100 units each, price 1_000,
 //! capital 20_000 (the thinnest it can open with), both prices fall to `px`. Order "account-first"
 //! cranks `a` before its counterparty `b` and liquidates if the engine says so; "counterparty-first"
-//! refreshes `b` first. Trader loss = capital + pnl before minus after, in atoms, and as % of the
+//! refreshes `b` first. Trader loss = (capital + pnl + fee_credits) before minus after, in atoms, and as % of the
 //! 20_000 starting equity. This is evidence for the spec.md:266 vs spec.md:899 decision, not a fix.
 //! Test names start with `hedged_fee_loss_`.
 #![allow(dead_code)]
@@ -178,7 +179,7 @@ fn hedged(cfg: V16Config, px: u64) -> (W, PortfolioAccountV16Account, PortfolioA
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Run {
     liquidated: bool,
-    /// trader value (capital + pnl) after both sides refreshed, minus the starting 20_000
+    /// starting 20_000 minus trader value (capital + pnl + fee_credits) after both sides refreshed
     loss_atoms: i128,
     /// insurance fund increase (where the fee goes)
     insurance_gain: u128,
@@ -242,9 +243,11 @@ fn hedged_fee_loss_fee_config_floor_one_is_rejected() {
 /// loss budget + worst-case liquidation fee <= maintenance requirement
 /// (`solvency_envelope_total_for_notional` src/v16.rs:5263, compared to
 /// `maintenance_requirement_for_notional` src/v16.rs:5290 in
-/// `solvency_envelope_holds_for_notional` src/v16.rs:5296). Both terms are rounded up, so at a
-/// one-atom notional they are 1 + 1 = 2, while `min_nonzero_mm_req = 1` caps the requirement at 1.
-/// The fast path (src/v16.rs:5433) that skips this only applies when `liquidation_fee_bps == 0`.
+/// `solvency_envelope_holds_for_notional` src/v16.rs:5296). Both terms are rounded up, so
+/// in the floor region (notionals up to floor*10_000/MM = 20 here, checked at src/v16.rs:5536-5549)
+/// they are 1 + 1 = 2, while `min_nonzero_mm_req = 1` makes the requirement 1. With fee 0 (or fee
+/// cap 0) the fee term is 0, so floor 1 passes. (The fast path at src/v16.rs:5433 needs MM 100%, so
+/// it does not apply to this config.)
 /// Fix: `min_nonzero_mm_req >= 2`, which forces `min_nonzero_im_req >= 3`
 /// (shape check src/v16.rs:5643, `mm_req >= im_req` rejected).
 #[test]
@@ -268,9 +271,11 @@ fn hedged_fee_loss_fee_config_needs_mm_floor_two_and_im_floor_three() {
     }
 }
 
-/// The other limit: the linear part. Price budget (max_price_move_bps_per_slot * max_accrual_dt_slots
-/// = 100 bps here) plus fee on the worst-case notional (1.01 x fee) must stay under MM (500 bps),
-/// else the exact range check runs out of room. So the measured fee ceiling at MM 5% is 243 bps.
+/// Floor 2 only covers fees up to a point. At MM 5% the floor region ends at notional 40, the
+/// worst-case liquidation notional is 41, and the fee term ceil(41 * fee / 10_000) stays 1 up to
+/// 243 bps but becomes 2 at 244 bps (1 + 2 = 3 > floor 2). Measured ceiling at floor 2: 243 bps.
+/// A wider MM shrinks the floor region (MM 10%: end 20, fee rounds to 1), so it passes at 400 bps.
+/// Larger fees need a larger `min_nonzero_mm_req`.
 #[test]
 fn hedged_fee_loss_fee_config_fee_ceiling_follows_maintenance_margin() {
     assert!(validates(243, 1_000_000, 2));
@@ -286,7 +291,7 @@ fn hedged_fee_loss_fee_config_fee_ceiling_follows_maintenance_margin() {
 // Trader loss, account-first vs counterparty-first
 // ---------------------------------------------------------------------------------------------
 
-/// (px, trader loss in atoms, insurance gain) for account-first, 50 bps. Counterparty-first is 0.
+/// (px, trader loss in atoms) for account-first, 50 bps. Insurance gain equals it. Counterparty-first is 0.
 const TABLE_50: [(u64, i128); 11] = [
     (889, 0), (888, 9), (880, 89), (870, 189), (860, 289), (850, 389),
     (840, 420), (830, 415), (820, 410), (810, 405), (800, 0),
@@ -303,6 +308,7 @@ fn hedged_fee_loss_account_first_loss_table_50_bps() {
         assert_eq!(r.loss_atoms, loss, "px {px}");
         assert_eq!(r.insurance_gain as i128, loss, "px {px}: the fee goes to insurance");
         assert_eq!(r.liquidated, px <= 888, "px {px}");
+        assert_eq!(r.short_left, -(Q as i128), "px {px}");
     }
 }
 
@@ -312,6 +318,7 @@ fn hedged_fee_loss_account_first_loss_table_100_bps() {
         let r = run(100, px, false);
         assert_eq!(r.loss_atoms, loss, "px {px}");
         assert_eq!(r.insurance_gain as i128, loss, "px {px}");
+        assert_eq!(r.liquidated, px <= 888, "px {px}");
     }
 }
 
@@ -351,7 +358,9 @@ fn hedged_fee_loss_at_the_loss_cap_the_fee_is_not_collected() {
 #[test]
 fn hedged_fee_loss_zero_fee_has_zero_loss_in_both_orders() {
     for px in STEPS {
-        assert_eq!(run(0, px, false).loss_atoms, 0, "px {px}");
+        let af = run(0, px, false);
+        assert_eq!(af.loss_atoms, 0, "px {px}");
+        assert_eq!(af.liquidated, px <= 888, "px {px}: liquidated at fee 0 too (#346)");
         assert_eq!(run(0, px, true).loss_atoms, 0, "px {px}");
     }
 }
