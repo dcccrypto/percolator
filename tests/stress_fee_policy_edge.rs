@@ -693,7 +693,7 @@ fn backing_fee_repeated_charges_conserve_total_value() {
     m.validate_shape().unwrap();
 }
 
-/// A provider + insurance sum that overflows u128 is refused before anything is read or moved.
+/// A provider + insurance sum that overflows u128 is refused before anything is moved.
 #[test]
 fn backing_fee_sum_overflow_is_refused_without_mutation() {
     let ((mut header, mut markets), mut a) = backing_fee_fixture(100, 1_000);
@@ -720,7 +720,13 @@ fn backing_fee_refused_on_negative_pnl() {
     let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut acct = PortfolioV16ViewMut::new(&mut a);
     let r = m.charge_account_backing_fee_not_atomic(&mut acct, 0, 0, 1, 1);
-    assert!(r.is_err(), "negative pnl must refuse, got {r:?}");
+    assert_eq!(r, Err(V16Error::LockActive));
     assert_eq!(acct.header.capital.get(), 100);
     assert_eq!(m.header.insurance.get(), 0);
+    // Control: the same call succeeds once PnL is back to zero.
+    acct.header.pnl = V16PodI128::new(0);
+    assert_eq!(
+        m.charge_account_backing_fee_not_atomic(&mut acct, 0, 0, 1, 1),
+        Ok(1)
+    );
 }
