@@ -153,6 +153,10 @@ impl World {
         let mut g = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         g.deposit_domain_insurance_not_atomic(domain, amt).unwrap();
     }
+    fn dom(&mut self, d: usize) -> Result<u128, V16Error> {
+        let g = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        g.domain_insurance_budget_remaining(d)
+    }
     fn vault(&self) -> u128 { self.header.vault.get() }
     fn c_tot(&self) -> u128 { self.header.c_tot.get() }
     fn ins(&self) -> u128 { self.header.insurance.get() }
@@ -385,7 +389,7 @@ fn jump_liquidating_twice_after_a_crash_does_not_double_charge() {
 }
 
 #[test]
-fn jump_insurance_spend_never_exceeds_its_balance_or_the_notional_lost() {
+fn jump_insurance_spend_stays_inside_the_winners_domain() {
     let mut w = world(STEP_BPS, MAX_DT, 1_200_000);
     for d in 0..2 {
         w.deposit_insurance(d, 5_000_000);
@@ -393,19 +397,18 @@ fn jump_insurance_spend_never_exceeds_its_balance_or_the_notional_lost() {
     let ins0 = w.ins();
     w.walk(P0 / 100);
     w.try_liq_long().unwrap();
-    assert!(w.ins() <= ins0);
-    assert!(ins0 - w.ins() <= 10 * P0 as u128, "spent more than the whole notional");
+    // a long's bankruptcy is paid only by domain 1 (5_000_000), never by both domains
+    assert!(ins0 - w.ins() <= 5_000_000, "spent more than one domain holds");
+    assert_eq!(w.dom(0).unwrap(), 5_000_000);
     w.assert_sound();
 }
 
 #[test]
 fn jump_one_step_flips_a_healthy_account_to_liquidatable() {
-    // 10% IM, deposit 1.2x IM = 12% of notional. Two 6% two-slot steps cross maintenance.
+    // 10% IM, deposit 1.2x IM = 12% of notional. One 6% two-slot step crosses maintenance (about 2% is enough).
     let mut w = world(STEP_BPS, MAX_DT, 1_200_000);
-    assert!(w.try_liq_long().is_err(), "healthy at start");
+    assert_eq!(w.try_liq_long(), Err(V16Error::NonProgress), "healthy at start");
     w.jump(MAX_DT, P0 - P0 * 6 / 100);
-    let p = w.price();
-    w.jump(MAX_DT, p - p * 6 / 100);
     let r = w.try_liq_long();
     assert!(r.is_ok(), "{r:?}");
     w.assert_sound();
@@ -415,7 +418,7 @@ fn jump_one_step_flips_a_healthy_account_to_liquidatable() {
 fn jump_small_move_does_not_liquidate_a_healthy_account() {
     let mut w = world(STEP_BPS, MAX_DT, 2_000_000);
     w.jump(1, P0 - P0 / 100);
-    assert!(w.try_liq_long().is_err());
+    assert_eq!(w.try_liq_long(), Err(V16Error::NonProgress));
     w.assert_sound();
 }
 
@@ -530,21 +533,20 @@ fn jump_crash_spends_only_the_winners_side_domain() {
     w.deposit_insurance(1, 3_000_000);
     w.walk(P0 / 100);
     w.try_liq_long().unwrap();
-    let d0 = w.header.insurance.get();
-    assert!(d0 <= 6_000_000);
-    // domain 0 untouched: total spend can come only from domain 1's 3_000_000
-    assert!(d0 >= 3_000_000, "spent {} which exceeds domain 1's balance", 6_000_000 - d0);
+    assert_eq!(w.dom(0).unwrap(), 3_000_000);
+    assert!(w.dom(1).unwrap() < 3_000_000);
     w.assert_sound();
 }
 
 #[test]
-fn jump_100x_up_with_insurance_in_the_short_losers_domain_conserves() {
+fn jump_100x_up_short_bankruptcy_spends_only_the_long_side_domain() {
     let mut w = world(STEP_BPS, MAX_DT, 1_200_000);
     w.deposit_insurance(0, 3_000_000);
     w.deposit_insurance(1, 3_000_000);
     w.walk(P0 * 100);
     w.try_liq_short().unwrap();
-    assert!(w.ins() >= 3_000_000, "spent more than domain 0 holds");
+    assert_eq!(w.dom(1).unwrap(), 3_000_000);
+    assert!(w.dom(0).unwrap() < 3_000_000);
     w.assert_sound();
     w.refresh_both();
     w.assert_sound();
