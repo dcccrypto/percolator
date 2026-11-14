@@ -19022,3 +19022,183 @@ fn issue176_liquidation_selects_same_leg_for_any_slot_order() {
         "the larger-notional leg is liquidated first"
     );
 }
+
+// Upstream #205 (a2153343), ported as a regression: v2.2's classifier already refuses this.
+
+// ---- issue #205: forfeit must not leave an Active asset one-sided ----
+
+#[test]
+fn issue205_forfeit_rejects_drain_only_leg_on_active_asset() {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    header.config.initial_margin_bps = V16PodU64::new(500);
+    header.config.maintenance_margin_bps = V16PodU64::new(250);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(100);
+    let mut long_header = account_fixture(1, 215);
+    let mut short_header = account_fixture(1, 216);
+    let stranded_q = 10_751 * POS_SCALE;
+    let residual_q = POS_SCALE;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(stranded_q),
+                exec_price: 1,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .unwrap();
+    market
+        .rebalance_reduce_position_not_atomic(
+            &mut long,
+            RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: stranded_q - residual_q,
+            },
+        )
+        .unwrap();
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.mode_short, SideModeV16::DrainOnly);
+    assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
+
+    let short_before = *short.header;
+    let asset_before = market.markets[0].engine.asset;
+    assert_eq!(
+        market
+            .forfeit_recovery_leg_not_atomic(&mut short, 0, u128::MAX)
+            .map(|_| ()),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(bytemuck::bytes_of(&*short.header), bytemuck::bytes_of(&short_before));
+    assert_eq!(
+        bytemuck::bytes_of(&market.markets[0].engine.asset),
+        bytemuck::bytes_of(&asset_before)
+    );
+
+    // The book stays two-sided and the residual pair can still close normally.
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_long_q, asset.oi_eff_short_q);
+    market
+        .rebalance_reduce_position_not_atomic(
+            &mut long,
+            RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: residual_q,
+            },
+        )
+        .unwrap();
+    market.validate_shape().unwrap();
+}
+
+// Upstream #170 (35c42e20), ported.
+
+
+// ---- issue #170: matched spent-backing history must not block restart of an empty asset ----
+
+fn issue170_consumed_history_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+) {
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+        market
+            .permissionless_auto_crank_not_atomic(
+                &mut winner,
+                AutoCrankWorkV16 {
+                    now_slot: market.header.current_slot.get(),
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            market.convert_released_pnl_to_capital_not_atomic(&mut winner).unwrap(),
+            100
+        );
+        let slot = market.header.current_slot.get();
+        market.force_asset_recovery_not_atomic(0, slot).unwrap();
+    }
+    let source = markets[0].engine.source_credit_long.try_to_runtime().unwrap();
+    let bucket = markets[0].engine.backing_long.try_to_runtime().unwrap();
+    assert_ne!(source.provider_receivable_num, 0);
+    assert_eq!(source.provider_receivable_num, bucket.consumed_liened_backing_num);
+    (header, markets, winner_header)
+}
+
+#[test]
+fn issue170_matched_spent_history_blocks_restart_until_canonicalized() {
+    let (mut header, mut markets, _winner) = issue170_consumed_history_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let slot = market.header.current_slot.get();
+    assert_eq!(
+        market.restart_empty_asset_preserving_insurance_budget_not_atomic(0, 5, slot),
+        Err(V16Error::LockActive),
+        "cumulative history blocks restart before canonicalization"
+    );
+    let (vault, c_tot, insurance) = (
+        market.header.vault.get(),
+        market.header.c_tot.get(),
+        market.header.insurance.get(),
+    );
+    market.canonicalize_spent_backing_history_not_atomic(0).unwrap();
+    assert_eq!(
+        (market.header.vault.get(), market.header.c_tot.get(), market.header.insurance.get()),
+        (vault, c_tot, insurance),
+        "canonicalization is value-neutral"
+    );
+    assert_eq!(
+        market.canonicalize_spent_backing_history_not_atomic(0),
+        Err(V16Error::NonProgress)
+    );
+    market
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(0, 5, slot)
+        .expect("restart succeeds once only history remained");
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn issue170_canonicalization_rejects_live_asset_and_live_principal() {
+    // Live asset: never allowed.
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+        market
+            .permissionless_auto_crank_not_atomic(
+                &mut winner,
+                AutoCrankWorkV16 {
+                    now_slot: market.header.current_slot.get(),
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .unwrap();
+        market.convert_released_pnl_to_capital_not_atomic(&mut winner).unwrap();
+        assert_eq!(
+            market.canonicalize_spent_backing_history_not_atomic(0),
+            Err(V16Error::LockActive)
+        );
+    }
+    // Recovery asset whose provider still has fresh principal: rejected.
+    let (mut header, mut markets, _winner) = issue170_consumed_history_fixture();
+    let mut bucket = markets[0].engine.backing_long.try_to_runtime().unwrap();
+    bucket.fresh_unliened_backing_num = BOUND_SCALE;
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&bucket);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let before = market.markets[0].engine;
+    assert!(market.canonicalize_spent_backing_history_not_atomic(0).is_err());
+    assert_eq!(
+        bytemuck::bytes_of(&market.markets[0].engine),
+        bytemuck::bytes_of(&before)
+    );
+}

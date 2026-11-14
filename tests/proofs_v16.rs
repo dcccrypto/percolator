@@ -32,6 +32,7 @@ use percolator::v16::{
     kani_source_claim_domain_first_burn_partition,
     kani_source_credit_state_realizable_support_for_claim_num,
     kani_source_credit_state_realizable_support_for_face,
+    kani_source_domain_capacity_after_admission,
     kani_source_lien_fee_after_backing_release, kani_target_effective_lag_adverse_delta,
     kani_terminal_claim_free_overlap_recredit, kani_terminal_slab_asset_step,
     kani_terminal_slab_wait_continuation, kani_trade_preexisting_oi_reduction_gate,
@@ -1141,6 +1142,61 @@ fn proof_v16_sparse_source_domain_cap_full_rejects_new_domain() {
         "sparse source-domain cap-full rejection covers symbolic new domain"
     );
     assert_eq!(rejected, Err(V16Error::LockActive));
+}
+
+// Every active leg has one distinct latent favorable source domain. An accepted candidate must
+// leave enough physical slots to materialize that entire reserved union in any settlement order.
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::solver(cadical)]
+fn proof_v16_source_capacity_admission_closes_all_favorable_domains() {
+    let occupied_raw: u8 = kani::any();
+    let missing_active_raw: u8 = kani::any();
+    let candidate_missing: bool = kani::any();
+    kani::assume(occupied_raw as usize <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+    kani::assume(missing_active_raw as usize <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+
+    let occupied = occupied_raw as usize;
+    let missing_active = missing_active_raw as usize;
+    let reserved_before = occupied + missing_active;
+    kani::assume(reserved_before <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+    let candidate_reservation = usize::from(candidate_missing);
+    let required = reserved_before + candidate_reservation;
+    let admission =
+        kani_source_domain_capacity_after_admission(occupied, missing_active, candidate_missing);
+
+    if required > PORTFOLIO_SOURCE_DOMAIN_CAP {
+        assert_eq!(admission, Err(V16Error::LockActive));
+        assert!(candidate_missing);
+        assert_eq!(reserved_before, PORTFOLIO_SOURCE_DOMAIN_CAP);
+        kani::cover!(
+            occupied < PORTFOLIO_SOURCE_DOMAIN_CAP && missing_active > 0,
+            "latent active domains reject over-admission before the table is physically full"
+        );
+        return;
+    }
+
+    let admitted_required = admission.unwrap();
+    assert_eq!(admitted_required, required);
+    let mut materialized = occupied;
+    let mut latent = missing_active + candidate_reservation;
+    while latent != 0 {
+        assert!(materialized < PORTFOLIO_SOURCE_DOMAIN_CAP);
+        materialized += 1;
+        latent -= 1;
+        assert_eq!(materialized + latent, admitted_required);
+    }
+    assert_eq!(materialized, admitted_required);
+    assert!(materialized <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+
+    kani::cover!(
+        candidate_missing && missing_active > 0 && admitted_required == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "multiple latent domains materialize at the exact capacity boundary"
+    );
+    kani::cover!(
+        !candidate_missing && reserved_before == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "a represented candidate remains admissible at full reserved capacity"
+    );
 }
 
 #[kani::proof]
@@ -7723,6 +7779,211 @@ fn proof_v16_cross_account_source_support_sum_capped_by_shared_backing() {
     assert!(support_b <= b);
 }
 
+// Issue #250: the same cross-account bound with a lien outstanding. One claimant
+// has pledged `lien` atoms of the domain's backing and locked at least as much
+// face (`lien + haircut`, the haircut being the extra face a lien created below
+// the full rate locks). The lien holder is credited its pledged backing; the two
+// other claimants are credited at the stored rate. Liened backing is in neither
+// term of the rate, so (1) the lien plus both soft credits still fit in the
+// shared backing, and (2) when the backing covers every claim the lien cuts
+// nobody: both unliened claimants are credited their full face.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_lien_and_unliened_source_support_sum_capped_by_shared_backing() {
+    let lien_raw: u8 = kani::any();
+    let haircut_raw: u8 = kani::any();
+    let a_raw: u8 = kani::any();
+    let b_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    kani::assume(lien_raw <= 31 && haircut_raw <= 15);
+    kani::assume((1..=31).contains(&a_raw));
+    kani::assume((1..=31).contains(&b_raw));
+    kani::assume(backing_raw >= lien_raw && backing_raw <= 127);
+    let lien = lien_raw as u128;
+    let a = a_raw as u128;
+    let b = b_raw as u128;
+    let backing = backing_raw as u128;
+    let total = lien + haircut_raw as u128 + a + b;
+
+    let mut source_credit = SourceCreditStateV16 {
+        positive_claim_bound_num: total * BOUND_SCALE,
+        exact_positive_claim_num: total * BOUND_SCALE,
+        fresh_reserved_backing_num: backing * BOUND_SCALE,
+        valid_liened_backing_num: lien * BOUND_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    source_credit.credit_rate_num =
+        kani_expected_source_credit_rate_num_for_state(source_credit).unwrap();
+
+    let support_a = kani_source_credit_state_realizable_support_for_face(source_credit, a).unwrap();
+    let support_b = kani_source_credit_state_realizable_support_for_face(source_credit, b).unwrap();
+
+    kani::cover!(
+        lien > 0 && backing < total && support_a > 0,
+        "lien beside a partially backed haircut"
+    );
+    kani::cover!(
+        lien > 0 && haircut_raw > 0 && backing >= total,
+        "sub-rate lien in a domain that has since become fully backed"
+    );
+    kani::cover!(
+        lien > 0 && backing == lien,
+        "all backing pledged leaves nothing for unliened face"
+    );
+
+    assert!(lien + support_a + support_b <= backing);
+    assert!(support_a <= a);
+    assert!(support_b <= b);
+    if backing >= total && backing > lien {
+        assert_eq!(source_credit.credit_rate_num, CREDIT_RATE_SCALE);
+        assert_eq!(support_a, a);
+        assert_eq!(support_b, b);
+    }
+}
+
+// Issue #250: pledging and un-pledging backing through the production lien
+// kernels. Creating a lien never raises the credit rate, never cuts the rate of
+// a domain whose backing covers its claims, and never lifts the rate above the
+// lien-free rate; releasing it restores the exact pre-lien rate.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_lien_create_release_never_cuts_fully_backed_domain_rate() {
+    let claim_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    let lien_raw: u8 = kani::any();
+    kani::assume((1..=63).contains(&claim_raw));
+    kani::assume(backing_raw <= 127);
+    // A lien pledges unliened backing and locks at least as much face.
+    kani::assume(lien_raw > 0 && lien_raw <= backing_raw && lien_raw <= claim_raw);
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let backing_num = backing_raw as u128 * BOUND_SCALE;
+    let lien_num = lien_raw as u128 * BOUND_SCALE;
+
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: backing_num,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let rate_before = kani_expected_source_credit_rate_num_for_state(source).unwrap();
+
+    let (bucket_liened, source_liened) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+            bucket, source, 0, lien_num,
+        )
+        .unwrap();
+    let rate_liened = kani_expected_source_credit_rate_num_for_state(source_liened).unwrap();
+
+    let (bucket_released, source_released) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_terminal_release_delta(
+            bucket_liened,
+            source_liened,
+            lien_num,
+        )
+        .unwrap();
+    let rate_released = kani_expected_source_credit_rate_num_for_state(source_released).unwrap();
+
+    kani::cover!(
+        backing_raw >= claim_raw && lien_raw < backing_raw,
+        "lien on a fully backed domain"
+    );
+    kani::cover!(
+        backing_raw < claim_raw && lien_raw < backing_raw && rate_liened > 0,
+        "lien on a partially backed domain"
+    );
+    kani::cover!(rate_liened < rate_before, "lien lowers a haircut rate");
+
+    assert!(rate_liened <= rate_before);
+    if backing_raw >= claim_raw && lien_raw < backing_raw {
+        assert_eq!(rate_before, CREDIT_RATE_SCALE);
+        assert_eq!(rate_liened, CREDIT_RATE_SCALE);
+    }
+    assert_eq!(bucket_released, bucket);
+    assert_eq!(source_released, source);
+    assert_eq!(rate_released, rate_before);
+}
+
+// Issue #250: the lien-aware rate after a provider-side backing debit, with a
+// lien outstanding. A debit that leaves the domain at the full rate leaves at
+// least as much backing as there are claims (liened and unliened), and the rate
+// stays full down to the last unliened atom above the claims. The public
+// provider gate keeps master's stricter watermark (unliened backing >= the
+// whole claim bound), so every withdrawal it admits also leaves the full rate.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_backing_withdraw_beside_lien_cannot_underback_claims() {
+    let backing_raw: u8 = kani::any();
+    let lien_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    kani::assume(backing_raw <= 127 && claim_raw <= 127);
+    kani::assume(lien_raw <= backing_raw && lien_raw <= claim_raw);
+    kani::assume(claim_raw > 0);
+    kani::assume(withdraw_raw > 0 && withdraw_raw <= backing_raw - lien_raw);
+    let backing_num = backing_raw as u128 * BOUND_SCALE;
+    let lien_num = lien_raw as u128 * BOUND_SCALE;
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let withdraw_num = withdraw_raw as u128 * BOUND_SCALE;
+
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: backing_num,
+        valid_liened_backing_num: lien_num,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num - lien_num,
+        valid_liened_backing_num: lien_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+
+    let (_, source_after) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_withdraw_delta(
+            bucket,
+            source,
+            0,
+            withdraw_num,
+        )
+        .unwrap();
+    let post_rate = kani_expected_source_credit_rate_num_for_state(source_after).unwrap();
+    let backing_after = backing_raw - withdraw_raw;
+
+    kani::cover!(
+        lien_raw > 0 && post_rate == CREDIT_RATE_SCALE,
+        "backing debit beside a lien keeps the full rate"
+    );
+    kani::cover!(
+        lien_raw > 0 && post_rate < CREDIT_RATE_SCALE,
+        "underbacking debit beside a lien drops below the full rate"
+    );
+
+    assert_eq!(
+        source_after.fresh_reserved_backing_num,
+        backing_num - withdraw_num
+    );
+    assert_eq!(source_after.valid_liened_backing_num, lien_num);
+    if post_rate == CREDIT_RATE_SCALE {
+        assert!(backing_after >= claim_raw);
+    }
+    if backing_after >= claim_raw && backing_after > lien_raw {
+        assert_eq!(post_rate, CREDIT_RATE_SCALE);
+    }
+}
+
 // Global junior-bound aggregation invariant: the group-level junior claim bound
 // (`pnl_pos_bound_tot_num`) is the denominator for the non-source haircut
 // (`haircut_effective_support`) and the resolved-payout snapshot, so it must
@@ -8207,6 +8468,390 @@ fn proof_v16_resolved_winddown_releases_impaired_insurance_lien() {
     assert_eq!(source_after.valid_liened_insurance_num, 0);
     assert_eq!(source_after.impaired_liened_insurance_num, 0);
     assert_eq!(source_after, SourceCreditStateV16::EMPTY);
+}
+
+// Issue #243: expiry liveness for the domains a refresh reads but the account
+// does not reference yet. A favorable K/F delta is credited to the leg's
+// favorable source domain during the same refresh that then reads its credit
+// rate, so the scan continues past the roster into each active leg's latent
+// domain. The theorem drives the production scan step through both phases and
+// the production expiry transition over every roster / leg / bucket ordering of
+// a Kani-sized account: roster domains keep their priority, each call selects
+// at most one bucket and strictly lowers the number of lapsed buckets the
+// account reads, and a future bucket, an inactive leg's domain or a domain the
+// account does not read is never selected.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_live_latent_source_backing_expiry_is_bounded_complete_and_isolated() {
+    const DOMAINS: usize = 4;
+    const LEGS: usize = 3;
+    assert_eq!(PORTFOLIO_SOURCE_DOMAIN_CAP, DOMAINS);
+    let roster_mask: u8 = kani::any();
+    let lapsed_mask: u8 = kani::any();
+    let future_mask: u8 = kani::any();
+    let leg_active: [bool; LEGS] = kani::any();
+    let leg_domain: [u8; LEGS] = kani::any();
+    let domain_mask = (1u8 << DOMAINS) - 1;
+    kani::assume(roster_mask & !domain_mask == 0);
+    kani::assume(lapsed_mask & !domain_mask == 0);
+    kani::assume(future_mask & !domain_mask == 0);
+    kani::assume(lapsed_mask & future_mask == 0);
+    let mut leg = 0usize;
+    while leg < LEGS {
+        kani::assume((leg_domain[leg] as usize) < DOMAINS);
+        leg += 1;
+    }
+
+    // Domains whose credit rate a refresh of this account reads: existing
+    // claims plus every active leg's favorable domain.
+    let mut read_mask = roster_mask;
+    leg = 0;
+    while leg < LEGS {
+        if leg_active[leg] {
+            read_mask |= 1u8 << leg_domain[leg];
+        }
+        leg += 1;
+    }
+
+    let now_slot = 10u64;
+    let mut remaining = lapsed_mask;
+    let mut calls = 0usize;
+    while calls <= DOMAINS {
+        let rank_before = (remaining & read_mask).count_ones();
+        let mut expected = None;
+        let mut domain = 0usize;
+        while domain < DOMAINS {
+            let bit = 1u8 << domain;
+            if expected.is_none() && roster_mask & bit != 0 && remaining & bit != 0 {
+                expected = Some(domain);
+            }
+            domain += 1;
+        }
+        leg = 0;
+        while leg < LEGS {
+            let leg_bit = 1u8 << leg_domain[leg];
+            if expected.is_none() && leg_active[leg] && remaining & leg_bit != 0 {
+                expected = Some(leg_domain[leg] as usize);
+            }
+            leg += 1;
+        }
+
+        // Roster phase: the compact roster is ordered by domain and ends at
+        // the first sparse-tail entry.
+        let mut selected = None;
+        let mut stopped = false;
+        let mut roster_slots = 0usize;
+        domain = 0;
+        while domain < DOMAINS {
+            let bit = 1u8 << domain;
+            if roster_mask & bit != 0 {
+                if !stopped {
+                    let fresh = (remaining | future_mask) & bit != 0;
+                    (selected, stopped) =
+                        MarketGroupV16ViewMut::<u64>::kani_lapsed_source_backing_scan_step(
+                            selected,
+                            false,
+                            true,
+                            domain,
+                            if fresh {
+                                BackingBucketStatusV16::Fresh
+                            } else {
+                                BackingBucketStatusV16::Empty
+                            },
+                            if remaining & bit != 0 {
+                                now_slot
+                            } else {
+                                now_slot + 1
+                            },
+                            now_slot,
+                        );
+                }
+                roster_slots += 1;
+            }
+            domain += 1;
+        }
+        if !stopped && roster_slots < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            (selected, stopped) =
+                MarketGroupV16ViewMut::<u64>::kani_lapsed_source_backing_scan_step(
+                    selected,
+                    true,
+                    false,
+                    0,
+                    BackingBucketStatusV16::Empty,
+                    0,
+                    now_slot,
+                );
+            assert!(stopped && selected.is_none());
+        }
+
+        // Latent phase: only when the roster selected nothing, no sparse tail,
+        // `occupied` is the leg's active flag.
+        if selected.is_none() {
+            stopped = false;
+            leg = 0;
+            while leg < LEGS {
+                if !stopped {
+                    let active = leg_active[leg];
+                    let bit = 1u8 << leg_domain[leg];
+                    let (domain, bucket_status, expiry_slot) = if active {
+                        (
+                            leg_domain[leg] as usize,
+                            if (remaining | future_mask) & bit != 0 {
+                                BackingBucketStatusV16::Fresh
+                            } else {
+                                BackingBucketStatusV16::Empty
+                            },
+                            if remaining & bit != 0 {
+                                now_slot
+                            } else {
+                                now_slot + 1
+                            },
+                        )
+                    } else {
+                        (0, BackingBucketStatusV16::Empty, 0)
+                    };
+                    (selected, stopped) =
+                        MarketGroupV16ViewMut::<u64>::kani_lapsed_source_backing_scan_step(
+                            selected,
+                            false,
+                            active,
+                            domain,
+                            bucket_status,
+                            expiry_slot,
+                            now_slot,
+                        );
+                }
+                leg += 1;
+            }
+        }
+        assert_eq!(selected, expected);
+
+        if let Some(selected_domain) = selected {
+            let selected_bit = 1u8 << selected_domain;
+            assert!(remaining & selected_bit != 0);
+            assert!(future_mask & selected_bit == 0);
+            assert!(read_mask & selected_bit != 0);
+            remaining &= !selected_bit;
+            assert_eq!((remaining & read_mask).count_ones() + 1, rank_before);
+            let bucket = BackingBucketV16 {
+                market_id: 1,
+                fresh_unliened_backing_num: BOUND_SCALE,
+                expiry_slot: now_slot,
+                status: BackingBucketStatusV16::Fresh,
+                ..BackingBucketV16::EMPTY
+            };
+            let source = SourceCreditStateV16 {
+                fresh_reserved_backing_num: BOUND_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            };
+            let (expired, source_after) =
+                MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_expiry_delta(
+                    bucket, source, now_slot,
+                )
+                .unwrap();
+            assert_eq!(expired.status, BackingBucketStatusV16::Expired);
+            assert_eq!(expired.fresh_unliened_backing_num, 0);
+            assert_eq!(source_after.fresh_reserved_backing_num, 0);
+        } else {
+            assert_eq!(rank_before, 0);
+        }
+        calls += 1;
+    }
+
+    assert_eq!(remaining & read_mask, 0);
+    assert_eq!(remaining & !read_mask, lapsed_mask & !read_mask);
+
+    kani::cover!(
+        lapsed_mask & read_mask == 0,
+        "no lapsed bucket the account reads is a no-op"
+    );
+    kani::cover!(
+        roster_mask == 0 && lapsed_mask & read_mask != 0,
+        "a latent domain is expired with an empty roster"
+    );
+    kani::cover!(
+        lapsed_mask & roster_mask != 0 && lapsed_mask & read_mask & !roster_mask != 0,
+        "roster and latent domains drain together"
+    );
+    kani::cover!(
+        (lapsed_mask & read_mask & !roster_mask).count_ones() > 1,
+        "several latent domains drain"
+    );
+    kani::cover!(
+        !leg_active[0] && leg_active[1] && lapsed_mask & (1u8 << leg_domain[1]) != 0,
+        "scan skips an inactive leg slot"
+    );
+    kani::cover!(
+        lapsed_mask & !read_mask != 0,
+        "a lapsed bucket the account does not read stays untouched"
+    );
+    kani::cover!(
+        future_mask & read_mask != 0,
+        "future backing remains isolated"
+    );
+}
+
+// Issue #243 at the production classifier. With a current certificate and no
+// other obligation, an account holding one open leg needs a refresh exactly
+// when the bucket of that leg's favorable domain `(asset, opposite side)` is
+// Fresh at or past the authenticated slot. The leg's own-side bucket, where its
+// losses go, never makes the account actionable.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_lapsed_latent_favorable_backing_forces_live_refresh() {
+    let leg_short: bool = kani::any();
+    let favorable_status_raw: u8 = kani::any();
+    let own_status_raw: u8 = kani::any();
+    let favorable_expiry: u64 = kani::any();
+    let own_expiry: u64 = kani::any();
+    let now_slot: u64 = kani::any();
+    kani::assume(favorable_status_raw < 4 && own_status_raw < 4);
+    kani::assume(favorable_expiry != 0 && own_expiry != 0);
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    kani::assume(now_slot >= header.current_slot.get());
+    let market_id = markets[0].engine.asset.market_id.get();
+    let side = if leg_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    // One open unit on each side; this account owns the `side` leg.
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let (side_epoch, kf_epoch) = match side {
+        SideV16::Long => (asset.epoch_long, asset.kf_epoch_long),
+        SideV16::Short => (asset.epoch_short, asset.kf_epoch_short),
+    };
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id,
+        side,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
+        kf_epoch_snap: kf_epoch,
+        epoch_snap: side_epoch,
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: side_epoch,
+        b_stale: false,
+        stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
+    });
+    let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
+    active_bitmap_set(&mut bitmap, 0).unwrap();
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: bitmap,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+
+    let bucket_for = |status_raw: u8, expiry_slot: u64| match status_raw {
+        1 => BackingBucketV16 {
+            market_id,
+            fresh_unliened_backing_num: BOUND_SCALE,
+            expiry_slot,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        },
+        2 => BackingBucketV16 {
+            market_id,
+            expiry_slot,
+            status: BackingBucketStatusV16::Expired,
+            ..BackingBucketV16::EMPTY
+        },
+        3 => BackingBucketV16 {
+            market_id,
+            impaired_liened_backing_num: BOUND_SCALE,
+            expiry_slot,
+            status: BackingBucketStatusV16::Impaired,
+            ..BackingBucketV16::EMPTY
+        },
+        _ => BackingBucketV16::EMPTY,
+    };
+    let source_for = |bucket: BackingBucketV16| SourceCreditStateV16 {
+        fresh_reserved_backing_num: bucket.fresh_unliened_backing_num,
+        impaired_liened_backing_num: bucket.impaired_liened_backing_num,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let favorable = bucket_for(favorable_status_raw, favorable_expiry);
+    let own = bucket_for(own_status_raw, own_expiry);
+    // A long's gains are owed by (asset, Short); a short's by (asset, Long).
+    let (long_bucket, short_bucket) = if leg_short {
+        (favorable, own)
+    } else {
+        (own, favorable)
+    };
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&long_bucket);
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&short_bucket);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&source_for(long_bucket));
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&source_for(short_bucket));
+    header.source_fresh_backing_total_num = V16PodU128::new(
+        long_bucket.fresh_unliened_backing_num + short_bucket.fresh_unliened_backing_num,
+    );
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let summary = market
+        .build_actionable_summary_at_slot(&account.as_view(), now_slot)
+        .unwrap();
+
+    let favorable_lapsed =
+        favorable.status == BackingBucketStatusV16::Fresh && favorable_expiry <= now_slot;
+    assert_eq!(summary.stale, favorable_lapsed);
+    assert_eq!(summary.is_actionable(), favorable_lapsed);
+    assert!(!summary.liquidatable && !summary.source_liens_releasable);
+
+    let own_lapsed = own.status == BackingBucketStatusV16::Fresh && own_expiry <= now_slot;
+    kani::cover!(
+        !leg_short && favorable_lapsed,
+        "a long's lapsed short-domain bucket is actionable"
+    );
+    kani::cover!(
+        leg_short && favorable_lapsed,
+        "a short's lapsed long-domain bucket is actionable"
+    );
+    kani::cover!(
+        favorable.status == BackingBucketStatusV16::Fresh && favorable_expiry == now_slot,
+        "equal-slot expiry is actionable"
+    );
+    kani::cover!(
+        favorable.status == BackingBucketStatusV16::Fresh && favorable_expiry > now_slot,
+        "future favorable backing is not actionable"
+    );
+    kani::cover!(
+        own_lapsed && !favorable_lapsed,
+        "a lapsed own-side bucket alone is not actionable"
+    );
+    kani::cover!(
+        favorable.status == BackingBucketStatusV16::Impaired && own_lapsed,
+        "non-Fresh favorable backing is never selected"
+    );
 }
 
 #[kani::proof]
@@ -9549,6 +10194,8 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     // both cohorts stale. asset_is_loss_stale_at_slot is then true on its FIRST
     // clause and the flag is set whether or not the slot caught up -- the mirror
     // of the empty-market case above, which is clear for the same reason.
+    assert_eq!(asset_after.kf_epoch_long, expected_asset_slot);
+    assert_eq!(asset_after.kf_epoch_short, expected_asset_slot);
     assert_eq!(asset_after.stale_account_count_long, 1);
     assert_eq!(asset_after.stale_account_count_short, 1);
     assert!(outcome.loss_stale_after);

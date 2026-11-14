@@ -49,6 +49,25 @@ pub const MAX_BACKING_FEE_UTIL_BPS: u64 = 10_000;
 /// so the trigger at 1e20 requires ~1e7 sustained max-budget accruals before flipping.
 pub const STRESS_ENVELOPE_TRIGGER_BPS_E9: u128 = 100_000_000_000_000_000_000;
 
+/// Admission resource invariant for latent favorable settlement domains.
+/// `occupied + missing_active` is the reserved pre-state; admission adds the
+/// candidate only when its favorable source is not already materialized.
+#[inline]
+fn source_domain_capacity_after_admission(
+    occupied: usize,
+    missing_active: usize,
+    candidate_missing: bool,
+) -> V16Result<usize> {
+    let required = occupied
+        .checked_add(missing_active)
+        .and_then(|value| value.checked_add(usize::from(candidate_missing)))
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    if required > PORTFOLIO_SOURCE_DOMAIN_CAP {
+        return Err(V16Error::LockActive);
+    }
+    Ok(required)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BackingDomainFeeSplitV16 {
     pub lien_delta_atoms: u128,
@@ -650,6 +669,15 @@ pub fn kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
         capital,
         remaining_active_bitmap,
     ))
+}
+
+#[cfg(kani)]
+pub fn kani_source_domain_capacity_after_admission(
+    occupied: usize,
+    missing_active: usize,
+    candidate_missing: bool,
+) -> V16Result<usize> {
+    source_domain_capacity_after_admission(occupied, missing_active, candidate_missing)
 }
 
 #[cfg(kani)]
@@ -1975,10 +2003,14 @@ impl V16Core {
         mut asset: AssetStateV16,
         retained_effective_oi_q: u128,
     ) -> V16Result<(PortfolioLegV16, AssetStateV16)> {
+        let side_effective_oi_q = match leg.side {
+            SideV16::Long => asset.oi_eff_long_q,
+            SideV16::Short => asset.oi_eff_short_q,
+        };
         if !leg.active
             || leg.basis_pos_q == 0
             || leg.loss_weight == 0
-            || retained_effective_oi_q == 0
+            || (retained_effective_oi_q == 0 && side_effective_oi_q != 0)
             || retained_effective_oi_q > leg.basis_pos_q.unsigned_abs()
         {
             return Err(V16Error::InvalidLeg);
@@ -2111,10 +2143,15 @@ impl V16Core {
             }
         };
         let raw_abs_q = leg.basis_pos_q.unsigned_abs();
+        let side_effective_oi_q = match leg.side {
+            SideV16::Long => asset.oi_eff_long_q,
+            SideV16::Short => asset.oi_eff_short_q,
+        };
         let valid_effective_clear = if prior_reset_epoch || raw_abs_q == 0 {
             clear_effective_oi_q == 0
         } else {
             (1..=raw_abs_q).contains(&clear_effective_oi_q)
+                || (clear_effective_oi_q == 0 && side_effective_oi_q == 0)
         };
         if !leg.active || !valid_effective_clear {
             return Err(V16Error::InvalidLeg);
@@ -2743,6 +2780,9 @@ impl V16Core {
     /// The first sparse-tail entry terminates the scan; otherwise the first
     /// occupied lapsed Fresh bucket is selected and terminates the scan.
     /// (upstream c09d4575)
+    /// The latent-domain scan over active legs takes the same step with no
+    /// sparse tail: `occupied` is the leg's active flag and `domain` the leg's
+    /// favorable source domain (#243).
     fn kernel_lapsed_source_backing_scan_step(
         selected: Option<usize>,
         sparse_tail: bool,
@@ -3445,6 +3485,28 @@ impl V16Core {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
+    /// Claim bound that the domain's unliened backing is owed to: every claim except the
+    /// face that valid liens cover with their own pledged backing.
+    ///
+    /// A lien locks at least as much face as the backing it pledges
+    /// (`required_face >= required_backing`), and locked face draws no soft credit, so the
+    /// pledged backing and the same amount of face leave the rate together. The haircut part
+    /// of a lien created below the full rate (`face - backing`) stays in the bound, which
+    /// only lowers the rate. Impaired liens are not deducted: their backing is gone or
+    /// encumbered while their face is still owed.
+    fn unliened_claim_bound_num_for_source_credit_state(
+        state: SourceCreditStateV16,
+    ) -> V16Result<u128> {
+        let lien_covered = state
+            .valid_liened_backing_num
+            .checked_add(state.valid_liened_insurance_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(state.positive_claim_bound_num.saturating_sub(lien_covered))
+    }
+
+    /// Rate at which unliened claim face is credited: available (unliened) backing over the
+    /// unliened claim bound, capped at the full rate. Liened backing is in neither term, so
+    /// a lien never cuts the rate of a domain whose total backing covers its claims (#250).
     fn expected_source_credit_rate_num_for_state(state: SourceCreditStateV16) -> V16Result<u128> {
         Self::validate_source_credit_state_shape_static(state)?;
         if state.positive_claim_bound_num == 0 {
@@ -3454,12 +3516,16 @@ impl V16Core {
         if available == 0 {
             return Ok(0);
         }
-        let rate = U256::from_u128(available)
+        let unliened_claim = Self::unliened_claim_bound_num_for_source_credit_state(state)?;
+        if available >= unliened_claim {
+            return Ok(CREDIT_RATE_SCALE);
+        }
+        // `0 < available < unliened_claim`: the quotient is below CREDIT_RATE_SCALE.
+        U256::from_u128(available)
             .checked_mul(U256::from_u128(CREDIT_RATE_SCALE))
-            .and_then(|v| v.checked_div(U256::from_u128(state.positive_claim_bound_num)))
+            .and_then(|v| v.checked_div(U256::from_u128(unliened_claim)))
             .and_then(|v| v.try_into_u128())
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        Ok(core::cmp::min(rate, CREDIT_RATE_SCALE))
+            .ok_or(V16Error::ArithmeticOverflow)
     }
 
     fn validate_source_credit_state_shape_static(state: SourceCreditStateV16) -> V16Result<()> {
@@ -4172,8 +4238,9 @@ impl V16Core {
             .checked_add(Self::bound_num_from_amount(booked_loss)?)
             .and_then(|v| v.checked_add(pending_other_num))
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let denominator = state
-            .positive_claim_bound_num
+        // #250 adaptation: price against the claims that valid liens do not cover, the same
+        // denominator as the stored (lien-aware) rate this is floored by.
+        let denominator = Self::unliened_claim_bound_num_for_source_credit_state(state)?
             .checked_add(extra_claims_num)
             .ok_or(V16Error::ArithmeticOverflow)?;
         if denominator == 0 || numerator >= denominator {
@@ -4213,7 +4280,9 @@ impl V16Core {
             return Ok(state.credit_rate_num);
         }
         let available = Self::available_backing_num_for_source_credit_state(state)?;
-        let denominator = state.positive_claim_bound_num.saturating_sub(pending_num);
+        // #250 adaptation: the loser-first stored rate is now available / unliened claims.
+        let denominator = Self::unliened_claim_bound_num_for_source_credit_state(state)?
+            .saturating_sub(pending_num);
         if denominator == 0 || available >= denominator {
             return Ok(CREDIT_RATE_SCALE);
         }
@@ -10496,6 +10565,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    /// Test-only hook (kani + fuzz, not in the wrapper build): upstream #199's
+    /// capacity regression attaches legs directly.
+    #[cfg(any(kani, feature = "fuzz"))]
+    pub fn kani_attach_leg_at_slot(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        side: SideV16,
+        basis_pos_q: i128,
+        leg_slot: usize,
+    ) -> V16Result<()> {
+        self.attach_leg_at_slot(account, asset_index, side, basis_pos_q, leg_slot)
+    }
+
     #[cfg(kani)]
     pub fn kani_residual(&self) -> u128 {
         self.residual()
@@ -10919,10 +11002,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// Withdraws unliened fresh counterparty-backing principal.
     ///
-    /// The withdrawal is allowed only if the source domain remains fully backed
-    /// (`credit_rate_num == CREDIT_RATE_SCALE`) after the principal leaves. This
-    /// prevents a backing provider from withdrawing principal that currently
-    /// supports outstanding source-credit claims.
+    /// The withdrawal is allowed only if the unliened backing left behind still
+    /// covers the domain's whole claim bound
+    /// (`available_backing_num >= positive_claim_bound_num`). This prevents a
+    /// backing provider from withdrawing principal that currently supports
+    /// outstanding source-credit claims.
+    ///
+    /// The bound deliberately includes lien-covered face, so this gate is
+    /// stricter than "the credit rate stays full" once liens exist: the
+    /// lien-aware rate (#250) is full as soon as total backing covers the
+    /// claims, while this gate also keeps unliened backing behind the face that
+    /// liens already cover. #250 changes how claims are credited, not what a
+    /// provider may take out; the watermark is the one this gate has always had.
     pub fn withdraw_fresh_counterparty_backing_not_atomic(
         &mut self,
         domain: usize,
@@ -10943,7 +11034,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             source,
             self.header.risk_epoch.get(),
         )?;
-        if source.credit_rate_num != CREDIT_RATE_SCALE {
+        if V16Core::available_backing_num_for_source_credit_state(source)?
+            < source.positive_claim_bound_num
+        {
             return Err(V16Error::LockActive);
         }
         let next_vault = self
@@ -11495,7 +11588,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// First occupied source domain of the account whose backing bucket is
     /// Fresh and lapsed at `now_slot`; the sparse tail ends the scan.
-    /// (upstream c09d4575 / 867fbdc9)
+    /// (upstream c09d4575 / 867fbdc9). Then each active leg's latent favorable
+    /// domain (see `first_lapsed_latent_source_backing_for_account_at_slot`, #243).
     fn first_lapsed_source_backing_for_account_at_slot(
         &self,
         account: &PortfolioV16View<'_>,
@@ -11518,6 +11612,73 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 selected,
                 sparse_tail,
                 occupied,
+                domain,
+                bucket_status,
+                expiry_slot,
+                now_slot,
+            );
+            selected = next_selected;
+            if stop {
+                break;
+            }
+            slot += 1;
+        }
+        if selected.is_some() {
+            return Ok(selected);
+        }
+        self.first_lapsed_latent_source_backing_for_account_at_slot(account, now_slot)
+    }
+
+    /// A favorable K/F delta on an active leg is credited to that leg's source domain
+    /// `(asset, opposite side)`, and the claim is created by the same refresh that then reads
+    /// the domain's credit rate. Until then the account's roster does not name the domain, so
+    /// the roster scan cannot see a lapsed Fresh bucket there and the settlement's
+    /// ledger-currency check rejects it with `Stale`. Without this scan no step of the
+    /// account's own crank expires it: the account can be neither refreshed nor liquidated
+    /// while the leg's pending delta stays positive, until another account's settlement
+    /// happens to normalize the bucket (#243).
+    ///
+    /// Select the first active leg, in leg-slot order, whose latent domain bucket is Fresh at
+    /// or past its expiry. These are the domains `ensure_source_domain_capacity_for_new_exposure`
+    /// reserves roster capacity for. The scan does not look at the sign of the pending delta
+    /// (a lapsed bucket backs nothing whichever way the leg settles) and is bounded by
+    /// `V16_MAX_PORTFOLIO_ASSETS_N`: three leg fields and two bucket fields per active leg
+    /// (full leg validation stays with the callers' own leg pass), and no work at all while
+    /// the market holds no Fresh backing.
+    fn first_lapsed_latent_source_backing_for_account_at_slot(
+        &self,
+        account: &PortfolioV16View<'_>,
+        now_slot: u64,
+    ) -> V16Result<Option<usize>> {
+        // A Fresh bucket always holds fresh reserved backing.
+        if self.header.source_fresh_backing_total_num.get() == 0 {
+            return Ok(None);
+        }
+        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        let mut selected = None;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = &account.header.legs[slot];
+            let active = active_bitmap_get(bitmap, slot) && decode_bool(leg.active)?;
+            let (domain, bucket_status, expiry_slot) = if active {
+                let domain = self.insurance_domain_index(
+                    leg.asset_index.get() as usize,
+                    opposite_side(decode_side(leg.side)?),
+                )?;
+                let (raw_status, expiry_slot) =
+                    self.backing_bucket_raw_status_expiry_for_domain(domain)?;
+                (
+                    domain,
+                    decode_backing_bucket_status(raw_status)?,
+                    expiry_slot,
+                )
+            } else {
+                (0, BackingBucketStatusV16::Empty, 0)
+            };
+            let (next_selected, stop) = V16Core::kernel_lapsed_source_backing_scan_step(
+                selected,
+                false,
+                active,
                 domain,
                 bucket_status,
                 expiry_slot,
@@ -16900,7 +17061,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // A source-backed winner can remain Live past the backing bucket's expiry.
         // The permissionless path commits exactly one canonical expiry transition
         // per call, then returns before valuation. Repeated cranks drain the
-        // bounded domain set without an O(source-domains) CU cliff.
+        // bounded domain set without an O(source-domains) CU cliff. The set is the
+        // account's roster plus each active leg's latent favorable domain, which the
+        // settlement below can credit a gain to and then reads the credit rate of.
         // (upstream c09d4575)
         if allow_b_chunk {
             if let Some(domain) =
@@ -18429,7 +18592,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// GATED so every flag that can be set has a currently-valid dispatch target:
     ///   stale            — Live, health cert not current, a settled prior-reset
     ///                      obligation needs permissionless detachment, or source
-    ///                      backing used by the account has reached expiry
+    ///                      backing the account's refresh reads (a roster domain
+    ///                      or an active leg's latent favorable domain) has
+    ///                      reached expiry
     ///   b_stale          — Live, some active leg has a cached or derived pending B settlement
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
@@ -20762,6 +20927,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         validate_basis(basis_pos_q)?;
         let asset = self.asset_state(asset_index)?;
         self.require_asset_risk_change_allowed(asset_index, true)?;
+        self.ensure_source_domain_capacity_for_new_exposure(&account.as_view(), asset_index, side)?;
         let a_basis = match side {
             SideV16::Long => asset.a_long,
             SideV16::Short => asset.a_short,
@@ -20839,12 +21005,53 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::Stale);
         }
-        let effective_abs_q = V16Core::effective_abs_quantity_for_detach(asset, leg)?;
+        // Upstream #132: remove only the effective OI the leg still owns on its
+        // side (min(leg, side)); this subsumes the GH#290 last-leg rule here.
+        let retained_effective_oi_q = Self::remaining_effective_oi_for_leg(asset, leg)?;
         let (leg, asset) =
-            V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
+            V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, retained_effective_oi_q)?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)
+    }
+
+    /// Effective OI a dead-leg exit removes for `leg`: its ADL-effective
+    /// quantity, bounded by what its side still carries. Each leg's effective
+    /// quantity is rounded up while the side A index is rounded down, so the
+    /// legs of one side can add up to more than the side's effective OI. The
+    /// last legs to leave own only the remainder, possibly nothing; charging
+    /// them the full rounded-up quantity underflows the side and strands the
+    /// leg (upstream issue #132; generalizes GH#290's last-leg rule, which
+    /// `effective_abs_quantity_for_detach` keeps for the Live detach paths).
+    fn remaining_effective_oi_for_leg(
+        asset: AssetStateV16,
+        leg: PortfolioLegV16,
+    ) -> V16Result<u128> {
+        let side_effective_oi_q = match leg.side {
+            SideV16::Long => asset.oi_eff_long_q,
+            SideV16::Short => asset.oi_eff_short_q,
+        };
+        Ok(V16Core::effective_abs_quantity_for_leg(asset, leg)?.min(side_effective_oi_q))
+    }
+
+    /// Detach a forfeited dead leg, removing only the effective OI it still
+    /// owns on its side (see `remaining_effective_oi_for_leg`).
+    fn clear_forfeited_leg(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
+        let leg = account.header.legs[leg_slot].try_to_runtime()?;
+        let clear_effective_oi_q =
+            Self::remaining_effective_oi_for_leg(self.asset_state(asset_index)?, leg)?;
+        self.clear_leg_at_slot_inner(
+            account,
+            asset_index,
+            leg_slot,
+            false,
+            Some(clear_effective_oi_q),
+        )
     }
 
     fn retain_recovery_loss_weight_before_detach(
@@ -20857,6 +21064,60 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         Ok(self.has_pending_domain_loss_barrier(asset_index, leg.side)?
             || !self.recovery_pending_obligation_release_allowed(asset_index, leg.side)?)
+    }
+
+    fn ensure_source_domain_capacity_for_new_exposure(
+        &self,
+        account: &PortfolioV16View<'_>,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<()> {
+        // PortfolioV16ViewMut compacts source entries. Below this threshold, the configured
+        // active-leg bound proves that every current leg plus this candidate can materialize a
+        // distinct favorable domain, so ordinary admission avoids both bounded scans.
+        let max_active = self.header.config.max_portfolio_assets.get() as usize;
+        if max_active != 0 && max_active <= PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let safe_occupied = PORTFOLIO_SOURCE_DOMAIN_CAP - max_active;
+            if account.header.source_domains[safe_occupied].is_sparse_tail_default() {
+                return Ok(());
+            }
+        }
+
+        let candidate_domain = self.insurance_domain_index(asset_index, opposite_side(side))?;
+        let candidate_missing = account.source_domain_slot(candidate_domain)?.is_none();
+
+        let mut occupied = 0usize;
+        let mut source_slot = 0usize;
+        while source_slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[source_slot];
+            if source.is_sparse_tail_default() {
+                break;
+            }
+            if source.is_occupied() {
+                occupied += 1;
+            }
+            source_slot += 1;
+        }
+
+        // A favorable K/F move can create one source record for every active leg. Reserving
+        // those absent domains before attaching another leg prevents future settle/close paths
+        // from discovering that the fixed table has no insertion slot.
+        let mut missing_active = 0usize;
+        let mut leg_slot = 0usize;
+        while leg_slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[leg_slot].try_to_runtime()?;
+            if leg.active {
+                let domain =
+                    self.insurance_domain_index(leg.asset_index as usize, opposite_side(leg.side))?;
+                if account.source_domain_slot(domain)?.is_none() {
+                    missing_active += 1;
+                }
+            }
+            leg_slot += 1;
+        }
+
+        source_domain_capacity_after_admission(occupied, missing_active, candidate_missing)?;
+        Ok(())
     }
 
     fn clear_leg(
@@ -26582,8 +26843,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let account_effective_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
                 let close_q = side_effective_oi_q.min(account_effective_q);
                 if close_q == 0 {
-                    // Zero-effective legs are either prior-reset residue or a
-                    // released pending-loss obligation. They own no live OI,
+                    // Legs with nothing left to remove: prior-reset residue, a
+                    // released pending-loss obligation, or a current-epoch leg
+                    // whose side effective OI earlier exits already consumed
+                    // and which could not reset because the side still carries
+                    // a pending obligation (issue #132). They own no live OI,
                     // but still have to detach so resolved close can finish.
                     self.clear_leg_at_slot_inner(account, asset_index, slot, false, Some(0))?;
                     self.begin_zero_oi_residue_resets(asset_index)?;
@@ -26790,6 +27054,70 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         Ok(())
+    }
+
+    /// Clears matched, value-free spent-backing history from an empty Recovery/Retired asset.
+    ///
+    /// After a matched round trip a source domain can retain `consumed == provider_receivable
+    /// <= spent` with no positions, claims, principal, liens, reservations, earnings, or
+    /// barriers left. That history is cumulative and no public transition otherwise clears it,
+    /// so it permanently blocks asset restart and retirement (issue #170). This transition is
+    /// value-neutral: it requires every live amount to be zero, moves no tokens, selects no
+    /// recipient, and only rewrites the two domains' audit counters to their empty shape. The
+    /// wrapper gates it on the asset's backing authority, whose provider history it clears.
+    pub fn canonicalize_spent_backing_history_not_atomic(
+        &mut self,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        let asset = self.asset_state(asset_index)?;
+        if !matches!(
+            asset.lifecycle,
+            AssetLifecycleV16::Recovery | AssetLifecycleV16::Retired
+        ) {
+            return Err(V16Error::LockActive);
+        }
+        let mut changed = false;
+        for side in [SideV16::Long, SideV16::Short] {
+            let domain = self.insurance_domain_index(asset_index, side)?;
+            let bucket = self.backing_bucket_for_domain(domain)?;
+            let source = self.source_credit_for_domain_shape(domain)?;
+            if bucket.consumed_liened_backing_num == 0 && source.provider_receivable_num == 0 {
+                continue;
+            }
+            let history_only = bucket.fresh_unliened_backing_num == 0
+                && bucket.valid_liened_backing_num == 0
+                && bucket.impaired_liened_backing_num == 0
+                && bucket.utilization_fee_earnings == 0
+                && bucket.market_id == asset.market_id
+                && source.provider_receivable_num == bucket.consumed_liened_backing_num
+                && source.spent_backing_num >= source.provider_receivable_num
+                && source.positive_claim_bound_num == 0
+                && source.exact_positive_claim_num == 0
+                && source.fresh_reserved_backing_num == 0
+                && source.valid_liened_backing_num == 0
+                && source.impaired_liened_backing_num == 0
+                && source.insurance_credit_reserved_num == 0
+                && source.valid_liened_insurance_num == 0
+                && source.impaired_liened_insurance_num == 0;
+            if !history_only || self.insurance_reservation_for_domain(domain)?
+                != InsuranceCreditReservationV16::EMPTY
+            {
+                return Err(V16Error::LockActive);
+            }
+            self.set_backing_bucket_for_domain(
+                domain,
+                BackingBucketV16::empty_for_market(bucket.market_id),
+            )?;
+            self.set_source_credit_for_domain(domain, SourceCreditStateV16::EMPTY)?;
+            changed = true;
+        }
+        if !changed {
+            return Err(V16Error::NonProgress);
+        }
+        // Positions and every other lifecycle obstacle must already be gone.
+        self.require_empty_asset_lifecycle_state_with_policy(asset_index, true, true, true, true)?;
+        self.validate_shape()
     }
 
     /// Restarts an empty Recovery/Retired asset with a fresh market_id.
@@ -27379,7 +27707,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if retain {
                 self.retain_leg_as_pending_obligation(account, asset_index)?;
             } else {
-                self.clear_leg(account, asset_index)?;
+                self.clear_forfeited_leg(account, asset_index)?;
                 self.begin_zero_oi_residue_resets(asset_index)?;
             }
             return Ok(DeadLegForfeitOutcomeV16 {
@@ -27530,7 +27858,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.retain_leg_as_pending_obligation(account, asset_index)?;
                 detached = false;
             } else {
-                self.clear_leg(account, asset_index)?;
+                self.clear_forfeited_leg(account, asset_index)?;
                 self.begin_zero_oi_residue_resets(asset_index)?;
             }
         }
