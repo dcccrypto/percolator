@@ -240,3 +240,185 @@ fn index_delta_overflow_fails_closed() {
         Ok(u64::MAX as u128 * u64::MAX as u128)
     );
 }
+
+// ---------------------------------------------------------------------------
+// rent_due_with_carry / rent_due_atoms
+// ---------------------------------------------------------------------------
+
+#[test]
+fn due_zero_size_charges_nothing_and_keeps_the_carry() {
+    let carry = (RENT_INDEX_DEN - 1) as u64;
+    assert_eq!(rent_due_with_carry(0, 10_000, 0, carry), Ok((0, carry)));
+    assert_eq!(rent_due_with_carry(0, u128::MAX, 0, 0), Ok((0, 0)));
+}
+
+#[test]
+fn due_with_unchanged_index_charges_nothing_and_keeps_the_carry() {
+    let carry = 12_345u64;
+    assert_eq!(rent_due_with_carry(10 * POS_SCALE, 777, 777, carry), Ok((0, carry)));
+}
+
+#[test]
+fn due_rejects_snapshot_ahead_of_index_and_oversized_carry() {
+    assert_eq!(rent_due_with_carry(1, 5, 6, 0), Err(BandRentError::InvalidInput));
+    assert_eq!(
+        rent_due_with_carry(1, 5, 0, RENT_INDEX_DEN as u64),
+        Err(BandRentError::InvalidInput)
+    );
+    // The largest legal carry is accepted.
+    assert!(rent_due_with_carry(1, 5, 0, (RENT_INDEX_DEN - 1) as u64).is_ok());
+}
+
+#[test]
+fn due_carry_rolls_into_one_atom_exactly_at_the_denominator() {
+    // total = q*delta + carry hits DEN exactly: one atom, carry back to 0.
+    let carry = (RENT_INDEX_DEN - 1) as u64;
+    assert_eq!(rent_due_with_carry(1, 1, 0, carry), Ok((1, 0)));
+    // One short of DEN: no atom yet.
+    assert_eq!(rent_due_with_carry(1, 0, 0, carry), Ok((0, carry)));
+    assert_eq!(rent_due_with_carry(1, 1, 0, carry - 1), Ok((0, carry)));
+}
+
+#[test]
+fn due_one_whole_atom_for_one_whole_unit_and_den_of_index() {
+    // q = POS_SCALE, delta = 1e9 -> exactly one atom.
+    assert_eq!(rent_due_atoms(POS_SCALE, 1_000_000_000, 0), Ok(1));
+    assert_eq!(rent_due_atoms(POS_SCALE, 999_999_999, 0), Ok(0));
+    assert_eq!(rent_due_atoms(POS_SCALE, 2_000_000_000 - 1, 0), Ok(1));
+}
+
+#[test]
+fn due_u128_path_and_u256_path_agree_at_the_overflow_seam() {
+    // Find a q where q*delta just fits, and one where it just overflows, and compare to an
+    // independent floor-division by splitting the product.
+    let delta: u128 = 1u128 << 70;
+    let q_fit = u128::MAX / delta; // q*delta <= MAX
+    let q_over = q_fit + 1; // q*delta > MAX: takes the wide path
+    for q in [q_fit, q_over] {
+        let (due, carry) = rent_due_with_carry(q, delta, 0, 0).unwrap();
+        // Check invariant: due*DEN + carry == q*delta, using u128 only on the smaller side.
+        // q*delta = q * 2^70. due*DEN = floor(q*2^70/DEN)*DEN.
+        // Compare via (q >> 0) scaled: q*2^70 / DEN with DEN = POS_SCALE*1e9.
+        let lhs_hi = (q >> 58) as u128; // q*2^70 = (q>>58)*2^128 + (q & (2^58-1))*2^70
+        let lhs_lo = (q & ((1u128 << 58) - 1)) << 70;
+        // due*DEN + carry as (hi, lo) pair
+        let (lo, c1) = due.overflowing_mul(RENT_INDEX_DEN);
+        let hi_from_mul = {
+            // high part of due * DEN
+            let d_hi = due >> 64;
+            let d_lo = due & u64::MAX as u128;
+            let den_hi = RENT_INDEX_DEN >> 64;
+            let den_lo = RENT_INDEX_DEN & u64::MAX as u128;
+            // (d_hi*2^64 + d_lo)*(den_hi*2^64 + den_lo)
+            let ll = d_lo * den_lo;
+            let lh = d_lo * den_hi;
+            let hl = d_hi * den_lo;
+            let hh = d_hi * den_hi;
+            let mid = (ll >> 64) + (lh & u64::MAX as u128) + (hl & u64::MAX as u128);
+            hh + (lh >> 64) + (hl >> 64) + (mid >> 64)
+        };
+        let _ = c1;
+        let (lo2, c2) = lo.overflowing_add(carry as u128);
+        assert_eq!((hi_from_mul + c2 as u128, lo2), (lhs_hi, lhs_lo), "q={q}");
+        assert!((carry as u128) < RENT_INDEX_DEN);
+    }
+}
+
+#[test]
+fn due_saturates_instead_of_wrapping_for_absurd_sizes() {
+    let (due, carry) = rent_due_with_carry(u128::MAX, u128::MAX, 0, 0).unwrap();
+    assert_eq!(due, u128::MAX, "due above u128::MAX saturates");
+    assert!((carry as u128) < RENT_INDEX_DEN);
+}
+
+#[test]
+fn due_split_settles_equal_one_settle_when_carry_is_threaded() {
+    // Deterministic schedule over awkward sizes: n settles with carry == one settle.
+    for &q in &[1u128, 3, POS_SCALE - 1, POS_SCALE, 7 * POS_SCALE + 5, 1u128 << 90] {
+        for &step in &[1u128, 7, 999_983, 1_000_000_007] {
+            let mut idx = 0u128;
+            let mut snap = 0u128;
+            let mut carry = 0u64;
+            let mut total = 0u128;
+            for _ in 0..50 {
+                idx += step * 3;
+                let (due, c) = rent_due_with_carry(q, idx, snap, carry).unwrap();
+                snap = idx;
+                carry = c;
+                total += due;
+            }
+            let one = rent_due_with_carry(q, idx, 0, 0).unwrap();
+            assert_eq!((total, carry), one, "q={q} step={step}");
+        }
+    }
+}
+
+#[test]
+fn due_without_carry_never_exceeds_exact_rent() {
+    // Splitting a settle with no carry never overcharges relative to one settle.
+    let q = 5 * POS_SCALE + 3;
+    let whole = rent_due_atoms(q, 10_000_000_000, 0).unwrap();
+    let mut idx = 0;
+    let mut sum = 0;
+    for _ in 0..100 {
+        let next = idx + 100_000_000;
+        sum += rent_due_atoms(q, next, idx).unwrap();
+        idx = next;
+    }
+    assert!(sum <= whole);
+}
+
+#[test]
+fn due_is_monotone_in_size_and_index() {
+    let mut last = 0;
+    for k in 0..200u128 {
+        let d = rent_due_atoms(k * POS_SCALE / 3, 4_000_000_000, 0).unwrap();
+        assert!(d >= last);
+        last = d;
+    }
+    let mut last = 0;
+    for k in 0..200u128 {
+        let d = rent_due_atoms(3 * POS_SCALE, k * 777_777_777, 0).unwrap();
+        assert!(d >= last);
+        last = d;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// rent_chargeable_atoms
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chargeable_is_min_of_due_and_loss_free_capital() {
+    assert_eq!(rent_chargeable_atoms(10, 100, 0), 10);
+    assert_eq!(rent_chargeable_atoms(100, 10, 0), 10);
+    assert_eq!(rent_chargeable_atoms(10, 100, 50), 10, "positive pnl is not capital");
+    assert_eq!(rent_chargeable_atoms(10, 100, -95), 5);
+    assert_eq!(rent_chargeable_atoms(10, 100, -100), 0);
+    assert_eq!(rent_chargeable_atoms(10, 100, -101), 0, "loss beyond capital: nothing");
+    assert_eq!(rent_chargeable_atoms(0, 100, -5), 0);
+    assert_eq!(rent_chargeable_atoms(10, 0, 0), 0);
+}
+
+#[test]
+fn chargeable_handles_extreme_pnl_and_capital() {
+    assert_eq!(rent_chargeable_atoms(u128::MAX, u128::MAX, 0), u128::MAX);
+    assert_eq!(rent_chargeable_atoms(u128::MAX, u128::MAX, i128::MIN), u128::MAX - (1u128 << 127));
+    assert_eq!(rent_chargeable_atoms(5, 1u128 << 127, i128::MIN), 0);
+    assert_eq!(rent_chargeable_atoms(5, 10, i128::MAX), 5);
+}
+
+#[test]
+fn chargeable_never_exceeds_due_nor_capital_nor_leaves_loss_uncovered() {
+    for due in [0u128, 1, 7, 100, 10_000] {
+        for cap in [0u128, 1, 7, 100, 10_000] {
+            for pnl in [-20_000i128, -100, -7, -1, 0, 1, 100] {
+                let c = rent_chargeable_atoms(due, cap, pnl);
+                assert!(c <= due && c <= cap);
+                if pnl < 0 {
+                    assert!(cap - c >= pnl.unsigned_abs().min(cap), "loss-owned capital kept");
+                }
+            }
+        }
+    }
+}
