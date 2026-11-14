@@ -528,7 +528,7 @@ fn wide_math_diff_u256_mul() {
 #[test]
 fn wide_math_diff_u256_div_rem() {
     let mut t = Tally::new("u256_div_rem");
-    let mut check = |t: &mut Tally, a: U256, b: U256| {
+    let check = |t: &mut Tally, a: U256, b: U256| {
         if b.is_zero() {
             t.ck(a.checked_div(b).is_none() && a.checked_rem(b).is_none(), || format!("div0 {a:?}"));
             t.ck(panics(|| div_rem_u256(a, b)), || format!("div_rem_u256 by 0 must panic {a:?}"));
@@ -573,7 +573,7 @@ fn wide_math_diff_u256_div_rem() {
 #[test]
 fn wide_math_diff_u256_shifts() {
     let mut t = Tally::new("u256_shl_shr");
-    let mut check = |t: &mut Tally, a: U256, k: u32| {
+    let check = |t: &mut Tally, a: U256, k: u32| {
         let ra = bg(a);
         let el = u(&ra.shl(k.min(600)).mask256());
         let er = u(&ra.shr(k.min(600)));
@@ -929,7 +929,7 @@ fn wide_math_diff_i256_arith() {
 fn wide_math_diff_floor_div_signed() {
     let mut t = Tally::new("floor_div_signed");
     let min = Sg::new(true, Big::pow2(255));
-    let mut run = |t: &mut Tally, n: Sg, d: U256| {
+    let run = |t: &mut Tally, n: Sg, d: U256| {
         if d.is_zero() {
             t.ck(panics(|| floor_div_signed_conservative(n.to_i256().unwrap(), d)), || "d=0 must panic".into());
             return;
@@ -996,7 +996,7 @@ fn wide_math_diff_floor_div_signed() {
 fn wide_math_diff_wide_signed_mul_div_floor() {
     let mut t = Tally::new("wide_signed_mul_div_floor");
     let min = Sg::new(true, Big::pow2(255));
-    let mut run = |t: &mut Tally, basis: U256, k: Sg, d: U256| {
+    let run = |t: &mut Tally, basis: U256, k: Sg, d: U256| {
         let ki = k.to_i256().unwrap();
         if d.is_zero() {
             t.ck(panics(|| wide_signed_mul_div_floor(basis, ki, d)), || "d=0 must panic".into());
@@ -1046,7 +1046,7 @@ fn wide_math_diff_wide_signed_mul_div_floor() {
 #[test]
 fn wide_math_diff_k_pair_with_carry() {
     let mut t = Tally::new("k_pair_with_carry");
-    let mut run = |t: &mut Tally, basis: u128, k0: i128, k1: i128, den: u128, carry: u128| {
+    let run = |t: &mut Tally, basis: u128, k0: i128, k1: i128, den: u128, carry: u128| {
         let d = Sg::from_i128(k1).sub(&Sg::from_i128(k0));
         let p = Sg::new(d.neg, Big::from_u128(basis).mul(&d.m));
         let tot = p.add(&Sg::new(false, Big::from_u128(carry)));
@@ -1054,7 +1054,8 @@ fn wide_math_diff_k_pair_with_carry() {
         let got = catch_unwind(AssertUnwindSafe(|| {
             wide_signed_mul_div_floor_with_carry_from_k_pair(basis, k0, k1, den, carry)
         }));
-        // The function only accepts |q| <= i128::MAX (it asserts), anything bigger must panic.
+        // The function only accepts |q| <= i128::MAX (it asserts), so -2^127 (i128::MIN, representable) panics too:
+        // same class as the known-gap tests below, kept as the documented contract here.
         if q.fits_i128_mag() {
             let want = (q.to_i128().unwrap(), rem.to_u128().unwrap());
             t.ck(got.as_ref().ok() == Some(&want), || format!("carry form basis={basis} k0={k0} k1={k1} den={den} carry={carry}: want {want:?}, got {got:?}"));
