@@ -1014,3 +1014,68 @@ fn rent_thin_account_settles_every_slot_and_the_books_balance() {
     // 600 slots at 23e9/slot on 5 units at P0: floor(5 * 1e6 * 23 * 600 / 1e9) = 69 atoms.
     assert_eq!(paid, 5 * P0 as u128 * 23 * 600 / 1_000_000_000);
 }
+
+#[test]
+fn rent_out_of_band_accrual_with_rent_changes_nothing() {
+    let mut w = World::new(band_cfg(130), 2, 10_000_000);
+    open_book(&mut w, 1, 5 * POS_SCALE);
+    w.now = 3;
+    let (_, hi) = band_bounds(P0, 130).unwrap();
+    let h = w.header;
+    let m = w.markets.clone();
+    let r = w.market(|m| m.accrue_asset_to_with_rent_not_atomic(0, 3, hi + 1, 0, 20, 20, true));
+    assert_eq!(r.map(|_| ()), Err(V16Error::BandOutOfRange));
+    assert_eq!(w.header, h);
+    assert_eq!(w.markets[0].engine, m[0].engine);
+    // At the edge with rent: accepted, and the index uses the edge price.
+    w.market(|m| m.accrue_asset_to_with_rent_not_atomic(0, 3, hi, 0, 20, 0, true))
+        .unwrap();
+    assert_eq!(w.asset().rent_index_long_num, hi as u128 * 20 * 2);
+}
+
+#[test]
+fn rent_settle_schedule_does_not_change_the_total_engine_level() {
+    // Accounts 0/1 are refreshed every step, accounts 2/3 once at the end.
+    let mut w = World::new(band_cfg(130), 4, 10_000_000);
+    let q = 7 * POS_SCALE + 13;
+    w.trade(0, 1, q).unwrap();
+    w.trade(2, 3, q).unwrap();
+    for _ in 0..80 {
+        w.now += 3;
+        w.accrue(0, 17, 17).unwrap();
+        w.refresh(0).unwrap();
+        w.refresh(1).unwrap();
+    }
+    w.refresh(2).unwrap();
+    w.refresh(3).unwrap();
+    assert_eq!(w.accounts[0].capital.get(), w.accounts[2].capital.get());
+    assert_eq!(w.accounts[1].capital.get(), w.accounts[3].capital.get());
+    assert_books(&w);
+}
+
+#[test]
+fn rent_short_leg_pays_the_short_index_and_a_winner_still_pays() {
+    let mut w = World::new(band_cfg(130), 2, 10_000_000);
+    let q = 10 * POS_SCALE;
+    w.trade(0, 1, q).unwrap();
+    // Price falls inside the band: the short (account 1) wins, the long loses.
+    w.set_target(P0 - P0 / 200);
+    for _ in 0..40 {
+        w.now += 3;
+        w.accrue(0, 0, 23).unwrap();
+    }
+    let a = w.asset();
+    let cap1 = w.accounts[1].capital.get();
+    w.refresh(1).unwrap();
+    let paid = cap1 - w.accounts[1].capital.get();
+    let owed = rent_due_atoms(q, a.rent_index_short_num, 0).unwrap();
+    assert_eq!(paid, owed, "winner pays rent on the short index");
+    assert!(w.accounts[1].pnl.get() >= 0 || w.accounts[1].capital.get() > 0);
+    // The long side's index never moved, so the long pays nothing.
+    assert_eq!(a.rent_index_long_num, 0);
+    // The long's capital moves only by its price loss (0.5% of 10 units at P0 is
+    // not rent), so check the long owes zero rent on its index.
+    assert_eq!(rent_due_atoms(q, a.rent_index_long_num, 0).unwrap(), 0);
+    w.refresh(0).unwrap();
+    assert_books(&w);
+}
