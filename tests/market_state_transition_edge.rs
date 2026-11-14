@@ -291,16 +291,10 @@ fn mst_second_resolve_never_moves_resolved_slot_back() {
     assert_eq!(w.header, hb);
 }
 
-/// REAL BUG (not fixed here, product code untouched): `resolve_market_not_atomic`
-/// (src/v16.rs:25903) never checks that the market is still Live. It only calls
-/// `decode_market_mode` and drops the result, so a second call on an already Resolved market
-/// succeeds and overwrites `resolved_slot` (src/v16.rs:25909) and `current_slot` (:25910),
-/// and clears `loss_stale_active` (:25911) and the stress envelope. `resolved_slot` is the
-/// anchor the maintenance fee stops at (src/v16.rs:25747), so a repeat call moves that anchor
-/// later and open accounts get charged for more slots after the market was already resolved.
-/// It should refuse with LockActive (or at least keep the first resolved_slot).
+/// A second resolve on an already Resolved market must not move `resolved_slot`
+/// (the maintenance-fee and payout anchor). `resolve_market_not_atomic` now
+/// returns LockActive and leaves the header untouched (src/v16.rs:25903).
 #[test]
-#[ignore = "bug: resolve_market_not_atomic can be called again on a Resolved market and rewrites resolved_slot (src/v16.rs:25903)"]
 fn mst_resolve_again_does_not_rewrite_resolved_slot() {
     let mut w = W::new();
     let r0 = w.slot() + 10;
