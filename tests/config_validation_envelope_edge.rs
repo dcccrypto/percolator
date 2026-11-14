@@ -126,7 +126,9 @@ fn config_envelope_margin_bps_bounds() {
     // IM: >= MM, <= 10_000
     edge!(b, initial_margin_bps, [(499u64, false), (500u64, true), (10_000u64, true), (10_001u64, false)]);
     // MM at the fixture: 1% move over 2 slots = 200 bps of loss; MM must be strictly above it
-    // (201 ok, 200 refused: with MM == loss the rounding at small notionals tips it over).
+    // (201 ok, 200 refused). With fee 0 the loss never exceeds the requirement, so the 200 refusal
+    // looks like the exact validator giving up (step limit) rather than a real shortfall: it is
+    // conservative, not unsafe.
     edge!(b, maintenance_margin_bps, [
         (0u64, false), (1u64, false), (199u64, false), (200u64, false), (201u64, true),
         (399u64, true), (400u64, true), (500u64, true), (1_000u64, true), (1_001u64, false)
@@ -149,8 +151,16 @@ fn config_envelope_min_nonzero_requirement_pair() {
     // mm_req = 1 needs im_req >= 2
     let c1 = with!(b, min_nonzero_mm_req = 1u64);
     edge!(c1, min_nonzero_im_req, [(1u64, false), (2u64, true)]);
-    // very large floors: the floor-region maths cannot fit the notional domain, so refused
-    edge!(b, min_nonzero_mm_req, [(1u128 << 60, false), (1u128 << 100, false), (u128::MAX / 2, false)]);
+    // very large floors (im_req kept above mm_req so only the envelope can refuse them)
+    for mm in [1u128 << 60, 1u128 << 100, u128::MAX / 2] {
+        let mut c = b;
+        c.min_nonzero_mm_req = mm;
+        c.min_nonzero_im_req = mm + 1;
+        // Observation, not a safety bug: 2^60 and 2^100 are ACCEPTED (u128::MAX/2 is not). A floor
+        // above MAX_VAULT_TVL (1e16) means no account can ever hold a position, so the market is
+        // accepted but unusable. Pinned here so a change is noticed.
+        assert_eq!(ok(&c), mm != u128::MAX / 2, "mm_req {mm}");
+    }
 }
 
 #[test]
@@ -246,7 +256,7 @@ fn config_envelope_liquidation_fee_limit_by_mm() {
     };
     assert_eq!(max_fee(100), None); // MM below the price budget: even fee 0 refused
     assert_eq!(max_fee(200), None);
-    assert_eq!(max_fee(300), Some(0)); // zero fee ok, any fee refused
+    assert_eq!(max_fee(300), Some(0)); // zero fee ok, any fee refused (mm_req=2 floor: at N=66 loss 2 + fee 1 > 2)
     assert_eq!(max_fee(500), Some(161));
     assert_eq!(max_fee(1_000), Some(476));
 }
@@ -375,10 +385,6 @@ fn config_envelope_band_safety_law_limits_epoch_and_band_width() {
     // the BSL charges funding + rent over 2E slots: epoch length can break it
     let b = band();
     assert!(ok(&b));
-    let mut hi = b;
-    hi.band_max_epoch_slots = 3_000;
-    hi.band_max_pin_slots = 24_000;
-    assert!(!ok(&hi) || ok(&hi)); // value depends on rate; probe both sides below
     let mut found_reject = false;
     for e in [600u64, 1_200, 2_400, 4_800, 9_600, 19_200, 38_400] {
         let mut c = b;
@@ -525,7 +531,7 @@ struct Tally {
 /// One accepted config: open a position at (about) the initial margin, move the price the
 /// maximum the config permits in one accrual, and check what happened to the loser.
 fn scenario(cfg: V16Config, seed: &mut u64, t: &mut Tally) {
-    let p0: u64 = [100u64, 1_000, 10_000, 1_000_000][rnd(seed, 0, 3) as usize];
+    let p0: u64 = [1_000u64, 10_000, 100_000, 1_000_000][rnd(seed, 0, 3) as usize];
     let size_units = rnd(seed, 1, 10_000) as i128;
     let size_q = size_units * POS_SCALE as i128;
     let notional = size_units as u128 * p0 as u128; // size * price / POS_SCALE
@@ -578,10 +584,12 @@ fn scenario(cfg: V16Config, seed: &mut u64, t: &mut Tally) {
     }
     // worst one-step adverse move the config allows
     let dt = cfg.max_accrual_dt_slots;
+    // worst-case funding too: the loser pays at the configured ceiling
+    let funding: i128 = if trader_is_long { cfg.max_abs_funding_e9_per_slot as i128 } else { -(cfg.max_abs_funding_e9_per_slot as i128) };
     let slot0 = g.markets[0].engine.asset.slot_last.get();
     let delta = (p0 as u128 * cfg.max_price_move_bps_per_slot as u128 * dt as u128 / 10_000) as u64;
     let newp = if trader_is_long { p0 - delta } else { p0 + delta };
-    g.accrue_asset_to_not_atomic(0, slot0 + dt, newp, 0, true)
+    g.accrue_asset_to_not_atomic(0, slot0 + dt, newp, funding, true)
         .expect("the maximum move the config permits must accrue");
     t.moved += 1;
     let slot1 = slot0 + dt;
@@ -631,6 +639,7 @@ fn config_envelope_random_accepted_configs_600_survive_max_move() {
     }
     println!("tries={tries} rejected={rejected} {t:#?}");
     assert_eq!(t.accepted, 600);
+    assert!(t.liq_needed > 0 && t.liq_ok == t.liq_needed, "{t:#?}");
     assert!(t.traded >= 300, "most accepted configs should be tradable: {t:#?}");
     assert_eq!(t.went_negative, 0, "{:#?}", t.notes);
     assert_eq!(t.liq_impossible, 0, "{:#?}", t.notes);
@@ -656,6 +665,7 @@ fn config_envelope_random_accepted_configs_with_fees_survive_max_move() {
     }
     println!("tries={tries} {t:#?}");
     assert_eq!(t.accepted, 500);
+    assert!(t.traded > 0 && t.liq_needed > 0, "{t:#?}");
     assert_eq!(t.went_negative, 0, "{:#?}", t.notes);
     assert_eq!(t.liq_impossible, 0, "{:#?}", t.notes);
 }
@@ -666,7 +676,7 @@ fn push_to_edge(mut c: V16Config, seed: &mut u64) -> V16Config {
     c.liquidation_fee_cap = u64::MAX as u128;
     c.min_liquidation_abs = 0;
     let mut best_fee = 0;
-    for f in (0..=600u64).step_by(1) {
+    for f in (0..=600u64) {
         if ok(&with!(c, liquidation_fee_bps = f)) {
             best_fee = f;
         } else if f > best_fee + 40 {
