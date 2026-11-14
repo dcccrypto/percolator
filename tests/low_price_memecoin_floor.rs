@@ -327,7 +327,7 @@ fn low_price_floor_same_price_accrual_at_tiny_price_is_a_clean_repeat() {
 // ---------- the production path: fixed target walks with the carry ----------
 
 #[test]
-fn low_price_floor_fixed_target_99pct_crash_from_1e6_reaches_one_in_34_slots() {
+fn low_price_floor_fixed_target_99pct_crash_takes_33_slots_and_the_next_leg_to_one_about_33_more() {
     let mut w = world(1_000_000);
     let n = w.walk_fixed(10_000, 1000);
     // 99% down = 990_000 atoms at 30_000 atoms per slot (linear in the fixed anchor)
@@ -355,7 +355,7 @@ fn low_price_floor_fixed_target_crash_speed_is_the_same_at_every_price_scale() {
 }
 
 #[test]
-fn low_price_floor_fixed_target_walks_back_up_from_one_to_start_and_conserves() {
+fn low_price_floor_fixed_target_walks_up_from_one_to_two_in_34_slots_and_conserves() {
     let mut w = world(1_000);
     w.walk_fixed(1, 1000);
     assert_eq!(w.price(), 1);
@@ -386,6 +386,20 @@ fn low_price_floor_price_one_with_open_interest_needs_34_slots_per_atom() {
     }
     let rem = w.rem;
     assert_eq!(w.try_path(1, 2, rem), Ok(2));
+}
+
+/// BUG (failing on purpose): the carried remainder is not stored in the asset; the first step's
+/// value comes from the caller (src/v16.rs:18221-18224, only chain-consistency is checked). Claiming
+/// 9_999 on every call gives `(1 * 300 + 9_999) / 10_000 = 1` atom a slot, so price 1 moves to 2
+/// (+100%) in one slot against a 3% cap. Whether a keeper may pass it is a wrapper question.
+#[test]
+#[ignore = "real bug: caller-chosen remainder bypasses the per-slot cap (src/v16.rs:18221)"]
+fn low_price_floor_bug_forged_remainder_must_not_beat_the_cap() {
+    let mut w = world(1);
+    w.try_path(1, 100, 0).unwrap();
+    // same target again, forged remainder: the cap says price 1 may not move in one slot
+    let _ = w.try_path(1, 100, 9_999);
+    assert_eq!(w.price(), 1, "price moved to {} in one slot at a 3% cap", w.price());
 }
 
 #[test]
@@ -443,7 +457,7 @@ fn low_price_floor_moving_target_pins_even_when_the_oracle_says_one_atom() {
 }
 
 #[test]
-fn low_price_floor_two_slot_crank_moves_a_moving_target_down_to_17() {
+fn low_price_floor_two_slot_crank_moves_a_moving_target_down_and_pins_at_16() {
     let mut w = world(33);
     while w.price() > 1 {
         let p = w.price();
@@ -462,9 +476,10 @@ fn low_price_floor_two_slot_crank_moves_a_moving_target_down_to_17() {
 /// (src/v16.rs:7203) uses `max_delta = (cap_anchor * bps + rem) / 10_000`, and a changed target
 /// resets the anchor to the current price and the carried remainder to 0
 /// (src/v16.rs:18203-18214, check at :18229), so `max_delta` is `floor(p * 0.03) = 0` every slot.
-/// Smallest fix: on a target change keep the anchor/remainder carry (or make
-/// `max_delta = max(1, ...)` whenever `distance > 0`), or refuse to list a price under 34 atoms
-/// (see the listing-floor test below).
+/// The pin limit is `ceil(10_000 / (bps * dt))` atoms: 34 with 1-slot cranks, 17 with 2-slot.
+/// Fixes: persist the remainder/anchor in the asset state so a target change does not reset the
+/// carry (needs a new stored field), or refuse to list a price under ~1_000 atoms (see the
+/// listing-floor test). `max(1, ...)` alone would let price 1 jump to 2 (100%) against a 3% cap.
 #[test]
 #[ignore = "real bug: moving oracle target pins a sub-34-atom market (src/v16.rs:7203, :18203)"]
 fn low_price_floor_bug_moving_target_must_still_make_progress_below_34_atoms() {
@@ -506,7 +521,7 @@ fn low_price_floor_smallest_safe_price_table() {
 }
 
 #[test]
-fn low_price_floor_at_the_recommended_floor_a_moving_target_always_progresses() {
+fn low_price_floor_moving_target_from_1000_atoms_walks_down_and_pins_at_33() {
     // from 1_000 atoms down with a fresh target every slot: never pinned until the floor itself
     let mut w = world(1_000);
     let mut stuck_at = None;
@@ -521,7 +536,6 @@ fn low_price_floor_at_the_recommended_floor_a_moving_target_always_progresses() 
     }
     assert_eq!(stuck_at, Some(33));
     // and the whole way from 1_000 to the pin is a 96.7% crash that took this many slots
-    assert!(w.slot > 0);
 }
 
 // ---------- positions, liquidation and rounding at tiny prices ----------
@@ -533,7 +547,7 @@ fn low_price_floor_liquidation_fires_at_tiny_price_and_conserves_value() {
     let total0 = w.total();
     assert_eq!(total0, 240);
     // healthy at the start
-    assert!(w.try_liq_long().is_err());
+    assert_eq!(w.try_liq_long(), Err(V16Error::NonProgress));
     // crash to 40: long loses 600 on a 120 deposit
     w.walk_fixed(40, 100);
     assert_eq!(w.price(), 40);
@@ -550,7 +564,7 @@ fn low_price_floor_small_move_does_not_liquidate_a_healthy_tiny_price_account() 
     let mut w = world_sized(100, STEP_BPS, 500, Q);
     w.walk_fixed(97, 10);
     w.refresh_both();
-    assert!(w.try_liq_long().is_err());
+    assert_eq!(w.try_liq_long(), Err(V16Error::NonProgress));
     assert_eq!(w.total(), 1_000);
     w.assert_sound();
 }
@@ -597,7 +611,7 @@ fn low_price_floor_no_open_interest_price_moves_freely_to_one_and_to_max() {
 }
 
 #[test]
-fn low_price_floor_crash_to_one_then_recover_returns_equity_exactly() {
+fn low_price_floor_crash_to_one_then_recover_never_mints_value() {
     let mut w = world(300);
     w.walk_fixed(1, 1000);
     // coming back up with one fixed target is linear in the anchor (1 atom): 0.03 atom a slot,
