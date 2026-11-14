@@ -262,7 +262,8 @@ fn multi_asset_one_atom_under_shared_maintenance_is_liquidatable_through_the_fla
 fn multi_asset_profit_on_one_leg_covers_loss_on_the_other_for_maintenance() {
     // long asset 0, short asset 1, both fall 10%: -10_000 on 0, +10_000 on 1. Capital 20_000.
     // The loss settles from principal at once; the gain is credited as health only once the
-    // losing side on asset 1 (b) has settled and backed it (spec.md 257: ordering, not netting).
+    // losing side on asset 1 (b) has settled and backed it (spec.md 266: open positive PnL is not backing; equity credits a gain only up to its
+    // source-domain support, src/v16.rs account_haircut_equity).
     let mut w = W::new(2);
     let (mut a, mut b) = (account(1), account(2));
     w.deposit(&mut a, 20_000);
@@ -312,7 +313,7 @@ fn multi_asset_liquidation_request_for_an_asset_the_account_does_not_hold_is_ref
     let cert = w.refresh(&mut a);
     assert!(cert.certified_liq_deficit > 0, "underwater on asset 0");
     let before = (a.capital.get(), a.pnl.get(), pos(&a, 0), w.header.insurance.get());
-    assert!(w.liquidate(&mut a, 1).is_err(), "no leg on asset 1");
+    assert_eq!(w.liquidate(&mut a, 1), Err(V16Error::InvalidLeg), "no leg on asset 1");
     assert_eq!(before, (a.capital.get(), a.pnl.get(), pos(&a, 0), w.header.insurance.get()));
     assert!(w.liquidate(&mut a, 0).is_ok(), "the held asset still is");
 }
@@ -353,6 +354,8 @@ fn multi_asset_liquidation_is_repeatable_until_healthy_or_flat_and_then_stops() 
         }
     }
     assert!(calls > 0);
+    let cert = w.refresh(&mut a);
+    assert!(cert.certified_liq_deficit == 0 || n_legs(&a) == 0, "stops only when healthy or flat: {cert:?}");
     // once both refuse, another round still refuses and changes nothing
     let snap = (a.capital.get(), a.pnl.get(), pos(&a, 0), pos(&a, 1), w.header.insurance.get(), w.header.vault.get());
     assert!(w.liquidate(&mut a, 0).is_err() && w.liquidate(&mut a, 1).is_err());
@@ -440,11 +443,11 @@ fn multi_asset_loss_on_two_assets_is_not_charged_to_either_domain_insurance() {
 }
 
 #[test]
-fn multi_asset_single_domain_loss_spends_at_most_that_domain_insurance() {
-    // the loss on record is asset 1's long domain (3): insurance there may pay, never more
-    // than the deficit (30_000 loss - 20_000 capital = 10_000)
-    let spent = bankrupt_insurance_spent(&[(1, 700)], &[3]);
-    assert!(spent <= 10_000, "spent {spent}");
+fn multi_asset_single_domain_loss_spends_exactly_the_deficit_from_that_domain_insurance() {
+    // a long loser on asset 1 is covered by domain 3 (asset 1, winners' short side); it pays
+    // exactly the deficit (30_000 loss - 20_000 capital = 10_000)
+    // (positive control for the two zero-spend tests above)
+    assert_eq!(bankrupt_insurance_spent(&[(1, 700)], &[3]), 10_000);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -490,8 +493,8 @@ fn multi_asset_close_order_of_legs_gives_the_same_final_value() {
 
 #[test]
 fn multi_asset_closing_the_losing_leg_does_not_need_initial_margin_on_the_other() {
-    // a is between MM and IM after a loss on asset 0; closing asset 0 is a reduction and must
-    // pass even though the remaining asset-1 leg alone is above the IM of the reduced equity
+    // equity 13_000 < IM 19_300 (but above MM) after a loss on asset 0: closing asset 0 is a
+    // reduction and is allowed, and it leaves asset 1 alone
     let (mut w, mut a, mut b) = two_long(20_000);
     w.move_to(0, 930); // equity 13_000, IM 9_300 + 10_000 = 19_300, MM 9_650
     let cert = w.refresh(&mut a);
@@ -502,6 +505,7 @@ fn multi_asset_closing_the_losing_leg_does_not_need_initial_margin_on_the_other(
     assert_eq!(pos(&a, 0), 0);
     assert_eq!(pos(&a, 1), Q as i128);
     assert_eq!(value(&a), 13_000);
+    w.sound(&mut [&mut a, &mut b]);
 }
 
 #[test]
@@ -526,7 +530,7 @@ fn multi_asset_partial_close_in_many_small_fills_equals_one_fill() {
 fn multi_asset_zero_size_trade_on_second_asset_is_refused_and_first_leg_untouched() {
     let (mut w, mut a, mut b) = two_long(100_000);
     let snap = (value(&a), pos(&a, 0), pos(&a, 1), n_legs(&a));
-    assert!(w.try_trade(1, &mut a, &mut b, 0).is_err());
+    assert_eq!(w.try_trade(1, &mut a, &mut b, 0), Err(V16Error::InvalidConfig));
     assert_eq!(snap, (value(&a), pos(&a, 0), pos(&a, 1), n_legs(&a)));
 }
 
@@ -664,13 +668,18 @@ fn multi_asset_conservation_through_loss_liquidation_and_close() {
     w.trade(2, &mut a, &mut c, Q as i128);
     let vault0 = w.header.vault.get();
     w.sound(&mut [&mut a, &mut b, &mut c]);
-    w.move_many(&[(0, 920), (1, 1_060)]);
-    w.refresh(&mut a);
+    // a: -12_000 on asset 0, -8_000 on its asset-1 short: equity 10_000 < MM 14_800
+    w.move_many(&[(0, 880), (1, 1_080)]);
+    let cert = w.refresh(&mut a);
+    assert_eq!((cert.certified_equity, cert.certified_maintenance_req), (10_000, 14_800));
     w.sound(&mut [&mut a, &mut b, &mut c]);
+    let mut liquidated = 0;
     for i in [2usize, 0, 1] {
-        let _ = w.liquidate(&mut a, i);
+        liquidated += w.liquidate(&mut a, i).is_ok() as u32;
         w.sound(&mut [&mut a, &mut b, &mut c]);
     }
+    assert!(liquidated > 0, "at least one cross-asset liquidation ran");
+    w.refresh(&mut a);
     w.refresh(&mut b);
     w.refresh(&mut c);
     // close whatever is left on a
@@ -678,11 +687,12 @@ fn multi_asset_conservation_through_loss_liquidation_and_close() {
         let p = pos(&a, i);
         if p > 0 {
             let cp = if i == 0 { &mut b } else { &mut c };
-            let _ = w.try_trade(i, cp, &mut a, p);
+            w.trade(i, cp, &mut a, p);
         } else if p < 0 {
-            let _ = w.try_trade(i, &mut a, &mut c, -p);
+            w.trade(i, &mut a, &mut c, -p);
         }
         w.sound(&mut [&mut a, &mut b, &mut c]);
     }
+    assert_eq!(n_legs(&a), 0);
     assert_eq!(w.header.vault.get(), vault0, "no deposit / withdrawal happened: vault is fixed");
 }
