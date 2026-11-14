@@ -25901,7 +25901,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     pub fn resolve_market_not_atomic(&mut self, resolved_slot: u64) -> V16Result<()> {
-        decode_market_mode(self.header.mode)?;
+        // Resolve once. A repeat would move resolved_slot (the fee anchor) later.
+        // Recovery -> Resolved stays allowed: the auto-crank finalizes Recovery with it.
+        if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
+            return Err(V16Error::LockActive);
+        }
         if resolved_slot < self.header.current_slot.get() {
             return Err(V16Error::Stale);
         }
