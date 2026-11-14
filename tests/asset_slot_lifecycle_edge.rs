@@ -643,7 +643,7 @@ fn register_rejects_non_empty_account() {
 }
 
 // ---------------------------------------------------------------------------
-// BUG (kept as an ignored failing test): a slot retired at slot 0 can never be reused.
+// BUG (kept as an ignored failing test): a slot retired at slot 0 cannot be reused by activate.
 // ---------------------------------------------------------------------------
 
 /// `retire_empty_asset_not_atomic` (src/v16.rs:26692) accepts now_slot = 0 and stores
@@ -653,7 +653,7 @@ fn register_rejects_non_empty_account() {
 /// to mean "not a valid retired slot" and return LockActive. So a slot that is activated and
 /// retired while the group clock is still 0 stays Retired forever, however late the caller is.
 #[test]
-#[ignore = "BUG: slot retired at slot 0 is stuck (retired_slot == 0 is treated as invalid)"]
+#[ignore = "BUG: slot retired at slot 0 cannot be activated or canonicalized (retired_slot == 0 treated as invalid)"]
 fn slot_retired_at_slot_zero_can_be_reactivated_later() {
     let (mut h, mut m) = empty_group(1, 1);
     h.activate_empty_asset_slot_not_atomic(0, &mut m[0].engine, PRICE, 0)
