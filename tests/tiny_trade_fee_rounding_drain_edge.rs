@@ -197,8 +197,7 @@ fn tiny_trade_split_sweep_never_pays_less_than_the_single_trade() {
 #[test]
 fn tiny_trade_n_one_atom_fills_pay_n_fee_atoms_at_one_atom_notional() {
     // price 1: notional of one fill is ceil(size/POS_SCALE) = 1, fee ceil(1 * 1 / 10_000) = 1.
-    // A big trade of the same total size pays the same 1 atom per POS_SCALE of size, so one
-    // million atoms of size in 1_000 fills pays 1_000 while the single trade pays 1.
+    // A single trade of the same total n atoms pays 1 atom; splitting costs n.
     for n in [1u128, 10, 1_000] {
         let mut w = World::new(1, 1, BIG);
         let mut paid = 0;
@@ -215,6 +214,11 @@ fn tiny_trade_n_one_atom_fills_pay_n_fee_atoms_at_one_atom_notional() {
 #[test]
 fn tiny_trade_fee_is_charged_to_the_taker_whichever_side_it_is() {
     let mut w = World::new(1, 1, BIG);
+    let (l0, s0) = w.caps();
+    w.trade(1, 1, 1);
+    assert_eq!(w.caps(), (l0 - 1, s0), "long taker pays, short maker does not");
+    w.trade(-1, 1, 1);
+    assert_eq!(w.caps(), (l0 - 1, s0 - 1), "short taker pays, long maker does not");
     let (lc, sc) = w.caps();
     for _ in 0..50 {
         w.trade(1, 1, 1); // long taker
@@ -222,7 +226,7 @@ fn tiny_trade_fee_is_charged_to_the_taker_whichever_side_it_is() {
     }
     let (lc2, sc2) = w.caps();
     assert_eq!((lc - lc2, sc - sc2), (50, 50));
-    assert_eq!(w.ins(), 100);
+    assert_eq!(w.ins(), 102);
     assert_eq!(w.oi(), (0, 0));
     w.assert_conserved();
 }
@@ -291,6 +295,7 @@ fn tiny_trade_open_many_then_close_once_matches_open_once_then_close_many() {
     assert_eq!(b.ins(), fb);
     a.assert_conserved();
     b.assert_conserved();
+    assert_eq!(fa, fb);
     // splitting never costs less than one open plus one close of the whole size
     let one = 2 * model_fee(size as u128 * n, price, 2);
     assert!(fa >= one && fb >= one, "fa {fa} fb {fb} one {one}");
@@ -310,9 +315,10 @@ fn tiny_trade_off_mark_fills_never_credit_the_pair_more_than_deposited() {
             if w.try_trade(1, p, 1).is_err() {
                 panic!("off-mark fill refused at off {off}");
             }
-            let _ = w.try_trade(-1, mark, 1);
+            w.trade(-1, mark, 1);
         }
         let (lc, sc) = w.caps();
+        assert_eq!(w.oi(), (0, 0));
         let (lp, sp) = w.pnls();
         let total = lc as i128 + sc as i128 + lp + sp + w.ins() as i128;
         assert!(total <= w.deposited as i128, "off {off}: pair+insurance grew by {}", total - w.deposited as i128);
