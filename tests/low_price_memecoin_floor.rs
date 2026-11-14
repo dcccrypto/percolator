@@ -120,7 +120,14 @@ impl World {
     /// One production-path crank of `dt` slots (1..=MAX_DT) towards `target`: the canonical
     /// steps a keeper wrapper would build, carrying the sub-atom remainder. `rem_in` is the
     /// remainder passed in the first step (a keeper passes the previous call's remainder).
-    fn try_path(&mut self, dt: u64, target: u64, rem_in: u16) -> Result<u64, V16Error> {
+    /// The remainder in the first step is the one stored in the asset (`_rem_in` is ignored).
+    fn try_path(&mut self, dt: u64, target: u64, _rem_in: u16) -> Result<u64, V16Error> {
+        let stored = self.markets[0].engine.asset.price_step_carry_bps_num.get();
+        self.try_path_with_rem(dt, target, stored)
+    }
+
+    /// Like `try_path`, but the first step claims `rem_in` (a keeper lying about the carry).
+    fn try_path_with_rem(&mut self, dt: u64, target: u64, rem_in: u16) -> Result<u64, V16Error> {
         let asset = self.markets[0].engine.asset;
         let target_changed = asset.raw_oracle_target_price.get() != target;
         let anchor = if target_changed {
@@ -130,7 +137,7 @@ impl World {
         };
         let exposed = asset.oi_eff_long_q.get() != 0 || asset.oi_eff_short_q.get() != 0;
         let mut cur = asset.effective_price.get();
-        let mut rem = if target_changed { 0 } else { rem_in };
+        let mut rem = rem_in;
         let mut steps = Vec::new();
         for _ in 0..dt {
             let (next, after) = canonical_band_accrual_price_step_v16(
@@ -388,37 +395,33 @@ fn low_price_floor_price_one_with_open_interest_needs_34_slots_per_atom() {
     assert_eq!(w.try_path(1, 2, rem), Ok(2));
 }
 
-/// BUG (failing on purpose): the carried remainder is not stored in the asset; the first step's
-/// value comes from the caller (src/v16.rs:18221-18224, only chain-consistency is checked). Claiming
-/// 9_999 on every call gives `(1 * 300 + 9_999) / 10_000 = 1` atom a slot, so price 1 moves to 2
-/// (+100%) in one slot against a 3% cap. Whether a keeper may pass it is a wrapper question.
+/// The carried remainder is stored in the asset (`price_step_carry_bps_num`); the first step must
+/// start from it. Claiming 9_999 on every call used to give `(1 * 300 + 9_999) / 10_000 = 1` atom
+/// a slot, so price 1 moved to 2 (+100%) in one slot against a 3% cap. Now the call is refused.
 #[test]
-#[ignore = "real bug: caller-chosen remainder bypasses the per-slot cap (src/v16.rs:18221)"]
 fn low_price_floor_bug_forged_remainder_must_not_beat_the_cap() {
     let mut w = world(1);
     w.try_path(1, 100, 0).unwrap();
     // same target again, forged remainder: the cap says price 1 may not move in one slot
-    let _ = w.try_path(1, 100, 9_999);
+    let forged = w.try_path_with_rem(1, 100, 9_999);
+    assert_eq!(forged, Err(V16Error::InvalidConfig));
     assert_eq!(w.price(), 1, "price moved to {} in one slot at a 3% cap", w.price());
 }
 
 #[test]
-fn low_price_floor_carry_remainder_is_not_stored_so_a_caller_chosen_value_buys_one_atom() {
-    // observation: with an unchanged target the first step's remainder is taken from the call.
-    // At 33 atoms 3% is 0.99 atom: remainder 0 gives no move, remainder 9_999 gives one atom.
+fn low_price_floor_carry_remainder_is_stored_so_a_caller_chosen_value_is_refused() {
+    // At 33 atoms 3% is 0.99 atom: stored carry 9_900 after one slot gives one atom on the next.
     let mut a = world(33);
     a.try_path(1, 1, 0).unwrap();
     assert_eq!(a.price(), 33);
-    let rem = a.rem;
-    let mut b = world(33);
-    b.try_path(1, 1, 0).unwrap();
-    // same target again, honest remainder 9_900 carried: moves one atom
-    assert_eq!(b.try_path(1, 1, rem), Ok(32));
-    // an invented remainder is accepted too, as long as the chain is self-consistent
-    let mut c = world(33);
-    c.try_path(1, 1, 0).unwrap();
-    assert_eq!(c.try_path(1, 1, 9_999), Ok(32));
-    c.assert_sound();
+    assert_eq!(a.markets[0].engine.asset.price_step_carry_bps_num.get(), 9_900);
+    // an invented remainder (even a self-consistent chain) is refused
+    assert_eq!(a.try_path_with_rem(1, 1, 9_999), Err(V16Error::InvalidConfig));
+    assert_eq!(a.try_path_with_rem(1, 1, 0), Err(V16Error::InvalidConfig));
+    assert_eq!(a.price(), 33);
+    // the honest stored carry moves one atom
+    assert_eq!(a.try_path(1, 1, 0), Ok(32));
+    a.assert_sound();
 }
 
 // ---------- a moving target pins the market below 34 atoms ----------
@@ -432,7 +435,7 @@ fn drift_down(w: &mut World, slots: u64) {
 }
 
 #[test]
-fn low_price_floor_moving_target_pins_at_33_atoms_today() {
+fn low_price_floor_moving_target_no_longer_pins_at_33_atoms() {
     let mut w = world(1_000);
     // a fresh target each slot, each only 1 atom (or 3%) below the price: walk to the pin
     while w.price() > 33 {
@@ -440,37 +443,39 @@ fn low_price_floor_moving_target_pins_at_33_atoms_today() {
         let t = p - (p * STEP_BPS / 10_000).max(1);
         w.try_path(1, t, 0).unwrap();
     }
-    assert_eq!(w.price(), 33);
+    // with the stored carry the price walks on below 33 and reaches the floor of 1
     drift_down(&mut w, 200);
-    assert_eq!(w.price(), 33, "the price cannot leave 33 while the target keeps changing");
+    assert_eq!(w.price(), 1, "the stored carry lets a changing target keep walking down");
     w.assert_sound();
 }
 
 #[test]
-fn low_price_floor_moving_target_pins_even_when_the_oracle_says_one_atom() {
+fn low_price_floor_moving_target_makes_progress_when_the_oracle_says_one_atom() {
     // oracle target 32, then 31, ... each fed once: the price stays where it is
     let mut w = world(33);
     for t in (1..=32).rev() {
         w.try_path(1, t, 0).unwrap();
     }
-    assert_eq!(w.price(), 33);
+    // 32 fresh targets, each ~1 atom lower: the stored carry moves the price down 20 atoms
+    // (33 -> 13) instead of leaving it at 33, and never faster than the 3% a slot cap + 1 atom
+    assert_eq!(w.price(), 13);
 }
 
 #[test]
-fn low_price_floor_two_slot_crank_moves_a_moving_target_down_and_pins_at_16() {
+fn low_price_floor_two_slot_crank_moves_a_moving_target_down_to_one() {
+    // used to pin at 16 (33 with 1-slot cranks); the stored carry keeps it walking to 1
     let mut w = world(33);
-    while w.price() > 1 {
+    let mut calls = 0;
+    while w.price() > 1 && calls < 200 {
         let p = w.price();
-        let before = p;
         w.try_path(MAX_DT, p - 1, 0).unwrap();
-        if w.price() == before {
-            break;
-        }
+        calls += 1;
     }
-    assert_eq!(w.price(), 16, "pinned at 16 with 2-slot cranks, 33 with 1-slot cranks");
+    assert_eq!(w.price(), 1, "still {} after {calls} cranks", w.price());
+    w.assert_sound();
 }
 
-/// BUG (failing on purpose): while the oracle target changes every slot, a market priced below
+/// Fixed by the stored step carry. Was: while the oracle target changes every slot, a market priced below
 /// 34 atoms cannot move even one atom in either direction, so the engine price freezes at a
 /// value the real market left long ago. Cause: `canonical_accrual_price_step_v16`
 /// (src/v16.rs:7203) uses `max_delta = (cap_anchor * bps + rem) / 10_000`, and a changed target
@@ -481,7 +486,6 @@ fn low_price_floor_two_slot_crank_moves_a_moving_target_down_and_pins_at_16() {
 /// carry (needs a new stored field), or refuse to list a price under ~1_000 atoms (see the
 /// listing-floor test). `max(1, ...)` alone would let price 1 jump to 2 (100%) against a 3% cap.
 #[test]
-#[ignore = "real bug: moving oracle target pins a sub-34-atom market (src/v16.rs:7203, :18203)"]
 fn low_price_floor_bug_moving_target_must_still_make_progress_below_34_atoms() {
     let mut w = world(33);
     drift_down(&mut w, 100);
@@ -490,7 +494,6 @@ fn low_price_floor_bug_moving_target_must_still_make_progress_below_34_atoms() {
 
 /// Same bug upward: a rising oracle cannot lift a pinned market off 33 either.
 #[test]
-#[ignore = "real bug: moving oracle target pins a sub-34-atom market (src/v16.rs:7203, :18203)"]
 fn low_price_floor_bug_moving_target_must_make_progress_upward_below_34_atoms() {
     let mut w = world(20);
     for _ in 0..100 {
@@ -521,21 +524,23 @@ fn low_price_floor_smallest_safe_price_table() {
 }
 
 #[test]
-fn low_price_floor_moving_target_from_1000_atoms_walks_down_and_pins_at_33() {
-    // from 1_000 atoms down with a fresh target every slot: never pinned until the floor itself
+fn low_price_floor_moving_target_from_1000_atoms_walks_down_to_one_without_a_pin() {
+    // from 1_000 atoms down with a fresh target every slot: a slot may round to no move, but the
+    // carry means the price never stays put for long, and it reaches the floor itself
     let mut w = world(1_000);
-    let mut stuck_at = None;
-    for _ in 0..600 {
+    let (mut still, mut worst) = (0u32, 0u32);
+    let mut slots = 0;
+    while w.price() > 1 && slots < 2_000 {
         let p = w.price();
         let t = p - (p * STEP_BPS / 10_000).max(1);
         w.try_path(1, t, 0).unwrap();
-        if w.price() == p {
-            stuck_at = Some(p);
-            break;
-        }
+        still = if w.price() == p { still + 1 } else { 0 };
+        worst = worst.max(still);
+        slots += 1;
     }
-    assert_eq!(stuck_at, Some(33));
-    // and the whole way from 1_000 to the pin is a 96.7% crash that took this many slots
+    assert_eq!(w.price(), 1, "still {} after {slots} slots", w.price());
+    assert!(worst <= 34, "{worst} slots in a row without a move");
+    w.assert_sound();
 }
 
 // ---------- positions, liquidation and rounding at tiny prices ----------

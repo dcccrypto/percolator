@@ -5838,6 +5838,9 @@ pub struct AssetStateV16 {
     /// v2.2 rent: rent charged into insurance and not yet routed to the vault LP.
     /// An LP-owned claim on insurance (excluded from insurance withdrawals).
     pub rent_unrouted_atoms: u128,
+    /// Sub-atom price-step carry (numerator over `MAX_MARGIN_BPS`) left by the last canonical
+    /// accrual step. Stored so a changing oracle target cannot reset it and pin a low price.
+    pub price_step_carry_bps_num: u16,
 }
 
 impl Default for AssetStateV16 {
@@ -5897,6 +5900,7 @@ impl Default for AssetStateV16 {
             rent_index_long_num: 0,
             rent_index_short_num: 0,
             rent_unrouted_atoms: 0,
+            price_step_carry_bps_num: 0,
         }
     }
 }
@@ -8784,6 +8788,7 @@ pub struct AssetStateV16Account {
     pub rent_index_long_num: V16PodU128,
     pub rent_index_short_num: V16PodU128,
     pub rent_unrouted_atoms: V16PodU128,
+    pub price_step_carry_bps_num: V16PodU16,
 }
 
 impl AssetStateV16Account {
@@ -8843,6 +8848,7 @@ impl AssetStateV16Account {
             rent_index_long_num: V16PodU128::new(value.rent_index_long_num),
             rent_index_short_num: V16PodU128::new(value.rent_index_short_num),
             rent_unrouted_atoms: V16PodU128::new(value.rent_unrouted_atoms),
+            price_step_carry_bps_num: V16PodU16::new(value.price_step_carry_bps_num),
         }
     }
 
@@ -8902,6 +8908,7 @@ impl AssetStateV16Account {
             rent_index_long_num: self.rent_index_long_num.get(),
             rent_index_short_num: self.rent_index_short_num.get(),
             rent_unrouted_atoms: self.rent_unrouted_atoms.get(),
+            price_step_carry_bps_num: self.price_step_carry_bps_num.get(),
         };
         validate_non_min_i128(out.k_long)?;
         validate_non_min_i128(out.k_short)?;
@@ -9278,6 +9285,7 @@ impl EngineAssetSlotV16Account {
             && asset.rent_index_long_num.get() == 0
             && asset.rent_index_short_num.get() == 0
             && asset.rent_unrouted_atoms.get() == 0
+            && asset.price_step_carry_bps_num.get() == 0
     }
 
     fn asset_state_is_empty_for_activation(asset: AssetStateV16) -> bool {
@@ -18218,15 +18226,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // favourable step never offsets an adverse one; the bound must be path-wide).
         let mut kf_travel_long = 0u128;
         let mut kf_travel_short = 0u128;
-        let mut expected_remainder = steps
-            .first()
-            .map(|step| step.price_move_remainder_before_bps_num)
-            .unwrap_or(0);
-        for (index, step) in steps.iter().enumerate() {
+        // The carry lives in the asset: the first step must start from it (the caller cannot
+        // choose it) and a target change does not reset it, so a low price keeps progressing.
+        let mut expected_remainder = asset.price_step_carry_bps_num;
+        for step in steps.iter() {
             if step.effective_price == 0
                 || step.effective_price > MAX_ORACLE_PRICE
                 || step.funding_rate_e9.unsigned_abs() > config.max_abs_funding_e9_per_slot as u128
-                || (index == 0 && target_changed && step.price_move_remainder_before_bps_num != 0)
                 || step.price_move_remainder_before_bps_num != expected_remainder
             {
                 return Err(V16Error::InvalidConfig);
@@ -18347,6 +18353,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::CounterOverflow)?;
         }
 
+        asset.price_step_carry_bps_num = expected_remainder;
         if asset.effective_price == raw_oracle_target_price {
             asset.fund_px_last = asset.effective_price;
         }
@@ -28702,6 +28709,7 @@ pub fn kani_eq_asset_state_v16_account(a: &AssetStateV16Account, b: &AssetStateV
         && a.raw_oracle_target_price.get() == b.raw_oracle_target_price.get()
         && a.effective_price.get() == b.effective_price.get()
         && a.fund_px_last.get() == b.fund_px_last.get()
+        && a.price_step_carry_bps_num.get() == b.price_step_carry_bps_num.get()
         && a.slot_last.get() == b.slot_last.get()
         && a.a_long.get() == b.a_long.get()
         && a.a_short.get() == b.a_short.get()
