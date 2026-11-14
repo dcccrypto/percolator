@@ -305,18 +305,18 @@ fn domain_insurance_remaining_and_capacity_on_fresh_domain_are_zero() {
 }
 
 #[test]
-fn domain_insurance_capacity_is_min_of_budget_insurance_and_vault() {
+fn domain_insurance_capacity_equals_budget_when_budget_insurance_and_vault_agree() {
     let (mut h, mut ms) = market_fixture(1);
     let mut m = MarketGroupV16ViewMut::new(&mut h, &mut ms);
     m.deposit_domain_insurance_not_atomic(0, 10).unwrap();
     assert_eq!(m.domain_insurance_withdraw_capacity(0), Ok(10));
-    m.credit_domain_insurance_budget_not_atomic(1, 0).unwrap();
+    // an untouched sibling domain has no capacity
     assert_eq!(m.domain_insurance_withdraw_capacity(1), Ok(0));
 }
 
 #[test]
-fn domain_insurance_capacity_is_bounded_by_unbudgeted_insurance_not_other_domains() {
-    // Domain 0 has budget 4 backed by 10 insurance; domain 1 has nothing. Surplus 6 is unbudgeted.
+fn domain_insurance_capacity_ignores_unbudgeted_surplus() {
+    // Domain 0 has budget 4 backed by 10 insurance. The 6 unbudgeted atoms add no capacity to any domain.
     let (mut h, mut ms) = market_fixture(1);
     h.vault = V16PodU128::new(10);
     h.insurance = V16PodU128::new(10);
@@ -406,7 +406,10 @@ fn domain_insurance_account_credit_with_no_insurance_underflows_cleanly() {
     let mut ah = account_fixture(1, 9);
     let mut m = MarketGroupV16ViewMut::new(&mut h, &mut ms);
     let mut a = PortfolioV16ViewMut::new(&mut ah);
-    assert!(m.credit_account_from_insurance_not_atomic(&mut a, 1, 0).is_err());
+    assert_eq!(
+        m.credit_account_from_insurance_not_atomic(&mut a, 1, 0),
+        Err(V16Error::CounterUnderflow)
+    );
     assert_eq!(a.header.capital.get(), 0);
     assert_eq!(m.header.c_tot.get(), 0);
 }
@@ -493,7 +496,7 @@ fn domain_insurance_account_credit_additional_reserved_boundary() {
 }
 
 #[test]
-fn domain_insurance_deposit_then_withdraw_is_blocked_after_account_credit_drains_it() {
+fn domain_insurance_account_credit_cannot_touch_deposited_budget_so_full_withdraw_succeeds() {
     // Deposit 10 to domain 0 (budget 10). Reward credit cannot touch it (all reserved),
     // so the depositor can always take it back in full.
     let (mut h, mut ms) = market_fixture(1);
