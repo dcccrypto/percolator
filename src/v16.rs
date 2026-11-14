@@ -14386,6 +14386,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 continue;
             }
             let d = source.domain.get() as usize;
+            let locked = source
+                .source_claim_liened_num
+                .get()
+                .checked_add(source.source_claim_impaired_num.get())
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            let unliened = source
+                .source_claim_bound_num
+                .get()
+                .checked_sub(locked)
+                .ok_or(V16Error::CounterUnderflow)?;
+            if unliened == 0 {
+                // Nothing in this slot can be consumed. The scan still fails closed on a
+                // lapsed bucket, as it does for every slot it passes, but reads only the
+                // two raw bucket fields for that (upstream 29dbf841). Decoding and
+                // validating the ledger of each fully liened domain once per losing leg
+                // is most of a refresh's compute at maximum portfolio shape.
+                let (raw_status, raw_expiry) =
+                    self.backing_bucket_raw_status_expiry_for_domain(d)?;
+                if raw_status == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
+                    && raw_expiry <= self.header.current_slot.get()
+                {
+                    return Err(V16Error::Stale);
+                }
+                slot += 1;
+                continue;
+            }
             let source_credit = self.source_credit_for_domain_shape(d)?;
             let bucket = self.backing_bucket_for_domain(d)?;
             let reservation = self.insurance_reservation_for_domain(d)?;
@@ -14402,11 +14428,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             {
                 return Err(V16Error::Stale);
             }
-            let locked = source
-                .source_claim_liened_num
-                .get()
-                .checked_add(source.source_claim_impaired_num.get())
-                .ok_or(V16Error::ArithmeticOverflow)?;
             let rate = match netting {
                 Some(ctx) => {
                     let pending = self.kf_pending_credit_num(d)?;
@@ -14454,12 +14475,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 }
                 None => source_credit.credit_rate_num,
             };
-            let unliened = source
-                .source_claim_bound_num
-                .get()
-                .checked_sub(locked)
-                .ok_or(V16Error::CounterUnderflow)?;
-            if rate != 0 && unliened != 0 {
+            if rate != 0 {
                 let consumable =
                     V16Core::source_credit_state_realizable_support_for_claim_num_at_rate(
                         source_credit,
