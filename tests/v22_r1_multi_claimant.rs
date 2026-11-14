@@ -428,11 +428,24 @@ fn sweep(worlds: u64, seed0: u64, shape: Shape, resolved: bool) -> Outcome {
 
 const CAP: u128 = 1_000_000_000_000_000;
 
+/// Seeds under test. `SEED=n` -> one seed; `SEEDS=a..b` -> inclusive range; else `default`.
+fn seeds_from_env(default: &[u64]) -> Vec<u64> {
+    if let Ok(v) = std::env::var("SEEDS") {
+        let (a, b) = v.split_once("..").expect("SEEDS must look like a..b");
+        let (a, b): (u64, u64) = (a.trim().parse().expect("SEEDS start"), b.trim().parse().expect("SEEDS end"));
+        return (a..=b).collect();
+    }
+    if let Some(s) = std::env::var("SEED").ok().and_then(|v| v.parse().ok()) {
+        return vec![s];
+    }
+    default.to_vec()
+}
+
 /// Solvent losers: the settle order must not matter.
 #[test]
 fn r1_multi_claimant_solvent_losers_are_settle_order_independent() {
     let worlds: u64 = std::env::var("WORLDS").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
-    for seed0 in [3u64, 11] {
+    for seed0 in seeds_from_env(&[3, 11]) {
         let o = sweep(worlds, seed0, Shape::Uniform(CAP), false);
         eprintln!("R1MULTI solvent seed {seed0}: ran {} order_dependent {} worst_gap {} gains {} worst_total {}", o.ran, o.order_dependent, o.worst_gap, o.gains, o.worst_total);
         assert_eq!(o.ran, worlds);

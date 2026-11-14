@@ -445,12 +445,26 @@ fn run_arm(ops: &[Op], every_slot: bool, rev: bool) -> ArmResult {
     (eq, [leg(&l), leg(&s)])
 }
 
+/// Seeds under test. `SEED=n` -> one seed; `SEEDS=a..b` -> inclusive range; else `default`.
+fn seeds_from_env(default: &[u64]) -> Vec<u64> {
+    if let Ok(v) = std::env::var("SEEDS") {
+        let (a, b) = v.split_once("..").expect("SEEDS must look like a..b");
+        let (a, b): (u64, u64) = (a.trim().parse().expect("SEEDS start"), b.trim().parse().expect("SEEDS end"));
+        return (a..=b).collect();
+    }
+    if let Some(s) = std::env::var("SEED").ok().and_then(|v| v.parse().ok()) {
+        return vec![s];
+    }
+    default.to_vec()
+}
+
 #[test]
 fn r1_effective_equity_is_cadence_and_order_invariant() {
     let worlds: u64 = std::env::var("WORLDS").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
     let (mut worst_acct, mut worst_pair, mut worst_seed) = (0i128, 0i128, 0u64);
+    for seed0 in seeds_from_env(&[5]) {
     for i in 0..worlds {
-        let seed = 5u64.wrapping_mul(1_000_003).wrapping_add(i);
+        let seed = seed0.wrapping_mul(1_000_003).wrapping_add(i);
         let ops = gen_ops(seed, 60);
         let arms = [run_arm(&ops, true, false), run_arm(&ops, false, false), run_arm(&ops, true, true), run_arm(&ops, false, true)];
         for a in &arms[1..] {
@@ -471,6 +485,7 @@ fn r1_effective_equity_is_cadence_and_order_invariant() {
                 }
             }
         }
+    }
     }
     eprintln!("R1DIFF worlds {worlds}: worst per-account equity gap across arms {worst_acct}, worst pair deficit {worst_pair} (seed {worst_seed})");
     assert!(worst_acct <= 8, "effective equity differs by cadence/order by up to {worst_acct} atoms");
