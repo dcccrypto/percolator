@@ -27631,7 +27631,7 @@ impl PortfolioLegV16Account {
     /// Same predicate as the byte compare: the struct is `Pod` (no padding) and every field
     /// is raw little-endian bytes, so all fields equal as integers iff all bytes are equal.
     /// Pinned against the byte compare by
-    /// `field_compare_matches_byte_compare_on_every_single_byte_change`.
+    /// `proof_v16_empty_leg_field_compare_matches_byte_compare` (Kani, every image).
     #[cfg(any(kani, test))]
     #[inline(always)]
     fn is_empty_encoding_by_field(&self) -> bool {
@@ -29431,7 +29431,8 @@ mod empty_leg_image_tests {
         assert_eq!(reference(&empty), Ok(PortfolioLegV16::EMPTY));
     }
 
-    /// The Kani-side field compare and the byte compare accept exactly the same images.
+    /// Every single-byte change of the empty image is rejected by both compares. Full
+    /// equivalence is proven by Kani: `proof_v16_empty_leg_field_compare_matches_byte_compare`.
     #[test]
     fn field_compare_matches_byte_compare_on_every_single_byte_change() {
         let byte_cmp = |leg: &PortfolioLegV16Account| {
@@ -29446,8 +29447,7 @@ mod empty_leg_image_tests {
                 image.copy_from_slice(bytemuck::bytes_of(&PORTFOLIO_LEG_V16_EMPTY_ACCOUNT));
                 image[i] ^= v;
                 let leg: PortfolioLegV16Account = bytemuck::pod_read_unaligned(&image);
-                assert!(!leg.is_empty_encoding_by_field(), "byte {i} ^ {v}");
-                assert_eq!(leg.is_empty_encoding_by_field(), byte_cmp(&leg));
+                assert!(!byte_cmp(&leg) && !leg.is_empty_encoding_by_field(), "byte {i} ^ {v}");
             }
         }
     }
