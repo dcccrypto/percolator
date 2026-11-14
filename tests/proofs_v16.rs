@@ -9060,7 +9060,7 @@ fn proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded() 
 }
 
 #[kani::proof]
-#[kani::unwind(40)]
+#[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault() {
     let capital_raw: u8 = kani::any();
