@@ -1,6 +1,7 @@
 //! Engine-level guard: `resolve_market_not_atomic` must not run on an already Resolved market.
 //! The v2.2 wrapper already blocks a second resolve; this covers the engine's own check.
-//! Recovery -> Resolved stays allowed (the auto-crank finalizes Recovery through it).
+//! Recovery -> Resolved stays allowed (the auto-crank finalizes Recovery through it); that path
+//! is covered by the crank tests in v16_spec_tests.rs.
 #![allow(dead_code, unused_imports)]
 
 use percolator::{
@@ -56,13 +57,4 @@ fn live_resolve_still_works() {
     let r0 = w.header.current_slot.get() + 3;
     w.resolve(r0).unwrap();
     assert_eq!(w.header.resolved_slot.get(), r0);
-}
-
-#[test]
-fn recovery_market_can_still_resolve() {
-    let mut w = W::new();
-    let s = w.header.current_slot.get();
-    w.view().force_asset_recovery_not_atomic(0, s).unwrap();
-    w.resolve(s + 1).unwrap();
-    assert_eq!(w.header.resolved_slot.get(), s + 1);
 }
