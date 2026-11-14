@@ -27614,8 +27614,50 @@ impl PortfolioLegV16Account {
     /// Whether this slot holds exactly the empty-leg encoding (one byte compare).
     #[inline(always)]
     pub fn is_empty_encoding(&self) -> bool {
-        self.active == 0
-            && bytemuck::bytes_of(self) == bytemuck::bytes_of(&PORTFOLIO_LEG_V16_EMPTY_ACCOUNT)
+        #[cfg(not(kani))]
+        {
+            self.active == 0
+                && bytemuck::bytes_of(self) == bytemuck::bytes_of(&PORTFOLIO_LEG_V16_EMPTY_ACCOUNT)
+        }
+        // Kani: the whole-image compare is one 217-byte memcmp loop, longer than every
+        // harness's unwind bound. Compare every field as an integer instead, with `&` so
+        // there is no loop and no branch per field.
+        #[cfg(kani)]
+        {
+            self.is_empty_encoding_by_field()
+        }
+    }
+
+    /// Same predicate as the byte compare: the struct is `Pod` (no padding) and every field
+    /// is raw little-endian bytes, so all fields equal as integers iff all bytes are equal.
+    /// Pinned against the byte compare by
+    /// `proof_v16_empty_leg_field_compare_matches_byte_compare` (Kani, every image).
+    #[cfg(any(kani, test))]
+    #[inline(always)]
+    fn is_empty_encoding_by_field(&self) -> bool {
+        let e = &PORTFOLIO_LEG_V16_EMPTY_ACCOUNT;
+        (self.active == e.active)
+            & (self.side == e.side)
+            & (self.b_stale == e.b_stale)
+            & (self.stale == e.stale)
+            & (self.band_liq_pending == e.band_liq_pending)
+            & (self.asset_index.get() == e.asset_index.get())
+            & (self.market_id.get() == e.market_id.get())
+            & (self.basis_pos_q.get() == e.basis_pos_q.get())
+            & (self.a_basis.get() == e.a_basis.get())
+            & (self.k_snap.get() == e.k_snap.get())
+            & (self.f_snap.get() == e.f_snap.get())
+            & (self.k_rem_num.get() == e.k_rem_num.get())
+            & (self.f_rem_num.get() == e.f_rem_num.get())
+            & (self.kf_epoch_snap.get() == e.kf_epoch_snap.get())
+            & (self.epoch_snap.get() == e.epoch_snap.get())
+            & (self.loss_weight.get() == e.loss_weight.get())
+            & (self.b_snap.get() == e.b_snap.get())
+            & (self.b_rem.get() == e.b_rem.get())
+            & (self.b_epoch_snap.get() == e.b_epoch_snap.get())
+            & (self.band_epoch_snap.get() == e.band_epoch_snap.get())
+            & (self.rent_snap.get() == e.rent_snap.get())
+            & (self.rent_carry.get() == e.rent_carry.get())
     }
 
     pub fn from_runtime(value: &PortfolioLegV16) -> Self {
@@ -29387,6 +29429,27 @@ mod empty_leg_image_tests {
         assert!(empty.is_empty_encoding());
         assert_eq!(empty.try_to_runtime(), Ok(PortfolioLegV16::EMPTY));
         assert_eq!(reference(&empty), Ok(PortfolioLegV16::EMPTY));
+    }
+
+    /// Every single-byte change of the empty image is rejected by both compares. Full
+    /// equivalence is proven by Kani: `proof_v16_empty_leg_field_compare_matches_byte_compare`.
+    #[test]
+    fn field_compare_matches_byte_compare_on_every_single_byte_change() {
+        let byte_cmp = |leg: &PortfolioLegV16Account| {
+            leg.active == 0
+                && bytemuck::bytes_of(leg) == bytemuck::bytes_of(&PORTFOLIO_LEG_V16_EMPTY_ACCOUNT)
+        };
+        assert!(PORTFOLIO_LEG_V16_EMPTY_ACCOUNT.is_empty_encoding_by_field());
+        let n = core::mem::size_of::<PortfolioLegV16Account>();
+        for i in 0..n {
+            for v in 1..=255u8 {
+                let mut image = [0u8; core::mem::size_of::<PortfolioLegV16Account>()];
+                image.copy_from_slice(bytemuck::bytes_of(&PORTFOLIO_LEG_V16_EMPTY_ACCOUNT));
+                image[i] ^= v;
+                let leg: PortfolioLegV16Account = bytemuck::pod_read_unaligned(&image);
+                assert!(!byte_cmp(&leg) && !leg.is_empty_encoding_by_field(), "byte {i} ^ {v}");
+            }
+        }
     }
 
     /// Flip every single byte of the empty image to several values: the decode returns exactly

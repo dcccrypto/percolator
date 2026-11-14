@@ -6435,7 +6435,7 @@ fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_lie
 }
 
 #[kani::proof]
-#[kani::unwind(48)]
+#[kani::unwind(17)]
 #[kani::solver(cadical)]
 fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state() {
     let backing_raw: u8 = kani::any();
@@ -9060,7 +9060,7 @@ fn proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded() 
 }
 
 #[kani::proof]
-#[kani::unwind(40)]
+#[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault() {
     let capital_raw: u8 = kani::any();
@@ -20450,4 +20450,21 @@ fn proof_principal_cure_preserves_close_ledger_partition() {
     after_masked.finalized = before.finalized;
     after_masked.canceled = before.canceled;
     assert_eq!(after_masked, before);
+}
+
+/// Under cfg(kani) `is_empty_encoding` compares field by field (the whole-image memcmp is
+/// longer than other harnesses' unwind bounds). It must be the same predicate as the
+/// production byte compare for every 217-byte image.
+#[kani::proof]
+#[kani::unwind(220)]
+#[kani::solver(cadical)]
+fn proof_v16_empty_leg_field_compare_matches_byte_compare() {
+    let image: [u8; core::mem::size_of::<PortfolioLegV16Account>()] = kani::any();
+    let leg: PortfolioLegV16Account = bytemuck::pod_read_unaligned(&image);
+    let empty = percolator::PORTFOLIO_LEG_V16_EMPTY_ACCOUNT;
+    let byte_cmp =
+        leg.active == 0 && bytemuck::bytes_of(&leg) == bytemuck::bytes_of(&empty);
+    kani::cover!(byte_cmp, "empty image");
+    kani::cover!(!byte_cmp && leg.active == 0, "inactive non-empty image");
+    assert_eq!(leg.is_empty_encoding(), byte_cmp);
 }
