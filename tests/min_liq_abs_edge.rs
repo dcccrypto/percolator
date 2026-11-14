@@ -1,11 +1,8 @@
-//! min_liquidation_abs boundary map (scaffold copied from liquidations_edge.rs). Liquidation edge cases on the v2.2 engine, driven through the public API only
-//! (deposit -> trade -> accrue -> liquidate), except that the wrapper-owned raw oracle target
-//! is written straight onto the market slot (the wrapper normally stores it). Each test is a small, deterministic world:
-//! one asset, a target account and a counterparty that took the other side, a price move,
-//! then a liquidation. They pin spec.md section 4.5 (liquidation fee), 4.6 (exact insurance
-//! spend), 5.4 (bankrupt residual), 7 (margin / partial vs full close) and 10 (conservation).
-//!
-//! Every test name contains `liq` so `cargo test liq` selects the area.
+//! `min_liquidation_abs` boundary map at the maintenance-margin floor (mm floor = 100).
+//! Scaffold copied from liquidations_edge.rs; every test name contains `min_liq_abs`.
+//! Covers config validation (envelope + fee-cap bound) and the liquidation fee floor on tiny,
+//! mid and large positions. No engine bug found, so there are no #[ignore] tests.
+#![allow(dead_code)]
 
 use percolator::{
     EngineAssetSlotV16Account, LiquidationOutcomeV16, LiquidationRequestV16, Market,
@@ -273,7 +270,7 @@ fn bad_cfg(c: Cfg) -> bool {
 }
 
 // Validation sites: src/v16.rs `validate_public_user_fund_shape` (min_liquidation_abs >
-// liquidation_fee_cap, ~L5650) and `validate_exact_solvency_envelope` (floor region, ~L5560-5600:
+// liquidation_fee_cap, ~L5650) and `validate_exact_solvency_envelope_with` (floor region L5536-5553, per-notional fee max at L5283:
 // loss budget + max(liq fee, min_liquidation_abs) must fit under the mm floor).
 // Use sites: `liquidation_fee_from_raw_fee` (~L28948, partial below the floor => NonProgress,
 // full close clamps up to the floor), called from `liquidation_fee_for_close` by the projection
@@ -345,8 +342,8 @@ fn tiny(m: u128, px: u64) -> (World, Result<LiquidationOutcomeV16, V16Error>) {
 
 #[test]
 fn min_liq_abs_tiny_position_full_close_charges_floor_at_bound_minus1_bound() {
-    // notional ~1_000, raw fee 5: below the floor, so only the full close can run, and it is
-    // clamped up to the floor (49, 50), never refused.
+    // notional ~1_000, raw fee 5. The mm floor (100) leaves no healthy partial anyway, so this
+    // pins the fee clamp: the full close pays the floor (49, 50) instead of the raw 5, never refused.
     for (m, fee) in [(49u128, 49u128), (50, 50), (0, 5)] {
         let (mut w, r) = tiny(m, 998);
         let out = r.unwrap();
@@ -361,7 +358,7 @@ fn min_liq_abs_tiny_position_full_close_charges_floor_at_bound_minus1_bound() {
 
 #[test]
 fn min_liq_abs_floor_exceeds_the_whole_position_still_closes() {
-    // q = 0.04 units => notional 40 at 1_000 (< floor 50). The close is not refused and does
+    // q = 0.04 units => notional 40 at 1_000 (24 at the liquidation price; floor 50). The close is not refused and does
     // not overshoot the position (closed_q == whole leg), but the fee (50) is larger than the
     // position's whole notional: the floor is not limited by the size it is charged on.
     let c = Cfg {
@@ -374,7 +371,6 @@ fn min_liq_abs_floor_exceeds_the_whole_position_still_closes() {
     let out = w.liquidate_against_cp().unwrap();
     assert_eq!(out.closed_q, q);
     assert_eq!(out.fee_charged, 50);
-    assert!(out.fee_charged > 40, "fee exceeds the position notional");
     assert!(w.tgt_flat());
     w.assert_sound();
 }
