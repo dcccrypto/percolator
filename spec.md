@@ -269,6 +269,8 @@ Backing freshness is maintained with bounded buckets. The v16.8 public profile u
 
 Provider withdrawals of counterparty backing keep the domain at the full credit rate, which counts registered claims only, and a gain becomes a claim only when its account is refreshed. In Live mode, while any stored position on the domain's asset has not settled the asset's latest K/F change (`stale_account_count_long` or `stale_account_count_short` nonzero), a withdrawal of counterparty backing MUST NOT exceed the domain's provider principal (deposits less earlier withdrawals). Fresh backing beyond that principal was paid in by the domain's losers and may be owed to a gain the watermark cannot see yet. Once every position is settled the watermark alone governs again. (upstream 827a125f)
 
+In Resolved mode a loss booked into a terminal domain (no claim and no creditor leg left) funds the junior pool, except that a domain that is not Impaired first takes, until the payout snapshot is captured, what repays its provider: min(provider receivable, provider principal - fresh reserved backing). The provider that fronted a winner's gain is owed the loser's payment whichever account closes first. (upstream 5e3af071)
+
 ```text
 R_i = scheduled_remaining + pending_remaining
 if sched_present: 0 < sched_remaining <= sched_anchor, cfg_h_min <= sched_horizon <= cfg_h_max, sched_release <= sched_anchor

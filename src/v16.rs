@@ -16150,7 +16150,50 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // claims instead of recreating ownerless source backing. Impaired
             // provider buckets likewise leave new losses as junior support.
             // (upstream 0b861efb)
-            self.credit_post_snapshot_residual_not_atomic(amount)?;
+            //
+            // upstream 5e3af071: except for what a provider fronted here and was not
+            // repaid. That part of the late debt is owed to the provider, so a terminal
+            // domain that is not Impaired takes min(provider receivable, provider
+            // principal - fresh reserved backing) as backing, until the payout snapshot
+            // is captured. The receivable alone over-counts (it includes consumed
+            // loser-paid backing), so it is capped by what the provider is still out.
+            // v2.2: "principal" is the S10 mirror; the source part is rounded UP to a
+            // whole atom (as in the creditor-final split below) and booked only if the
+            // bucket can take backing now.
+            let refill_atoms = if self.backing_bucket_for_domain(domain)?.status
+                != BackingBucketStatusV16::Impaired
+                && !decode_bool(self.header.payout_snapshot_captured)?
+                && self.loss_domain_accepts_realized_backing(domain)?
+            {
+                let source = self.source_credit_for_domain(domain)?;
+                let refill_num = source.provider_receivable_num.min(
+                    self.provider_principal_for_domain(domain)?
+                        .saturating_sub(source.fresh_reserved_backing_num),
+                );
+                amount.min(
+                    refill_num
+                        .checked_add(BOUND_SCALE - 1)
+                        .ok_or(V16Error::ArithmeticOverflow)?
+                        / BOUND_SCALE,
+                )
+            } else {
+                0
+            };
+            if refill_atoms != 0 {
+                let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
+                self.add_fresh_counterparty_backing_unchecked(
+                    domain,
+                    refill_atoms
+                        .checked_mul(BOUND_SCALE)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                    expiry_slot,
+                )?;
+            }
+            self.credit_post_snapshot_residual_not_atomic(
+                amount
+                    .checked_sub(refill_atoms)
+                    .ok_or(V16Error::CounterUnderflow)?,
+            )?;
         } else {
             // F-LIVE-2 (v22live; upstream 13ebf86b / #216, narrowed): in Live, an Impaired bucket
             // (a lapsed one that still carries liens) cannot take new backing. The loss then stays
