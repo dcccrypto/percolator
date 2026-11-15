@@ -272,9 +272,8 @@ fn capped_nonbankrupt_close_progresses(tgt_long: bool, lag_bps: u64) {
         .liq(1)
         .expect("a capped, non-bankrupt close must still liquidate");
     assert_eq!(
-        out.closed_q,
-        eff - 1,
-        "close budget = min(request, eff, oi) = eff - 1"
+        out.closed_q, eff,
+        "the last leg is closed in full: the OI aggregate removes only its oi (= eff - 1)"
     );
     assert_eq!(
         out.insurance_used + out.residual_booked + out.explicit_loss,
@@ -367,22 +366,18 @@ fn capped_bankrupt_close_progresses(tgt_long: bool, lag_bps: u64) {
 }
 
 #[test]
-#[ignore = "BUG src/v16.rs:22424 (cap src/v16.rs:22271): capped bankrupt close of the last long leg declares Recovery for a 1-atom gap, then LockActive forever; Toly b97e1746 has no cap so no such path"]
 fn nonprogress_liveness_capped_bankrupt_close_progresses_long_no_lag() {
     capped_bankrupt_close_progresses(true, 0);
 }
 #[test]
-#[ignore = "BUG src/v16.rs:22424 (cap src/v16.rs:22271): same as long/no-lag, with non-zero target lag; Toly b97e1746 has no cap"]
 fn nonprogress_liveness_capped_bankrupt_close_progresses_long_with_lag() {
     capped_bankrupt_close_progresses(true, 300);
 }
 #[test]
-#[ignore = "BUG src/v16.rs:22424 (cap src/v16.rs:22271): short side mirror; Toly b97e1746 has no cap"]
 fn nonprogress_liveness_capped_bankrupt_close_progresses_short_no_lag() {
     capped_bankrupt_close_progresses(false, 0);
 }
 #[test]
-#[ignore = "BUG src/v16.rs:22424 (cap src/v16.rs:22271): short side, non-zero target lag; Toly b97e1746 has no cap"]
 fn nonprogress_liveness_capped_bankrupt_close_progresses_short_with_lag() {
     capped_bankrupt_close_progresses(false, 300);
 }

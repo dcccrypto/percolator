@@ -21078,7 +21078,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 asset_index,
                 leg_slot,
                 allow_attributed_terminal_trade,
-                Some(lookup.current_effective_q.unsigned_abs()),
+                Some(V16Core::effective_abs_quantity_for_detach(
+                    self.asset_state(asset_index)?,
+                    leg,
+                )?),
             );
         }
         if route == PositionRouteV16::Flip {
