@@ -9780,7 +9780,6 @@ impl MarketGroupV16HeaderAccount {
                 // rebuild below would drop it, so reuse waits until it is
                 // withdrawn; the restart path carries it over instead.
                 if previous_asset.market_id == 0
-                    || previous_asset.retired_slot == 0
                     || slot.insurance_domain_budget_long.get() != 0
                     || slot.insurance_domain_budget_short.get() != 0
                 {
@@ -27017,7 +27016,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let old_asset = self.asset_state(asset_index)?;
         if old_asset.lifecycle != AssetLifecycleV16::Retired
             || old_asset.market_id == 0
-            || old_asset.retired_slot == 0
         {
             return Err(V16Error::LockActive);
         }
