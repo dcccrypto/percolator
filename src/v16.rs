@@ -17534,6 +17534,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         b_loss_atom_budget: u128,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         account.validate_with_market(&self.as_view())?;
+        self.settle_account_side_effects_prevalidated_not_atomic(account, b_loss_atom_budget)
+    }
+
+    /// Body of `settle_account_side_effects_not_atomic` for a caller that has just run
+    /// `account.validate_with_market` on this exact account/market state (no mutation since).
+    fn settle_account_side_effects_prevalidated_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        b_loss_atom_budget: u128,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
         self.settle_account_kf_effects_not_atomic(account, false, &mut 0u8)?;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
@@ -25863,8 +25873,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)?;
         let requested_fee = raw_fee.try_into_u128().unwrap_or(u128::MAX);
         if decode_market_mode(self.header.mode)? == MarketModeV16::Live && nonflat {
+            // The account was validated at the top of this function and nothing has mutated
+            // it or the market since (the anchor lookup is read-only), so skip the repeat.
             if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
-                .settle_account_side_effects_not_atomic(
+                .settle_account_side_effects_prevalidated_not_atomic(
                     account,
                     self.header.config.public_b_chunk_atoms.get(),
                 )?
