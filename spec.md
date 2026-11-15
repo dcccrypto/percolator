@@ -889,6 +889,10 @@ Then:
 ```text
 PNL_eff_matured_i = floor(ReleasedPos_i * h.num / h.den)
 PNL_eff_trade_i   = floor(PosPNL_i     * g.num / g.den)
+PNL_eff_maint_i   = backed positive PnL only: the part of PosPNL_i whose source domain
+                    currently holds backing ("Open positive PnL that is not
+                    converted into a source-credit lien is not backing"; soft credit per
+                    section 2.4); unbacked positive PnL contributes 0
 ```
 
 Equity lanes, all exact wide signed:
@@ -896,9 +900,11 @@ Equity lanes, all exact wide signed:
 ```text
 Eq_withdraw_raw_i = C_i + min(PNL_i,0) + PNL_eff_matured_i - FeeDebt_i
 Eq_trade_raw_i    = C_i + min(PNL_i,0) + PNL_eff_trade_i   - FeeDebt_i
-Eq_maint_raw_i    = C_i + PNL_i                            - FeeDebt_i
+Eq_maint_raw_i    = C_i + min(PNL_i,0) + PNL_eff_maint_i   - FeeDebt_i
 Eq_net_i          = max(0, Eq_maint_raw_i)
 ```
+
+Maintenance equity counts only backed PnL (`PNL_eff_maint_i`). Unbacked positive PnL, such as a claim whose loser leg has not yet been settled, does not lift `Eq_maint_raw_i` or `Eq_net_i`; negative PnL always counts in full.
 
 Candidate trade approval MUST neutralize that trade’s own positive slippage:
 
