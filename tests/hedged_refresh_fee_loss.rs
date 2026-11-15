@@ -10,11 +10,7 @@
 //! capital 20_000 (the thinnest it can open with), both prices fall to `px`. Order "account-first"
 //! cranks `a` before its counterparty `b` and liquidates if the engine says so; "counterparty-first"
 //! refreshes `b` first. Trader loss = (capital + pnl + fee_credits) before minus after, in atoms, and as % of the
-//! 20_000 starting equity. This was the evidence for the spec.md:266 vs spec.md:899 decision.
-//!
-//! Haircut-order fix B (docs/fixes/haircut-order-B.md): spec.md:266 kept, liquidation counts the
-//! in-flight backing, so the account-first loss is now 0 at every step. The tables below keep the
-//! measured pre-fix numbers (`*_BEFORE_FIX`) for the record and assert the fixed ones.
+//! 20_000 starting equity. This is evidence for the spec.md:266 vs spec.md:899 decision, not a fix.
 //! Test names start with `hedged_fee_loss_`.
 #![allow(dead_code)]
 
@@ -295,34 +291,24 @@ fn hedged_fee_loss_fee_config_fee_ceiling_follows_maintenance_margin() {
 // Trader loss, account-first vs counterparty-first
 // ---------------------------------------------------------------------------------------------
 
-/// (px, trader loss in atoms) for account-first, 50 bps, measured BEFORE fix B (insurance gain
-/// equalled it; peak 2.1% of equity). Kept for the record; not asserted.
-#[allow(dead_code)]
-const TABLE_50_BEFORE_FIX: [(u64, i128); 11] = [
+/// (px, trader loss in atoms) for account-first, 50 bps. Insurance gain equals it. Counterparty-first is 0.
+const TABLE_50: [(u64, i128); 11] = [
     (889, 0), (888, 9), (880, 89), (870, 189), (860, 289), (850, 389),
     (840, 420), (830, 415), (820, 410), (810, 405), (800, 0),
 ];
-/// Same at 100 bps, BEFORE fix B (peak 4.25%).
-#[allow(dead_code)]
-const TABLE_100_BEFORE_FIX: [(u64, i128); 11] = [
+const TABLE_100: [(u64, i128); 11] = [
     (889, 0), (888, 21), (880, 201), (870, 426), (860, 651), (850, 850),
     (840, 840), (830, 830), (820, 820), (810, 810), (800, 0),
 ];
-/// After fix B: account-first costs nothing at any step, same as counterparty-first.
-const TABLE_50: [(u64, i128); 11] = [
-    (889, 0), (888, 0), (880, 0), (870, 0), (860, 0), (850, 0),
-    (840, 0), (830, 0), (820, 0), (810, 0), (800, 0),
-];
-const TABLE_100: [(u64, i128); 11] = TABLE_50;
 
 #[test]
 fn hedged_fee_loss_account_first_loss_table_50_bps() {
     for (px, loss) in TABLE_50 {
         let r = run(50, px, false);
         assert_eq!(r.loss_atoms, loss, "px {px}");
-        assert_eq!(r.insurance_gain as i128, loss, "px {px}: no fee charged");
-        assert!(!r.liquidated, "px {px}: fix B, was liquidated for px <= 888");
-        assert_eq!((r.long_left, r.short_left), (Q as i128, -(Q as i128)), "px {px}");
+        assert_eq!(r.insurance_gain as i128, loss, "px {px}: the fee goes to insurance");
+        assert_eq!(r.liquidated, px <= 888, "px {px}");
+        assert_eq!(r.short_left, -(Q as i128), "px {px}");
     }
 }
 
@@ -332,7 +318,7 @@ fn hedged_fee_loss_account_first_loss_table_100_bps() {
         let r = run(100, px, false);
         assert_eq!(r.loss_atoms, loss, "px {px}");
         assert_eq!(r.insurance_gain as i128, loss, "px {px}");
-        assert!(!r.liquidated, "px {px}: fix B, was liquidated for px <= 888");
+        assert_eq!(r.liquidated, px <= 888, "px {px}");
     }
 }
 
@@ -348,26 +334,23 @@ fn hedged_fee_loss_counterparty_first_costs_nothing_at_any_step() {
     }
 }
 
-/// Loss as % of the 20_000 starting equity, in hundredths of a percent (integer). Before fix B it
-/// peaked at 2.1% at 50 bps (px 840) and 4.25% at 100 bps (px 850); after it, 0 at every fee.
+/// Loss as % of the 20_000 starting equity, in hundredths of a percent (integer): peaks around
+/// 2.1% at 50 bps (px 840) and 4.25% at 100 bps (px 850) once the whole long leg is closed.
 #[test]
 fn hedged_fee_loss_peak_loss_percent_of_equity() {
     let peak = |fee| STEPS.iter().map(|px| run(fee, *px, false).loss_atoms).max().unwrap();
-    assert_eq!(TABLE_50_BEFORE_FIX.iter().map(|r| r.1).max().unwrap() * 10_000 / THIN as i128, 210);
-    assert_eq!(TABLE_100_BEFORE_FIX.iter().map(|r| r.1).max().unwrap() * 10_000 / THIN as i128, 425);
-    for fee in [50u64, 100, 243] {
-        assert_eq!(peak(fee), 0, "fee {fee}");
-    }
+    assert_eq!(peak(50) * 10_000 / THIN as i128, 210);
+    assert_eq!(peak(100) * 10_000 / THIN as i128, 425);
 }
 
-/// At px 800 the loss eats all 20_000 capital before `a` is cranked. Before fix B the early
-/// liquidation closed the whole long leg and charged 0 (nothing to take the fee from). After it,
-/// the whole gain is in flight, nothing is liquidated and nothing is charged.
+/// At px 800 the loss eats all 20_000 capital before `a` is cranked, so the fee has nothing to
+/// come out of: the early liquidation closes the whole long leg and charges 0 (no insurance gain,
+/// no fee debt either). The backed gain is credited later in full.
 #[test]
 fn hedged_fee_loss_at_the_loss_cap_the_fee_is_not_collected() {
     let r = run(50, 800, false);
-    assert!(!r.liquidated);
-    assert_eq!((r.loss_atoms, r.insurance_gain, r.long_left), (0, 0, Q as i128));
+    assert!(r.liquidated);
+    assert_eq!((r.loss_atoms, r.insurance_gain, r.long_left), (0, 0, 0));
 }
 
 /// Also: the fee is only charged if account-first. With fee 0 the account-first run is already
@@ -377,7 +360,7 @@ fn hedged_fee_loss_zero_fee_has_zero_loss_in_both_orders() {
     for px in STEPS {
         let af = run(0, px, false);
         assert_eq!(af.loss_atoms, 0, "px {px}");
-        assert!(!af.liquidated, "px {px}: fix B (was liquidated at fee 0 too, #346)");
+        assert_eq!(af.liquidated, px <= 888, "px {px}: liquidated at fee 0 too (#346)");
         assert_eq!(run(0, px, true).loss_atoms, 0, "px {px}");
     }
 }

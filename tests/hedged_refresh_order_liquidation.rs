@@ -7,12 +7,6 @@
 //! src/v16.rs `account_haircut_equity`). So until `b` is refreshed, `a`'s equity is
 //! `C - 10_000` instead of `C`, and maintenance is 9_000.
 //!
-//! Haircut-order fix B (docs/fixes/haircut-order-B.md, Khubair 2026-11-14): spec.md:266 is kept,
-//! so `certified_equity` above is unchanged, but the LIQUIDATION trigger now counts the claims
-//! whose losers are still in flight (`kf_pending_credit`) as the backing they will book. Inside the
-//! window the hedge is therefore no longer liquidatable in either crank order. Once the loser has
-//! settled, a shortfall it could not pay is haircut again (see the `_bankrupt_counterparty_` test).
-//!
 //! Tests here measure that window (margin sweep, both crank orders, trader loss, repeats,
 //! conservation). The single-point case "gain counts only after the counterparty refreshed" is
 //! in multi_asset_portfolio_cross_edge.rs (px 900 only; this file sweeps price and margin). Test names start with
@@ -262,15 +256,13 @@ fn hedged_refresh_early_equity_is_capital_minus_loss_and_backed_equity_is_capita
 
 #[test]
 fn hedged_refresh_thinnest_margin_window_is_800_to_888() {
-    // 11.2% to 20% fall of both assets: the backed-only equity is below maintenance here, which
-    // used to make order alone decide. Fix B: not liquidatable in either order.
+    // 11.2% to 20% fall of both assets: order alone decides
     let top = window_top(THIN);
     let bottom = window_bottom(THIN);
     assert_eq!((bottom, top), (800, 888));
     for px in bottom..=top {
         let o = probe(THIN, px);
-        assert!((o.equity_early as u128) < o.maintenance, "px {px}: backed equity still below MM");
-        assert!(!o.liquidatable_early && !o.liquidatable_backed, "px {px}: {o:?}");
+        assert!(o.liquidatable_early && !o.liquidatable_backed, "px {px}: {o:?}");
     }
     // above the window both are healthy (below it, see the note on window_bottom)
     for px in [top + 1, 889, 900, 1_000] {
@@ -281,15 +273,13 @@ fn hedged_refresh_thinnest_margin_window_is_800_to_888() {
 
 #[test]
 fn hedged_refresh_window_shifts_with_margin_but_never_closes() {
-    // more margin needs a deeper fall to enter the window, but one always exists. Fix B: inside
-    // it the hedge is not liquidatable at any margin.
+    // more margin needs a deeper fall to enter the window, but one always exists
     for cap in [20_000u128, 30_000, 50_000] {
         let (bottom, top) = (window_bottom(cap), window_top(cap));
         assert!(bottom <= top, "cap {cap}");
         for px in [bottom, (bottom + top) / 2, top] {
             let o = probe(cap, px);
-            assert!((o.equity_early as u128) < o.maintenance, "cap {cap} px {px}");
-            assert!(!o.liquidatable_early && !o.liquidatable_backed, "cap {cap} px {px}");
+            assert!(o.liquidatable_early && !o.liquidatable_backed, "cap {cap} px {px}");
         }
         let o = probe(cap, top + 1);
         assert!(!o.liquidatable_early, "cap {cap} px {}", top + 1);
@@ -304,8 +294,7 @@ fn hedged_refresh_rounding_boundary_equity_exactly_at_maintenance_is_not_liquida
     assert!(!on.liquidatable_early);
     let under = probe(20_079, 888);
     assert_eq!(under.equity_early, 8_879);
-    // fix B: one atom under maintenance on backed equity, but the in-flight gain covers it
-    assert!(!under.liquidatable_early && !under.liquidatable_backed);
+    assert!(under.liquidatable_early && !under.liquidatable_backed);
 }
 
 #[test]
@@ -314,8 +303,7 @@ fn hedged_refresh_margin_size_does_not_close_the_window_at_the_loss_cap() {
     for cap in [20_000u128, 40_000, 90_000] {
         let o = probe(cap, window_bottom(cap));
         assert_eq!(o.equity_early, 0, "cap {cap}");
-        // fix B: capital is gone but the whole gain is in flight, so it is not liquidatable
-        assert!(!o.liquidatable_early && !o.liquidatable_backed);
+        assert!(o.liquidatable_early && !o.liquidatable_backed);
     }
 }
 
@@ -334,19 +322,22 @@ fn hedged_refresh_counterparty_first_order_never_liquidates_in_the_window() {
     }
 }
 
-/// Before fix B the engine liquidated this hedge when it was cranked before its counterparty
-/// (measured long leg left after the forced close: 98_198_198 at px 888, 17_647_058 at 850, 0 at
-/// 800). Fix B: account-first is now the same as counterparty-first, nothing is closed.
+/// What the engine does today when the hedged account is cranked before its counterparty:
+/// it liquidates a hedge that is solvent once `b` refreshes. This is the spec.md:266 behaviour: the unbacked gain does not count (see the rule tests at the end).
 #[test]
-fn hedged_refresh_account_first_order_no_longer_liquidates_solvent_hedge() {
+fn hedged_refresh_account_first_order_liquidates_solvent_hedge_today() {
+    let mut closed = Vec::new();
     for px in [888u64, 850, 800] {
         let (v, p0, liq, mut w, mut a, mut b) = run_order(THIN, px, 0, false);
-        assert!(!liq, "px {px}");
-        assert_eq!(v, THIN as i128, "value unchanged");
-        assert_eq!(p0, Q as i128, "px {px}: long leg untouched");
+        assert!(liq, "px {px}");
+        assert_eq!(v, THIN as i128, "value unchanged without fee");
+        // asset-1 hedge leg is NOT closed: the account is left naked short
         assert_eq!(pos(&a, 1), -(Q as i128), "px {px}");
+        closed.push(p0);
         w.sound(&mut [&mut a, &mut b]);
     }
+    // measured: how much of the long leg REMAINS after the forced close; a fall to 800 closes all of it
+    assert_eq!(closed, vec![98_198_198, 17_647_058, 0]);
 }
 
 #[test]
@@ -384,9 +375,7 @@ fn hedged_refresh_repeated_liquidation_after_early_crank_ends_and_conserves() {
         calls += 1;
         assert!(calls < 20, "liquidation must converge");
     }
-    // fix B: the early crank no longer liquidates at all (it used to take >= 1 call)
-    assert_eq!(calls, 0);
-    assert_eq!(pos(&a, 0), Q as i128);
+    assert!(calls >= 1);
     let v = w.header.vault.get();
     // asking again changes nothing
     assert!(w.liquidate(&mut a, 0).is_err());
@@ -397,15 +386,13 @@ fn hedged_refresh_repeated_liquidation_after_early_crank_ends_and_conserves() {
 }
 
 #[test]
-fn hedged_refresh_asset_one_target_is_refused_too() {
+fn hedged_refresh_liquidating_asset_one_early_also_hits_a_solvent_hedge() {
     // the other leg is just as exposed: asset 1 can be the liquidation target too
-    // fix B: neither leg can be the target any more (asset 1 used to liquidate here)
     let (mut w, mut a, mut b) = hedged(THIN, 850, 0);
     w.refresh(&mut a);
-    assert_eq!(w.liquidate(&mut a, 1), Err(V16Error::NonProgress));
-    assert_eq!(w.liquidate(&mut a, 0), Err(V16Error::NonProgress));
+    let out = w.liquidate(&mut a, 1).expect("liquidates through asset 1");
+    assert!(out.closed_q > 0);
     assert_eq!(pos(&a, 0), Q as i128, "asset 0 leg untouched");
-    assert_eq!(pos(&a, 1), -(Q as i128), "asset 1 leg untouched");
     w.sound(&mut [&mut a, &mut b]);
 }
 
@@ -421,117 +408,52 @@ fn hedged_refresh_counterparty_refresh_only_does_not_move_equity_of_a() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Real bug (fixed by haircut-order fix B; these two were #[ignore]d until the fix)
+// spec.md:266 rule: unbacked positive PnL does NOT count toward maintenance equity
+// (Khubair's decision 15 Nov 2026; spec section 3 `Eq_maint_raw_i` / `PNL_eff_maint_i`).
+// These replace the two #346 tests that assumed the full-PnL reading (old spec.md:899).
 // ---------------------------------------------------------------------------------------------
 
-/// WAS A BUG: a hedged account whose gain is only waiting on the counterparty's refresh is liquidated
-/// when its own crank comes first. Cap 20_000, both prices 1_000 -> 850: the true equity is
-/// 20_000 against a maintenance of 8_500, yet the engine force-closes most of the long leg
-/// because the 15_000 gain on the short leg is not counted (src/v16.rs:14780
-/// `account_haircut_equity`, used by the health check at src/v16.rs:16836 and by
-/// `liquidate_account_not_atomic`; spec.md:266 says open PnL is not backing, but maintenance equity in spec.md:899 and 1213 is C + PNL - FeeDebt with the full PnL, and the existing test multi_asset_profit_on_one_leg_covers_loss_on_the_other_for_maintenance pins the unbacked behaviour, so the owners must pick one). Expected: the liquidation attempt is refused
-/// (nothing to liquidate), as it is when `b` is refreshed first.
+/// Cap 20_000, both prices 1_000 -> 850. After `a` alone is refreshed, its 15_000 gain on the
+/// asset-1 short is credited but unbacked (the loser `b` has not been refreshed). That gain does
+/// NOT prop up maintenance: backed equity is 5_000 against MM 8_500, the liquidation deficit is
+/// 3_500 and the account is liquidatable. Once `b` is refreshed the gain is backed, equity is
+/// 20_000 and the deficit is 0.
 #[test]
-fn hedged_refresh_solvent_hedge_must_not_be_liquidated_before_counterparty_refresh() {
+fn hedged_refresh_unbacked_cross_asset_gain_does_not_prop_up_maintenance() {
     let (mut w, mut a, mut b) = hedged(THIN, 850, 0);
-    w.refresh(&mut a);
-    assert_eq!(w.liquidate(&mut a, 0), Err(V16Error::NonProgress));
-    assert_eq!(pos(&a, 0), Q as i128);
-    assert_eq!(pos(&a, 1), -(Q as i128));
+    let early = w.refresh(&mut a);
+    assert_eq!(early.certified_equity, THIN as i128 - 15_000, "gain is unbacked: not counted");
+    assert_eq!(early.certified_maintenance_req, 8_500);
+    assert_eq!(early.certified_liq_deficit, 3_500, "maintenance shortfall measured without the gain");
+    assert!(w.liquidate(&mut a, 0).is_ok(), "liquidatable while the gain is unbacked");
     w.sound(&mut [&mut a, &mut b]);
-}
 
-/// Same bug at the smallest price move that triggers it (px 888, ~11.2% fall).
-#[test]
-fn hedged_refresh_smallest_window_point_must_not_liquidate_before_counterparty_refresh() {
-    let (mut w, mut a, mut b) = hedged(THIN, 888, 0);
-    let cert = w.refresh(&mut a);
-    assert_eq!(cert.certified_liq_deficit, 0, "equity {} vs MM 8_880", cert.certified_equity);
-    assert_eq!(w.liquidate(&mut a, 0), Err(V16Error::NonProgress));
-    w.sound(&mut [&mut a, &mut b]);
-}
-
-// ---------------------------------------------------------------------------------------------
-// Fix B guard rails
-// ---------------------------------------------------------------------------------------------
-
-/// Spec.md:266 is kept: the in-flight gain lowers the liquidation deficit but is NOT equity. The
-/// certificate still reports the backed-only equity (what withdrawals and initial margin read).
-#[test]
-fn hedged_refresh_fix_b_in_flight_gain_is_not_certified_equity() {
+    // same market, backing booked first: the gain counts and the hedge is healthy
     let (mut w, mut a, mut b) = hedged(THIN, 850, 0);
-    let cert = w.refresh(&mut a);
-    assert_eq!(cert.certified_equity, THIN as i128 - 15_000, "backed-only equity unchanged");
-    assert!((cert.certified_equity as u128) < cert.certified_maintenance_req);
-    assert_eq!(cert.certified_liq_deficit, 0);
     w.refresh(&mut b);
     let backed = w.refresh(&mut a);
-    assert_eq!(backed.certified_equity, THIN as i128, "backing landed");
+    assert_eq!(backed.certified_equity, THIN as i128, "backed gain counts");
     assert_eq!(backed.certified_liq_deficit, 0);
+    assert_eq!(w.liquidate(&mut a, 0), Err(V16Error::NonProgress));
     w.sound(&mut [&mut a, &mut b]);
 }
 
-/// The auto-crank on `a` alone (its counterparty never touched) does not select Liquidate.
+/// The same rule at the smallest price move that exposes it (px 888, ~11.2% fall): the
+/// deficit is exactly MM minus backed equity, and it clears once the counterparty is refreshed.
 #[test]
-fn hedged_refresh_fix_b_auto_crank_does_not_liquidate_the_hedge() {
-    use percolator::{AutoCrankObservationV16, AutoCrankPlanV16, AutoCrankWorkV16};
-    for px in [888u64, 850, 800] {
-        let (mut w, mut a, mut b) = hedged(THIN, px, 0);
-        let slot = w.slot;
-        let obs: Vec<AutoCrankObservationV16> = (0..2)
-            .map(|i| AutoCrankObservationV16 { asset_index: i, effective_price: w.price(i), funding_rate_e9: 0 })
-            .collect();
-        for _ in 0..16 {
-            let r = w.view().permissionless_auto_crank_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut a),
-                AutoCrankWorkV16 { now_slot: slot, observations: &obs, resolved_close_fee_rate_per_slot: 0 },
-            );
-            match r {
-                Ok(r) => {
-                    assert!(!matches!(r.selected, AutoCrankPlanV16::Liquidate { .. }), "px {px}: {r:?}");
-                    if r.selected == AutoCrankPlanV16::NoAction {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        assert_eq!(pos(&a, 0), Q as i128, "px {px}");
-        assert_eq!(pos(&a, 1), -(Q as i128), "px {px}");
-        w.sound(&mut [&mut a, &mut b]);
-    }
-}
-
-/// Liveness / soundness: in-flight credit counts only while the loser has NOT settled. Here the
-/// asset-1 loser `c` is bankrupt. Before `c` refreshes, `a` is not liquidatable (its gain is in
-/// flight). Once `c` settles it can pay only its capital, the in-flight credit is gone, the
-/// shortfall is haircut and `a` becomes liquidatable, so the deferral ends after one refresh.
-#[test]
-fn hedged_refresh_fix_b_bankrupt_counterparty_settles_then_hedge_is_liquidatable() {
-    let mut w = W::with(0);
-    let (mut a, mut b, mut c) = (account(1), account(2), account(3));
-    let half = Q / 2;
-    // a: long 100 asset 0 (vs b), short 50 asset 1 (vs c). IM 10% of 150_000.
-    w.deposit(&mut a, 15_000);
-    w.deposit(&mut b, BIG);
-    // c: the thinnest long 50 on asset 1 (IM 10% of 50_000)
-    w.deposit(&mut c, 5_000);
-    w.trade(0, &mut a, &mut b, Q as i128);
-    w.trade(1, &mut c, &mut a, half as i128);
-    w.move_both(850);
-    // a: loss 15_000 on asset 0 paid from capital, gain 7_500 on asset 1 in flight from c.
-    // MM 5% of (85_000 + 42_500) = 6_375.
-    let early = w.refresh(&mut a);
-    assert_eq!(early.certified_equity, 0);
-    assert_eq!(early.certified_maintenance_req, 6_375);
-    assert_eq!(early.certified_liq_deficit, 0, "7_500 in flight covers 6_375");
-    assert_eq!(w.liquidate(&mut a, 0), Err(V16Error::NonProgress));
-    // c settles: it owes 7_500 but has 5_000.
+fn hedged_refresh_smallest_window_point_deficit_is_measured_without_unbacked_gain() {
+    let (mut w, mut a, mut b) = hedged(THIN, 888, 0);
+    let cert = w.refresh(&mut a);
+    assert!((cert.certified_equity as u128) < cert.certified_maintenance_req, "backed equity below MM");
+    assert_eq!(cert.certified_maintenance_req, 8_880);
+    assert_eq!(
+        cert.certified_liq_deficit,
+        cert.certified_maintenance_req - cert.certified_equity as u128,
+        "deficit = MM - backed equity (unbacked gain not counted)"
+    );
     w.refresh(&mut b);
-    let _ = w.refresh(&mut c);
-    let after = w.refresh(&mut a);
-    assert!(after.certified_equity <= 5_000, "at most c's capital backs a: {after:?}");
-    assert!(after.certified_liq_deficit > 0, "shortfall is haircut again: {after:?}");
-    assert!(w.liquidate(&mut a, 0).is_ok(), "liquidation is reachable after the loser settled");
-    w.sound(&mut [&mut a, &mut b, &mut c]);
+    let backed = w.refresh(&mut a);
+    assert_eq!(backed.certified_liq_deficit, 0, "healthy once backed");
+    assert_eq!(w.liquidate(&mut a, 0), Err(V16Error::NonProgress));
+    w.sound(&mut [&mut a, &mut b]);
 }
