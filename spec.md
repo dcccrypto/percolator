@@ -267,6 +267,8 @@ Open positive PnL that is not converted into a source-credit lien is not backing
 
 Backing freshness is maintained with bounded buckets. The v16.8 public profile uses exactly one freshness bucket per source domain. Any future multi-bucket profile MUST either refill the bucket holding the consumed receivable or recompute the source aggregate before admitting new backing; it MUST NOT compare a source-wide receivable against an unrelated empty bucket.
 
+Provider withdrawals of counterparty backing keep the domain at the full credit rate, which counts registered claims only, and a gain becomes a claim only when its account is refreshed. In Live mode, while any stored position on the domain's asset has not settled the asset's latest K/F change (`stale_account_count_long` or `stale_account_count_short` nonzero), a withdrawal of counterparty backing MUST NOT exceed the domain's provider principal (deposits less earlier withdrawals). Fresh backing beyond that principal was paid in by the domain's losers and may be owed to a gain the watermark cannot see yet. Once every position is settled the watermark alone governs again. (upstream 827a125f)
+
 ```text
 R_i = scheduled_remaining + pending_remaining
 if sched_present: 0 < sched_remaining <= sched_anchor, cfg_h_min <= sched_horizon <= cfg_h_max, sched_release <= sched_anchor

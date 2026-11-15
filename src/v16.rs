@@ -10705,6 +10705,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         })
     }
 
+    /// Whether a stored position on `domain`'s asset, on either side, has not
+    /// settled the asset's latest K/F change. Such a position can hold a gain
+    /// that is not registered as a claim yet. (upstream 827a125f)
+    fn asset_has_unsettled_kf_position(&self, domain: usize) -> V16Result<bool> {
+        let (asset_index, _) = self.domain_asset_side(domain)?;
+        let asset = &self.markets[asset_index].engine_slot().asset;
+        Ok(asset.stale_account_count_long.get() != 0 || asset.stale_account_count_short.get() != 0)
+    }
+
     /// S10: `delta` is added to (`add`) or saturating-subtracted from the principal mirror.
     fn adjust_provider_principal_for_domain(
         &mut self,
@@ -10961,6 +10970,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// (`credit_rate_num == CREDIT_RATE_SCALE`) after the principal leaves. This
     /// prevents a backing provider from withdrawing principal that currently
     /// supports outstanding source-credit claims.
+    ///
+    /// In Live mode the watermark is not enough while a position on the
+    /// domain's asset has not settled the latest K/F change. It counts
+    /// registered claims only, and a gain is registered when its account is
+    /// refreshed: between the loser's refresh and the winner's, the loser's
+    /// payment is covered by no claim, yet it is owed to that gain and not to
+    /// the provider. In that window the amount is capped at the domain's
+    /// provider principal (the S10 mirror). With every position settled,
+    /// backing above the watermark is nobody else's, as before. (upstream 827a125f)
     pub fn withdraw_fresh_counterparty_backing_not_atomic(
         &mut self,
         domain: usize,
@@ -10971,6 +10989,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::InvalidConfig);
         }
         let backing_num = V16Core::bound_num_from_amount(amount)?;
+        // upstream 827a125f: in Live, fresh backing beyond provider principal was paid in by
+        // the domain's losers. While a position on this asset has not settled the latest K/F
+        // change, some of it may be owed to a gain that is not registered as a claim yet,
+        // which the claim watermark below cannot see: only provider principal may leave.
+        // Once every position is settled every gain is a registered claim and the watermark
+        // is exact.
+        if decode_market_mode(self.header.mode)? == MarketModeV16::Live
+            && backing_num > self.provider_principal_for_domain(domain)?
+            && self.asset_has_unsettled_kf_position(domain)?
+        {
+            return Err(V16Error::LockActive);
+        }
         let (bucket, source) = V16Core::prepare_counterparty_backing_withdraw_delta(
             self.backing_bucket_for_domain(domain)?,
             self.source_credit_for_domain(domain)?,
