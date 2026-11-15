@@ -30,6 +30,7 @@ use percolator::v16::{
     kani_select_auto_crank_plan, kani_settle_kf_stale_cohort,
     kani_settle_resolved_pnl_after_booking, kani_should_clear_prior_reset_obligation,
     kani_source_claim_domain_first_burn_partition,
+    kani_source_credit_state_in_flight_support_for_claim_num,
     kani_source_credit_state_realizable_support_for_claim_num,
     kani_source_credit_state_realizable_support_for_face,
     kani_source_lien_fee_after_backing_release, kani_target_effective_lag_adverse_delta,
@@ -20467,4 +20468,49 @@ fn proof_v16_empty_leg_field_compare_matches_byte_compare() {
     kani::cover!(byte_cmp, "empty image");
     kani::cover!(!byte_cmp && leg.active == 0, "inactive non-empty image");
     assert_eq!(leg.is_empty_encoding(), byte_cmp);
+}
+
+/// Haircut-order fix B (docs/fixes/haircut-order-B.md): the in-flight support the liquidation
+/// trigger reads (a) is never below the realizable support (the trigger can only become MORE
+/// lenient than the backed-only rule, never stricter), (b) equals it when nothing is in flight,
+/// (c) never exceeds the claim face, and (d) never exceeds available + in-flight backing.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_haircut_b_in_flight_support_bounds() {
+    let claim_atoms = kani::any::<u8>() as u128;
+    let stock_atoms = kani::any::<u8>() as u128;
+    let backing_atoms = kani::any::<u8>() as u128;
+    let pending_atoms = kani::any::<u8>() as u128;
+    kani::assume(claim_atoms > 0 && claim_atoms <= 31);
+    kani::assume(stock_atoms >= claim_atoms && stock_atoms <= 31);
+    kani::assume(backing_atoms <= 31);
+    // `kf_pending_credit_num` clamps to the claim stock
+    kani::assume(pending_atoms <= stock_atoms);
+    let state = SourceCreditStateV16 {
+        positive_claim_bound_num: stock_atoms * BOUND_SCALE,
+        exact_positive_claim_num: stock_atoms * BOUND_SCALE,
+        fresh_reserved_backing_num: backing_atoms * BOUND_SCALE,
+        credit_rate_num: kani_expected_source_credit_rate_num_for_state(SourceCreditStateV16 {
+            positive_claim_bound_num: stock_atoms * BOUND_SCALE,
+            exact_positive_claim_num: stock_atoms * BOUND_SCALE,
+            fresh_reserved_backing_num: backing_atoms * BOUND_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        })
+        .unwrap(),
+        ..SourceCreditStateV16::EMPTY
+    };
+    let claim_num = claim_atoms * BOUND_SCALE;
+    let pending_num = pending_atoms * BOUND_SCALE;
+    let realizable = kani_source_credit_state_realizable_support_for_claim_num(state, claim_num).unwrap();
+    let in_flight =
+        kani_source_credit_state_in_flight_support_for_claim_num(state, claim_num, pending_num).unwrap();
+    kani::cover!(in_flight > realizable, "in-flight backing lifts support");
+    kani::cover!(pending_atoms == 0, "nothing in flight");
+    assert!(in_flight >= realizable);
+    assert!(in_flight <= claim_atoms);
+    assert!(in_flight <= backing_atoms + pending_atoms);
+    if pending_atoms == 0 {
+        assert_eq!(in_flight, realizable);
+    }
 }
