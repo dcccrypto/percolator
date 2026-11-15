@@ -17429,6 +17429,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(false)
     }
 
+    /// The quiet-market rule for an empty-asset oracle anchor reset, scoped to the asset being
+    /// reset. Asset 0's profile is mirrored into the market's base config, so resetting it still
+    /// needs the whole market quiet (unchanged). Any other asset only needs to be quiet itself:
+    /// once it holds no positions, stale legs, loss or backing state, no account's PnL,
+    /// certificate or loss attribution reads its oracle. The market-wide bankruptcy, threshold
+    /// stress and recovery locks still block every asset. Matches upstream percolator-prog
+    /// 780e1138 (#447), which scopes the wrapper check the same way.
+    fn oracle_reset_blocked_for_asset(&self, asset_index: usize) -> V16Result<bool> {
+        if asset_index == 0 {
+            return self.group_has_position_or_loss_state_for_oracle_reset();
+        }
+        Ok(bankruptcy_hlock_is_active(self.header.bankruptcy_hlock_active)
+            || decode_bool(self.header.threshold_stress_active)?
+            || self.header.recovery_reason.try_to_runtime()?.is_some()
+            || self.asset_local_has_position_or_loss_state(asset_index)?)
+    }
+
     pub fn set_asset_raw_oracle_target_not_atomic(
         &mut self,
         asset_index: usize,
@@ -17506,7 +17523,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let mut asset = self.asset_state(asset_index)?;
         if asset.lifecycle != AssetLifecycleV16::Active
-            || self.group_has_position_or_loss_state_for_oracle_reset()?
+            || self.oracle_reset_blocked_for_asset(asset_index)?
         {
             return Err(V16Error::LockActive);
         }
