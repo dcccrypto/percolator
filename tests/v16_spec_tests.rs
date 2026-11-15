@@ -4609,6 +4609,226 @@ fn v16_public_empty_asset_oracle_anchor_reset_is_value_neutral() {
     market.validate_shape().unwrap();
 }
 
+// ── #447 (upstream percolator-prog 780e1138): the oracle-anchor reset is scoped to the
+// asset being reset. A non-zero empty asset can be (re)anchored while another asset holds
+// positions; asset 0 keeps the market-wide rule; global locks still block every asset.
+
+fn positioned_asset0_two_asset_market() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+) {
+    let (mut header, mut markets) = market_fixture(2, FUNDING_COUNTER_PRICE);
+    let mut long_account = account_fixture(2, 71);
+    let mut short_account = account_fixture(2, 72);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_account);
+        let mut short = PortfolioV16ViewMut::new(&mut short_account);
+        open_one_lot_pair(&mut market, &mut long, &mut short);
+    }
+    (header, markets, long_account, short_account)
+}
+
+#[test]
+fn v16_oracle_anchor_reset_of_empty_nonzero_asset_succeeds_while_asset0_is_positioned() {
+    let (mut header, mut markets, mut long_account, mut short_account) =
+        positioned_asset0_two_asset_market();
+    let asset0_before = markets[0];
+    assert_eq!(
+        asset0_before
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .stored_pos_count_long,
+        1
+    );
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let pnl_pos_tot_before = header.pnl_pos_tot.get();
+    let oracle_epoch_before = header.oracle_epoch.get();
+    let now_slot = header.current_slot.get() + 5;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .reset_empty_asset_oracle_anchor_not_atomic(1, 123, now_slot)
+        .unwrap();
+
+    let asset1 = market.markets[1].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset1.raw_oracle_target_price, 123);
+    assert_eq!(asset1.effective_price, 123);
+    assert_eq!(asset1.fund_px_last, 123);
+    assert_eq!(asset1.slot_last, now_slot);
+    // The positioned asset is byte-for-byte untouched; no quote value moves.
+    assert_eq!(market.markets[0], asset0_before);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.pnl_pos_tot.get(), pnl_pos_tot_before);
+    assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before);
+    market.validate_shape().unwrap();
+    let long = PortfolioV16ViewMut::new(&mut long_account);
+    long.validate_with_market(&market.as_view()).unwrap();
+    let short = PortfolioV16ViewMut::new(&mut short_account);
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_oracle_anchor_reset_of_empty_nonzero_asset_succeeds_with_open_pnl_on_asset0() {
+    // Upstream #447's case: a price move on the positioned asset leaves market-wide loss
+    // staleness / open PnL. The old group-wide gate refused every reset; the target-scoped
+    // gate still lets the empty asset re-anchor and leaves asset 0 untouched.
+    let (mut header, mut markets, _long, _short) = positioned_asset0_two_asset_market();
+    let start = header.current_slot.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .accrue_asset_to_not_atomic(0, start + 1, FUNDING_COUNTER_PRICE + 1_000, 0, true)
+        .unwrap();
+    assert!(
+        market.header.loss_stale_active != 0 || market.header.pnl_pos_tot.get() != 0,
+        "precondition: the move leaves market-wide PnL / loss state"
+    );
+    let asset0_before = market.markets[0];
+    let header_loss_stale = market.header.loss_stale_active;
+    let pnl_pos_tot = market.header.pnl_pos_tot.get();
+    market
+        .reset_empty_asset_oracle_anchor_not_atomic(1, 777, start + 1)
+        .unwrap();
+    assert_eq!(market.markets[1].engine.asset.effective_price.get(), 777);
+    assert_eq!(market.markets[0], asset0_before);
+    assert_eq!(market.header.loss_stale_active, header_loss_stale);
+    assert_eq!(market.header.pnl_pos_tot.get(), pnl_pos_tot);
+    // Asset 0 itself stays refused under the market-wide rule.
+    assert_eq!(
+        market.reset_empty_asset_oracle_anchor_not_atomic(0, 777, start + 1),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(market.markets[0], asset0_before);
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_oracle_anchor_reset_of_asset0_keeps_the_market_wide_rule() {
+    let (mut header, mut markets, _long, _short) = positioned_asset0_two_asset_market();
+    // Asset 1 empty, asset 0 positioned: resetting asset 0 itself is refused ...
+    let header_before = header;
+    let markets_before = markets.clone();
+    let now_slot = header.current_slot.get() + 5;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(
+        market.reset_empty_asset_oracle_anchor_not_atomic(0, 123, now_slot),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(header, header_before);
+    assert_eq!(markets, markets_before);
+
+    // ... and so is an empty asset 0 while another asset is positioned (unchanged rule).
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut other = markets[1].engine.asset.try_to_runtime().unwrap();
+    other.oi_eff_long_q = POS_SCALE;
+    other.oi_eff_short_q = POS_SCALE;
+    other.stored_pos_count_long = 1;
+    other.stored_pos_count_short = 1;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&other);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(
+        market.reset_empty_asset_oracle_anchor_not_atomic(0, 123, 10),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(market.markets[0].engine.asset.effective_price.get(), 100);
+}
+
+#[test]
+fn v16_oracle_anchor_reset_of_nonzero_asset_still_needs_that_asset_empty() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut target = markets[1].engine.asset.try_to_runtime().unwrap();
+    target.oi_eff_long_q = POS_SCALE;
+    target.oi_eff_short_q = POS_SCALE;
+    target.stored_pos_count_long = 1;
+    target.stored_pos_count_short = 1;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&target);
+    let markets_before = markets.clone();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(
+        market.reset_empty_asset_oracle_anchor_not_atomic(1, 123, 10),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(markets, markets_before);
+
+    // A pending domain loss barrier on the target alone is also enough to refuse.
+    let (mut header, mut markets) = market_fixture(2, 100);
+    markets[1].engine.pending_domain_loss_barrier_short = V16PodU64::new(1);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(
+        market.reset_empty_asset_oracle_anchor_not_atomic(1, 123, 10),
+        Err(V16Error::LockActive)
+    );
+}
+
+#[test]
+fn v16_oracle_anchor_reset_of_nonzero_asset_respects_global_locks() {
+    for lock in 0..3 {
+        let (mut header, mut markets) = market_fixture(2, 100);
+        match lock {
+            0 => header.bankruptcy_hlock_active = 1,
+            1 => header.threshold_stress_active = 1,
+            _ => {
+                header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+                    PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+                ))
+            }
+        }
+        let markets_before = markets.clone();
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        assert_eq!(
+            market.reset_empty_asset_oracle_anchor_not_atomic(1, 123, 10),
+            Err(V16Error::LockActive),
+            "global lock {lock} must still block a non-zero asset reset"
+        );
+        assert_eq!(markets, markets_before);
+    }
+}
+
+#[test]
+fn v16_accrual_on_positioned_asset_still_works_after_other_asset_oracle_reset() {
+    let (mut header, mut markets, mut long_account, mut short_account) =
+        positioned_asset0_two_asset_market();
+    let start = header.current_slot.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    // Listing-style reset on the empty asset advances the market clock.
+    market
+        .reset_empty_asset_oracle_anchor_not_atomic(1, 123, start + 2)
+        .unwrap();
+    assert_eq!(market.header.current_slot.get(), start + 2);
+    // The positioned asset still accrues forward from its own slot.
+    // The positioned asset still accrues forward from its own slot (bounded progress per
+    // call, as without the reset) and catches up to the advanced market clock.
+    let mut calls = 0;
+    loop {
+        let before = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        if before.slot_last >= start + 3 {
+            break;
+        }
+        let outcome = market
+            .accrue_asset_to_not_atomic(0, start + 3, FUNDING_COUNTER_PRICE + 1_000, 0, true)
+            .unwrap();
+        assert!(outcome.dt > 0);
+        calls += 1;
+        assert!(
+            calls <= 8,
+            "accrual on the positioned asset stopped making progress"
+        );
+    }
+    market.validate_shape().unwrap();
+    let mut long = PortfolioV16ViewMut::new(&mut long_account);
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    let mut short = PortfolioV16ViewMut::new(&mut short_account);
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+}
+
 #[test]
 fn v16_public_force_asset_recovery_freezes_mark_and_is_idempotent() {
     let (mut header, mut markets) = market_fixture(2, 100);
