@@ -26800,6 +26800,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)?;
         TokenValueFlowProofV16::external_in_to_account_capital(amount, vault_before, vault)?
             .validate()?;
+        // spec.md §2.3: materialization sets `last_fee_slot_i = materialize_slot`.
+        // `init_empty_in_place` leaves it at 0, so the first deposit into a fresh
+        // (or reused) account anchors it at the current slot; otherwise the first
+        // fee sync bills every slot back to 0. Only a never-anchored, capital-less,
+        // flat account is treated as materializing, so a live account's anchor
+        // is never moved forward.
+        if account.header.capital.get() == 0
+            && account.header.last_fee_slot.get() == 0
+            && active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
+        {
+            account.header.last_fee_slot = V16PodU64::new(self.header.current_slot.get());
+        }
         account.header.capital = V16PodU128::new(capital);
         account.header.health_cert.valid = 0;
         self.header.c_tot = V16PodU128::new(c_tot);
