@@ -21183,7 +21183,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 asset_index,
                 leg_slot,
                 allow_attributed_terminal_trade,
-                Some(lookup.current_effective_q.unsigned_abs()),
+                Some(V16Core::effective_abs_quantity_for_detach(
+                    self.asset_state(asset_index)?,
+                    leg,
+                )?),
             );
         }
         if route == PositionRouteV16::Flip {
@@ -22126,9 +22129,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?,
             SideV16::Short => close_i128,
         };
+        // A full close of the side's last leg removes only what the aggregate holds (GH#290 gap).
+        let oi_q = {
+            let asset = self.asset_state(asset_index)?;
+            if close_q >= V16Core::effective_abs_quantity_for_leg(asset, leg)? {
+                close_q.min(V16Core::effective_abs_quantity_for_detach(asset, leg)?)
+            } else {
+                close_q
+            }
+        };
         self.apply_position_delta(account, asset_index, delta)?;
         self.begin_side_reset_if_effective_oi_exhausted(asset_index, leg.side)?;
-        self.reduce_matching_open_interest_for_unilateral_close(asset_index, leg.side, close_q)
+        self.reduce_matching_open_interest_for_unilateral_close(asset_index, leg.side, oi_q)
     }
 
     pub fn liquidate_account_not_atomic(
@@ -22379,8 +22391,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             asset.raw_oracle_target_price,
             fee_bps,
         )?;
-        let close_budget =
-            close_request_q.min(self.unilateral_close_capacity(request.asset_index, leg)?);
+        let capacity = self.unilateral_close_capacity(request.asset_index, leg)?;
+        let mut close_budget = close_request_q.min(capacity);
+        // The side's last leg can exceed its FLOORed aggregate by the CEIL rounding atom
+        // (GH#290). When the cap binds only on that atom and a full close is wanted, close the
+        // whole leg: detach and the matching OI reduction both remove exactly the aggregate
+        // (`effective_abs_quantity_for_detach`). Capping to eff-1 instead left one atom of open
+        // risk beside uncovered loss and declared Recovery (P45/P46).
+        if close_request_q >= account_effective_q
+            && capacity < account_effective_q
+            && V16Core::effective_abs_quantity_for_detach(
+                self.asset_state(request.asset_index)?,
+                leg,
+            )? == capacity
+        {
+            close_budget = account_effective_q;
+        }
         if close_budget == 0 {
             return Err(V16Error::NonProgress);
         }
