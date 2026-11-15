@@ -323,7 +323,7 @@ fn hedged_refresh_counterparty_first_order_never_liquidates_in_the_window() {
 }
 
 /// What the spec.md:266 rule requires when the hedged account is cranked before its counterparty:
-/// the unbacked gain does not count, so it is liquidatable although it is solvent once `b` refreshes. This is the spec.md:266 behaviour: the unbacked gain does not count (see the rule tests at the end).
+/// the unbacked gain does not count, so it is liquidatable although it is solvent once `b` refreshes.
 #[test]
 fn hedged_refresh_account_first_order_liquidates_while_gain_unbacked() {
     let mut closed = Vec::new();
