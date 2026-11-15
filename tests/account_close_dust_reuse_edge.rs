@@ -299,10 +299,11 @@ fn close_resolved_fee_smaller_than_capital_pays_the_remainder() {
     let mut w = W::new();
     let (mut a, mut b) = (account(1), account(2));
     assert!(w.deposit(&mut a, 10));
+    let deposit_slot = w.header.current_slot.get();
     assert!(w.deposit(&mut b, 100));
     w.resolve();
-    // billed from last_fee_slot 0 to resolved_slot (see the ignored test at the bottom; if that bug is fixed, derive dt from resolved_slot - materialize slot and update this)
-    let fee = 3 * w.header.resolved_slot.get() as u128;
+    // billed from the slot the account was materialized (deposit slot) to resolved_slot
+    let fee = 3 * (w.header.resolved_slot.get() - deposit_slot) as u128;
     assert!(fee < 10);
     assert_eq!(paid(w.close(&mut a, 3)), 10 - fee);
     assert_eq!((w.insurance(), w.c_tot(), w.vault()), (fee, 100, 100 + fee));
@@ -343,10 +344,8 @@ fn close_resolved_all_accounts_close_vault_equals_insurance() {
 /// `init_empty_in_place` (src/v16.rs:28058) sets it to 0 and `deposit_not_atomic`
 /// (src/v16.rs:26606) never anchors it, so the first fee sync on a freshly opened (or reused)
 /// account at slot N bills N slots of fee for time the account did not exist.
-/// Marked ignore: it fails today. May be the wrapper's job to anchor; the engine gives it no
-/// way to do so except writing the raw field.
+/// Fixed: `deposit_not_atomic` anchors a never-anchored, empty, flat account at `current_slot`.
 #[test]
-#[ignore = "bug: new/reused account is billed fees from slot 0 (src/v16.rs:28058, spec.md:793)"]
 fn close_fresh_account_is_not_billed_for_slots_before_it_existed() {
     let mut w = W::new();
     let mut a = account(1);
