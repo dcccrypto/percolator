@@ -4122,6 +4122,34 @@ impl V16Core {
             .min(Self::available_backing_num_for_source_credit_state(state)? / BOUND_SCALE))
     }
 
+    /// Haircut-order fix B (docs/fixes/haircut-order-B.md): the support a claim of `claim_num`
+    /// reaches once the losers whose K/F loss is still IN FLIGHT have settled and paid.
+    /// `pending_num` is the domain's `kf_pending_credit` (claims credited to winners minus loss
+    /// realized by losers, clamped to `[0, claims]`). The rate is the R1 netting rate with only
+    /// the in-flight term, `min(1, max(stored, (available + pending) / claims))`, and the result
+    /// is capped by `available + pending`. It is never below
+    /// `source_credit_state_realizable_support_for_claim_num` (rate >= stored, cap >= available),
+    /// and with `pending_num == 0` it is exactly that value. Read only for the LIQUIDATION
+    /// trigger and sizing: it never backs a withdrawal, initial margin or a payout.
+    fn source_credit_state_in_flight_support_for_claim_num(
+        state: SourceCreditStateV16,
+        claim_num: u128,
+        pending_num: u128,
+    ) -> V16Result<u128> {
+        if claim_num == 0 || state.positive_claim_bound_num == 0 {
+            return Ok(0);
+        }
+        if pending_num == 0 {
+            return Self::source_credit_state_realizable_support_for_claim_num(state, claim_num);
+        }
+        let rate_num = Self::source_credit_netting_rate(state, 0, 0, pending_num)?;
+        let credited_num = Self::mul_div_floor_u128_or_wide(claim_num, rate_num, CREDIT_RATE_SCALE)?;
+        let cap_num = Self::available_backing_num_for_source_credit_state(state)?
+            .checked_add(pending_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((credited_num / BOUND_SCALE).min(cap_num / BOUND_SCALE))
+    }
+
     /// `source_credit_state_realizable_support_for_claim_num` evaluated at `rate_num` instead of
     /// the state's stored rate. The available-backing cap is the state's own, so an overriding
     /// rate can never extract more support than the domain actually holds.
@@ -4846,6 +4874,16 @@ pub fn kani_source_credit_state_realizable_support_for_face(
     face_claim: u128,
 ) -> V16Result<u128> {
     V16Core::source_credit_state_realizable_support_for_face(state, face_claim)
+}
+
+/// Haircut-order fix B: the liquidation-only in-flight support kernel.
+#[cfg(kani)]
+pub fn kani_source_credit_state_in_flight_support_for_claim_num(
+    state: SourceCreditStateV16,
+    claim_num: u128,
+    pending_num: u128,
+) -> V16Result<u128> {
+    V16Core::source_credit_state_in_flight_support_for_claim_num(state, claim_num, pending_num)
 }
 
 #[cfg(any(kani, feature = "fuzz"))]
@@ -12911,6 +12949,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &PortfolioV16View<'_>,
         face_claim: u128,
     ) -> V16Result<u128> {
+        self.account_source_support_inner(account, face_claim, false)
+    }
+
+    /// `in_flight = true` (haircut-order fix B, liquidation only): every unliened claim is valued
+    /// as if the losers still owing its domain (`kf_pending_credit`) had already settled. Liened
+    /// and impaired claims are valued exactly as in the realizable path either way.
+    fn account_source_support_inner(
+        &self,
+        account: &PortfolioV16View<'_>,
+        face_claim: u128,
+        in_flight: bool,
+    ) -> V16Result<u128> {
         if face_claim == 0 {
             return Ok(0);
         }
@@ -13002,10 +13052,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if claim_num != 0 {
                 self.validate_source_domain_ledger_current(d)?;
                 let source_credit = self.source_credit_for_domain(d)?;
-                let credited = V16Core::source_credit_state_realizable_support_for_claim_num(
-                    source_credit,
-                    claim_num,
-                )?;
+                let credited = if in_flight {
+                    V16Core::source_credit_state_in_flight_support_for_claim_num(
+                        source_credit,
+                        claim_num,
+                        self.kf_pending_credit_num(d)?,
+                    )?
+                } else {
+                    V16Core::source_credit_state_realizable_support_for_claim_num(
+                        source_credit,
+                        claim_num,
+                    )?
+                };
                 support = support
                     .checked_add(credited)
                     .ok_or(V16Error::ArithmeticOverflow)?;
@@ -14778,6 +14836,41 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn account_haircut_equity(&self, account: &PortfolioV16View<'_>) -> V16Result<i128> {
+        self.account_equity_inner(account, false)
+    }
+
+    /// Haircut-order fix B (spec.md:266 kept): the equity the LIQUIDATION trigger reads.
+    /// `account_haircut_equity` counts a positive claim only once its losers have settled and
+    /// backed it, so a hedge whose loss leg settled first looked insolvent until its
+    /// counterparty was refreshed, and crank order alone decided whether it was liquidated
+    /// (tests/hedged_refresh_order_liquidation.rs). This values the claims whose losers are
+    /// still in flight as the backing they will book (see
+    /// `source_credit_state_in_flight_support_for_claim_num`); backing already lost to a
+    /// bankrupt loser that has settled is still haircut. `>= account_haircut_equity`, equal
+    /// when nothing is in flight. Never used for withdrawal, initial margin or payout.
+    fn account_liquidation_equity(&self, account: &PortfolioV16View<'_>) -> V16Result<i128> {
+        self.account_equity_inner(account, true)
+    }
+
+    /// `certified_liq_deficit` for `maintenance_req`, from `account_liquidation_equity`.
+    fn account_liquidation_deficit(
+        &self,
+        account: &PortfolioV16View<'_>,
+        maintenance_req: u128,
+    ) -> V16Result<u128> {
+        let equity = self.account_liquidation_equity(account)?;
+        Ok(if equity < 0 {
+            equity.unsigned_abs()
+        } else {
+            maintenance_req.saturating_sub(equity as u128)
+        })
+    }
+
+    fn account_equity_inner(
+        &self,
+        account: &PortfolioV16View<'_>,
+        in_flight: bool,
+    ) -> V16Result<i128> {
         validate_non_min_i128(account.header.pnl.get())?;
         validate_fee_credits(account.header.fee_credits.get())?;
         let capital = i128::try_from(account.header.capital.get())
@@ -14791,7 +14884,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow);
         }
         let positive_support = if Self::account_has_source_claims(account)? {
-            self.account_source_realizable_support(account, account.header.pnl.get() as u128)?
+            self.account_source_support_inner(account, account.header.pnl.get() as u128, in_flight)?
         } else {
             0
         };
@@ -16838,11 +16931,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             certified_equity: equity,
             certified_initial_req: initial_req,
             certified_maintenance_req: maintenance_req,
-            certified_liq_deficit: if equity < 0 {
-                equity.unsigned_abs()
-            } else {
-                maintenance_req.saturating_sub(equity as u128)
-            },
+            // haircut-order fix B: the trigger counts in-flight backing
+            certified_liq_deficit: self.account_liquidation_deficit(account, maintenance_req)?,
             certified_worst_case_loss: worst_case_loss,
             cert_oracle_epoch: self.header.oracle_epoch.get(),
             cert_funding_epoch: self.header.funding_epoch.get(),
@@ -17074,11 +17164,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             certified_equity: equity,
             certified_initial_req: initial_req,
             certified_maintenance_req: maintenance_req,
-            certified_liq_deficit: if equity < 0 {
-                equity.unsigned_abs()
-            } else {
-                maintenance_req.saturating_sub(equity as u128)
-            },
+            // haircut-order fix B: the trigger counts in-flight backing
+            certified_liq_deficit: self
+                .account_liquidation_deficit(&account.as_view(), maintenance_req)?,
             certified_worst_case_loss: worst_case_loss,
             cert_oracle_epoch: self.header.oracle_epoch.get(),
             cert_funding_epoch: self.header.funding_epoch.get(),
@@ -17563,6 +17651,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(false)
     }
 
+    /// The quiet-market rule for an empty-asset oracle anchor reset, scoped to the asset being
+    /// reset. Asset 0's profile is mirrored into the market's base config, so resetting it still
+    /// needs the whole market quiet (unchanged). Any other asset only needs to be quiet itself:
+    /// once it holds no positions, stale legs, loss or backing state, no account's PnL,
+    /// certificate or loss attribution reads its oracle. The market-wide bankruptcy, threshold
+    /// stress and recovery locks still block every asset. Matches upstream percolator-prog
+    /// 780e1138 (#447), which scopes the wrapper check the same way.
+    fn oracle_reset_blocked_for_asset(&self, asset_index: usize) -> V16Result<bool> {
+        if asset_index == 0 {
+            return self.group_has_position_or_loss_state_for_oracle_reset();
+        }
+        Ok(bankruptcy_hlock_is_active(self.header.bankruptcy_hlock_active)
+            || decode_bool(self.header.threshold_stress_active)?
+            || self.header.recovery_reason.try_to_runtime()?.is_some()
+            || self.asset_local_has_position_or_loss_state(asset_index)?)
+    }
+
     pub fn set_asset_raw_oracle_target_not_atomic(
         &mut self,
         asset_index: usize,
@@ -17640,7 +17745,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let mut asset = self.asset_state(asset_index)?;
         if asset.lifecycle != AssetLifecycleV16::Active
-            || self.group_has_position_or_loss_state_for_oracle_reset()?
+            || self.oracle_reset_blocked_for_asset(asset_index)?
         {
             return Err(V16Error::LockActive);
         }
@@ -22269,9 +22374,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // close exists, otherwise close the leg fully. `.min` below is
         // defense in depth: `liquidation_engine_close_request_q` already
         // returns a value in `[1, account_effective_q]`.
+        // haircut-order fix B: size the close against the same equity the trigger read, so a
+        // partial close stops where the in-flight-backed account is healthy again.
+        let sizing_cert = HealthCertV16 {
+            certified_equity: self.account_liquidation_equity(&account.as_view())?,
+            ..cert
+        };
         let close_request_q = liquidation_engine_close_request_q(
             config,
-            cert,
+            sizing_cert,
             account.header.capital.get(),
             account.header.pnl.get(),
             leg.side,
@@ -23020,13 +23131,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::Stale);
         }
         let equity = self.account_haircut_equity(&account.as_view())?;
-        let certified_liq_deficit = if equity < 0 {
-            equity.unsigned_abs()
-        } else {
-            existing
-                .certified_maintenance_req
-                .saturating_sub(equity as u128)
-        };
+        // haircut-order fix B: the trigger counts in-flight backing
+        let certified_liq_deficit = self
+            .account_liquidation_deficit(&account.as_view(), existing.certified_maintenance_req)?;
         let cert = HealthCertV16 {
             certified_equity: equity,
             certified_initial_req: existing.certified_initial_req,
@@ -23120,11 +23227,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .and_then(|v| v.checked_add(new_notional))
             .ok_or(V16Error::ArithmeticOverflow)?;
         let equity = self.account_haircut_equity(&account.as_view())?;
-        let certified_liq_deficit = if equity < 0 {
-            equity.unsigned_abs()
-        } else {
-            maintenance_req.saturating_sub(equity as u128)
-        };
+        // haircut-order fix B: the trigger counts in-flight backing
+        let certified_liq_deficit =
+            self.account_liquidation_deficit(&account.as_view(), maintenance_req)?;
         let cert = HealthCertV16 {
             certified_equity: equity,
             certified_initial_req: initial_req,
