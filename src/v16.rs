@@ -5474,8 +5474,11 @@ impl V16Config {
             && self.liquidation_fee_bps == 0
             && self.min_liquidation_abs == 0;
         if !fast_path_ok {
-            self.validate_funding_headroom(self.max_accrual_dt_slots)?;
-            self.validate_funding_headroom(self.min_funding_lifetime_slots)?;
+            // Headroom is monotone in `slots`, so the larger window subsumes the smaller.
+            self.validate_funding_headroom(core::cmp::max(
+                self.max_accrual_dt_slots,
+                self.min_funding_lifetime_slots,
+            ))?;
             self.validate_exact_solvency_envelope_with(
                 price_budget_fast,
                 self.max_accrual_dt_slots,
