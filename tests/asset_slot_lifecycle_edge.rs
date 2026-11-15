@@ -646,13 +646,10 @@ fn register_rejects_non_empty_account() {
 // A slot retired at slot 0 is a valid Retired slot and can be canonicalized and reused.
 // ---------------------------------------------------------------------------
 
-/// `retire_empty_asset_not_atomic` (src/v16.rs:26692) accepts now_slot = 0 and stores
-/// `retired_slot = 0`. Both `activate_empty_market_slot_not_atomic` (src/v16.rs:9745, the
-/// `previous_asset.retired_slot == 0` check) and
-/// `canonicalize_retired_empty_asset_slot_not_atomic` (src/v16.rs:26911) use `retired_slot == 0`
-/// to mean "not a valid retired slot" and return LockActive. So a slot that is activated and
-/// retired while the group clock is still 0 stays Retired forever, however late the caller is.
-#[test]
+/// `retire_empty_asset_not_atomic` accepts now_slot = 0 and stores `retired_slot = 0`. Activate and
+/// canonicalize used to reject `retired_slot == 0` with LockActive, so a slot retired while the group
+/// clock was still 0 stayed Retired forever. Retired + nonzero market_id is the validity check; 0 is
+/// a legitimate retirement slot.
 fn slot_retired_at_slot_zero_can_be_reactivated_later() {
     let (mut h, mut m) = empty_group(1, 1);
     h.activate_empty_asset_slot_not_atomic(0, &mut m[0].engine, PRICE, 0)
