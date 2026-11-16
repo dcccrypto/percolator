@@ -682,11 +682,30 @@ impl World {
 struct Score {
     lost: Vec<(String, i128)>,
     avoidable_liquidations: u32,
+    /// Keeper refreshes the engine refused (counted, golden-pinned; never dropped).
+    refused_refreshes: u32,
 }
 
 impl Score {
     fn lose(&mut self, name: &str, atoms: i128) {
         self.lost.push((name.to_string(), atoms));
+    }
+    /// Record `n` refused keeper refreshes (a nonzero count is a scored loss of service).
+    fn refuse(&mut self, name: &str, n: u32) {
+        if n != 0 {
+            self.refused_refreshes += n;
+            self.lost.push((format!("{name}: {n} refused"), 0));
+        }
+    }
+    /// Honest atoms lost: sum of the positive entries.
+    fn total(&self) -> i128 {
+        self.lost.iter().map(|(_, v)| (*v).max(0)).sum()
+    }
+    /// Sum of the negative entries (engine beat the spec bound the scenario assumed). Pinned
+    /// by a golden so a setup drift that over-credits one entry and under-credits another
+    /// cannot hide below zero.
+    fn slack(&self) -> i128 {
+        self.lost.iter().map(|(_, v)| (*v).min(0)).sum()
     }
     fn avoidable(&mut self, name: &str) {
         self.avoidable_liquidations += 1;
@@ -821,6 +840,17 @@ fn near_threshold_liquidation(score: &mut Score) {
     }
 }
 
+/// Atoms the funding cadence moves between the every-slot and once-at-end worlds.
+fn cadence_atoms(f: (i128, i128), s: (i128, i128)) -> i128 {
+    (s.0 - f.0).abs() + (s.1 - f.1).abs()
+}
+
+/// Atoms the crank order moves between two worlds' account values (each atom leaves one
+/// account and arrives at another, so the half-sum of absolute differences).
+fn order_atoms(a: &[i128; 3], b: &[i128; 3]) -> i128 {
+    (0..3).map(|k| (a[k] - b[k]).abs()).sum::<i128>() / 2
+}
+
 /// Close everyone after resolution and return (total payout, accounts left open, payouts).
 fn close_all(w: &mut World, order: &[usize]) -> (u128, usize, Vec<Option<u128>>) {
     let p = w.resolve_and_close(order);
@@ -897,8 +927,10 @@ fn adl_ordering(score: &mut Score) {
 
 /// S8: fee and funding rounding.
 ///
-/// (a) Spec §4.5 trading fee = ceil(notional * bps / 10_000), charged once per side. W1 buys
-///     7 units from L at the oracle price 100 with 30 bps: each side pays ceil(2.1) = 3.
+/// (a) Spec §4.5 trading fee = ceil(notional * bps / 10_000). W1 buys 7 units from L at the
+///     oracle price 100 with 30 bps: ceil(2.1) = 3 for the taker. The engine charges the maker
+///     nothing (measured: L's value stays 1_000), so the maker check is slack (-3), pinned by
+///     GOLDEN_SLACK rather than clamped away.
 /// (b) Funding cadence: W1 long 700, L short 700, funding for 30 slots. In one world a keeper
 ///     cranks and refreshes both every slot, in the twin only at the end; the spec's accrual is exact
 ///     (§5.3), so the value of each must not depend on how often it was touched.
@@ -939,12 +971,7 @@ fn fee_and_funding_rounding(score: &mut Score) {
         }
         refused += w.keeper_slot(&[W1, L], 0);
         values.push((w.value(W1), w.value(L)));
-        if refused != 0 {
-            score.lose(
-                &format!("S8b refreshes refused (every_slot={every_slot}): {refused}"),
-                0,
-            );
-        }
+        score.refuse(&format!("S8b refreshes (every_slot={every_slot})"), refused);
         if !every_slot {
             let (paid, open, _) = close_all(&mut w, &[W1, L]);
             score.lose(
@@ -958,14 +985,14 @@ fn fee_and_funding_rounding(score: &mut Score) {
         s.0 < 10_000 && s.1 > 10_000,
         "S8b funding must have moved value"
     );
-    // §5.2 floors each touch, so a cadence difference is spec rounding: reported, not counted.
+    // The spec's accrual is exact (§5.3): any cadence-dependent value is a loss, counted.
     score.lose(
         &format!(
-            "S8b info: funding cadence every-slot vs once moves W1 {} / L {} (not counted)",
+            "S8b funding cadence every-slot vs once moves W1 {} / L {}",
             s.0 - f.0,
             s.1 - f.1
         ),
-        0,
+        cadence_atoms(f, s),
     );
 }
 
@@ -1044,26 +1071,17 @@ fn crank_order(score: &mut Score) {
         for _ in 0..20 {
             refused += w.keeper_slot(&order, FUNDING_E9 as i128);
         }
-        if refused != 0 {
-            score.lose(
-                &format!("S10 refreshes refused, order {:?}: {refused}", order),
-                0,
-            );
-        }
+        score.refuse(&format!("S10 refreshes, order {:?}", order), refused);
         for i in [W1, W2, L] {
             let _ = w.refresh(i);
         }
         values.push([w.value(W1), w.value(W2), w.value(L)]);
     }
     assert!(values[0][2] > 30_000, "S10 funding must have moved value");
-    let moved: i128 = (0..3)
-        .map(|k| (values[0][k] - values[1][k]).abs())
-        .sum::<i128>()
-        / 2;
-    // A per-touch floor difference would be §5.2 rounding: reported, not counted.
+    let moved = order_atoms(&values[0], &values[1]);
     score.lose(
-        &format!("S10 info: crank order moves {moved} atom(s) (not counted)"),
-        0,
+        &format!("S10 crank order moves {moved} atom(s) between honest accounts"),
+        moved,
     );
 }
 
@@ -1152,10 +1170,15 @@ fn rent_junior_to_losses(score: &mut Score) {
     );
 }
 
-/// Golden score (91911d5b baseline: 228 / 1). Any change, better or worse, must update these
+/// Golden score (91911d5b baseline: 228 / 1; refused refreshes and slack added later). Any change, better or worse, must update these
 /// in the same PR, so a scenario that silently stops measuring cannot pass as an improvement.
 const CEILING_ATOMS: i128 = 228;
 const CEILING_AVOIDABLE: u32 = 1;
+/// Keeper refreshes the engine refuses even with the crank in place (S8b 2 + S10 2). Pinned so
+/// neither a new refusal nor a fix goes unnoticed.
+const CEILING_REFUSED: u32 = 4;
+/// Sum of negative entries (S7 -10, S8a maker -3: the engine charges the maker no fee).
+const GOLDEN_SLACK: i128 = -13;
 
 #[test]
 fn leniency_scoreboard() {
@@ -1168,17 +1191,63 @@ fn leniency_scoreboard() {
     crank_order(&mut score);
     rent_junior_to_losses(&mut score);
 
-    let total: i128 = score.lost.iter().map(|(_, v)| (*v).max(0)).sum();
+    let total = score.total();
     for (name, v) in &score.lost {
         println!("LENIENCY {name}: {v}");
     }
     println!(
-        "LENIENCY_SCORE honest_atoms_lost={total} avoidable_liquidations={}",
-        score.avoidable_liquidations
+        "LENIENCY_SCORE honest_atoms_lost={total} avoidable_liquidations={} refused_refreshes={} slack={}",
+        score.avoidable_liquidations,
+        score.refused_refreshes,
+        score.slack()
     );
     assert_eq!(
         total, CEILING_ATOMS,
         "honest_atoms_lost changed: update the golden value"
     );
     assert_eq!(score.avoidable_liquidations, CEILING_AVOIDABLE);
+    assert_eq!(score.refused_refreshes, CEILING_REFUSED);
+    assert_eq!(score.slack(), GOLDEN_SLACK, "negative-entry slack drifted");
+}
+
+/// Fail-before/pass-after: the S8b/S10 scoring must react to a cadence or crank-order
+/// regression and to refused refreshes (the old code pushed 0 for all three).
+#[test]
+fn s8b_cadence_difference_is_scored() {
+    assert_eq!(cadence_atoms((100, 200), (100, 200)), 0);
+    assert_eq!(cadence_atoms((100, 200), (97, 203)), 6);
+    let mut score = Score::default();
+    let (f, s) = ((100, 200), (99, 201));
+    score.lose("S8b cadence", cadence_atoms(f, s));
+    assert_eq!(score.total(), 2, "cadence regression must raise the score");
+}
+
+#[test]
+fn s10_crank_order_difference_is_scored() {
+    assert_eq!(order_atoms(&[1, 2, 3], &[1, 2, 3]), 0);
+    assert_eq!(order_atoms(&[10, 20, 30], &[7, 20, 33]), 3);
+    let mut score = Score::default();
+    score.lose("S10 order", order_atoms(&[10, 20, 30], &[8, 20, 32]));
+    assert_eq!(score.total(), 2, "crank-order regression must raise the score");
+}
+
+#[test]
+fn refused_refreshes_are_scored() {
+    let mut score = Score::default();
+    score.refuse("S8b", 0);
+    assert_eq!(score.refused_refreshes, 0);
+    assert!(score.lost.is_empty());
+    score.refuse("S8b", 2);
+    score.refuse("S10", 1);
+    assert_eq!(score.refused_refreshes, 3);
+    assert_eq!(score.lost.len(), 2);
+}
+
+#[test]
+fn negative_entries_cannot_hide_a_drift() {
+    let mut score = Score::default();
+    score.lose("over-credited", -3);
+    score.lose("under-credited", 3);
+    assert_eq!(score.total(), 3);
+    assert_eq!(score.slack(), -3, "offsetting drift is visible in slack");
 }
