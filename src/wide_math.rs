@@ -1359,6 +1359,24 @@ impl U512 {
 // Spec section 4.6 helpers
 // ============================================================================
 
+/// -mag as I256 for mag in 0..=2^255 (2^255 maps to I256::MIN); panics above that.
+fn neg_i256_from_magnitude(mag: U256, ctx: &'static str) -> I256 {
+    if mag.is_zero() {
+        return I256::ZERO;
+    }
+    if mag == U256::new(0, 1u128 << 127) {
+        return I256::MIN;
+    }
+    assert!(mag.hi() >> 127 == 0, "{}", ctx);
+    I256::from_raw_u256(mag).checked_neg().expect("unreachable: |x| < 2^255")
+}
+
+/// I256 from a non-negative quotient; panics if it is 2^255 or more (would flip the sign bit).
+fn pos_i256_from_magnitude(mag: U256, ctx: &'static str) -> I256 {
+    assert!(mag.hi() >> 127 == 0, "{}", ctx);
+    I256::from_raw_u256(mag)
+}
+
 /// Spec section 4.6: signed floor division with positive denominator.
 ///
 /// Computes floor(n / d) where d > 0. Uses truncation toward zero, then
@@ -1408,12 +1426,7 @@ pub fn floor_div_signed_conservative(n: I256, d: U256) -> I256 {
 
         // Negate q_final to get the negative I256 result.
         // q_final as I256 then negate.
-        if q_final.is_zero() {
-            I256::ZERO
-        } else {
-            let qi = I256::from_raw_u256(q_final);
-            qi.checked_neg().expect("floor_div result out of range")
-        }
+        neg_i256_from_magnitude(q_final, "floor_div result out of range")
     }
 }
 
@@ -1442,11 +1455,12 @@ pub fn floor_div_signed_conservative_i128(n: i128, d: u128) -> i128 {
         let q = abs_n / d;
         let r = abs_n % d;
         let q_final = if r != 0 { q + 1 } else { q };
+        // |result| may be exactly 2^127 (i128::MIN); wrapping_neg maps that bit pattern to MIN.
         assert!(
-            q_final <= i128::MAX as u128,
+            q_final <= i128::MIN.unsigned_abs(),
             "floor_div_signed_conservative_i128: result out of range"
         );
-        -(q_final as i128)
+        (q_final as i128).wrapping_neg()
     }
 }
 
@@ -1565,7 +1579,7 @@ pub fn wide_signed_mul_div_floor(abs_basis: U256, k_diff: I256, denominator: U25
 
     if !negative {
         // Positive: floor division = truncation
-        I256::from_raw_u256(q)
+        pos_i256_from_magnitude(q, "wide_signed_mul_div_floor result out of I256 range")
     } else {
         // Negative: if remainder != 0, subtract 1 from quotient (floor toward -inf)
         let q_final = if r.is_zero() {
@@ -1574,13 +1588,7 @@ pub fn wide_signed_mul_div_floor(abs_basis: U256, k_diff: I256, denominator: U25
             q.checked_add(U256::ONE)
                 .expect("wide_signed_mul_div_floor quotient overflow")
         };
-        if q_final.is_zero() {
-            I256::ZERO
-        } else {
-            let qi = I256::from_raw_u256(q_final);
-            qi.checked_neg()
-                .expect("wide_signed_mul_div_floor result out of I256 range")
-        }
+        neg_i256_from_magnitude(q_final, "wide_signed_mul_div_floor result out of I256 range")
     }
 }
 

@@ -12,7 +12,7 @@
 //!   cargo test --release --features fork-facade --test wide_math_diff -- --nocapture
 //! Each test prints `WIDE_MATH_DIFF op=.. cases=.. mismatches=..`.
 //!
-//! Known contract gaps found by this file are in the `#[ignore]`d `wide_math_known_*` tests.
+//! The former contract gaps found by this file are regression tests named `wide_math_known_*`.
 #![cfg(feature = "fork-facade")]
 
 use core::cmp::Ordering;
@@ -1101,15 +1101,13 @@ fn wide_math_diff_k_pair_with_carry() {
 }
 
 // ---------------------------------------------------------------------------
-// Known gaps. Each one is a real divergence between the engine and the exact
-// answer. They are #[ignore]d so CI stays green; run with `-- --ignored` to see them.
-// No product code is changed here.
+// Former known gaps (now fixed in src/wide_math.rs): each was a divergence between the
+// engine and the exact answer. Regular regression tests.
 // ---------------------------------------------------------------------------
 
 /// -2^255 (I256::MIN) is representable, but floor_div_signed_conservative(MIN, 1) panics:
 /// the quotient magnitude 2^255 goes through `checked_neg` of the MIN bit pattern.
 #[test]
-#[ignore = "known gap: floor_div_signed_conservative(I256::MIN, 1) panics though the exact result (MIN) fits"]
 fn wide_math_known_floor_div_signed_min_by_one() {
     let got = catch_unwind(|| floor_div_signed_conservative(I256::MIN, U256::ONE));
     assert_eq!(got.ok(), Some(I256::MIN), "expected MIN / 1 == MIN");
@@ -1118,7 +1116,6 @@ fn wide_math_known_floor_div_signed_min_by_one() {
 /// Same shape for the native i128 version: floor(i128::MIN / 1) = i128::MIN fits but the
 /// code asserts q <= i128::MAX.
 #[test]
-#[ignore = "known gap: floor_div_signed_conservative_i128(i128::MIN, 1) panics though the exact result fits"]
 fn wide_math_known_floor_div_signed_i128_min_by_one() {
     let got = catch_unwind(|| floor_div_signed_conservative_i128(i128::MIN, 1));
     assert_eq!(got.ok(), Some(i128::MIN), "expected i128::MIN / 1 == i128::MIN");
@@ -1126,7 +1123,6 @@ fn wide_math_known_floor_div_signed_i128_min_by_one() {
 
 /// Negative result of exactly -2^255 is representable but wide_signed_mul_div_floor panics.
 #[test]
-#[ignore = "known gap: wide_signed_mul_div_floor returns/panics wrongly at the exact -2^255 boundary"]
 fn wide_math_known_wide_signed_mul_div_floor_exact_min() {
     // basis = 2^255, k = -1, den = 1  ->  exactly -2^255 = I256::MIN
     let basis = U256::new(0, 1u128 << 127);
@@ -1137,7 +1133,6 @@ fn wide_math_known_wide_signed_mul_div_floor_exact_min() {
 /// A positive quotient of 2^255 or more does not fit I256 but the function does not check:
 /// it reinterprets the bits, so a huge positive answer comes back as a negative number.
 #[test]
-#[ignore = "known gap: wide_signed_mul_div_floor silently wraps sign when the quotient does not fit I256"]
 fn wide_math_known_wide_signed_mul_div_floor_positive_wrap() {
     // 2^255 * 1 / 1 = 2^255 which is > I256::MAX
     let basis = U256::new(0, 1u128 << 127);
@@ -1151,7 +1146,6 @@ fn wide_math_known_wide_signed_mul_div_floor_positive_wrap() {
 
 /// Negative side of the same: quotient magnitude above 2^255 gives a value of the wrong sign.
 #[test]
-#[ignore = "known gap: wide_signed_mul_div_floor silently wraps sign for negative results below I256::MIN"]
 fn wide_math_known_wide_signed_mul_div_floor_negative_wrap() {
     // -(2^255 + 5) does not fit I256
     let basis = u(&Big::pow2(255).add(&Big::from_u128(5)));
