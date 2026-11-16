@@ -1,0 +1,17 @@
+# Engine issue verification, 2026-11-16 (J-20261116-ISSUES-ENGINE-VERIFY)
+
+Verified against v2.2 branch `feat/v22-engine-rc23-2026-10-22` @ 3e5970f3 and Toly upstream master @ 5e3af071 (2026-11-14). Read-only for the issues: none closed, commented or fixed.
+
+| Issue | Verdict | Proof | Confidence |
+|---|---|---|---|
+| #126 side flip not risk-increasing | FIXED on v2.2 | 17cdea8a (#289, ancestor of HEAD). `position_change_increases_risk` src/v16.rs:28330-28334 counts `flips_sign`; `trade_account_requires_initial_margin` :28351 keeps the IM gate and source-lien creation on flips. | High (code read; regression test not re-run) |
+| #292 locked liquidation latches bankruptcy_hlock | FIXED on v2.2 | 1045ac5f (#299) + a100d54d (#302), both ancestors of HEAD. Locked path now at src/v16.rs:22439-22560: charge by `liquidation_residual_charge`, ReduceOnly/ResolveFlat, flat deficit resolved via `resolve_flat_unattributed_deficit_locally`; stranded-shape detector :382, :24453. Tests: tests/gh292_*.rs, proofs_gh292_latch.rs. | High on code; tests run status below |
+| #290 ADL ceil vs floor aggregate, Recovery leg undetachable | FIXED on v2.2 (narrow) | 198f2104 / 459a346d (#297). `effective_abs_quantity_for_detach` src/v16.rs:2492 clamps to the aggregate when the leg is the side's only stored leg and gap <= 1. Test tests/gh290_recovery_leg_rounding_gap.rs. Residual: multi-leg accumulated gap (>1 atom on the last leg) still fails closed (CounterUnderflow); not reproduced. | Medium-high |
+| #306 burn override double-counts consumed support (f-4020) | NOT FIXED | src/v16.rs:15736-15745 (`apply_signed_kf_delta_to_pnl`): with a source domain, support is consumed (:15728) and then `remaining_loss != 0` forces `junior_face_burned = new_face_support.saturating_sub(old_loss)` = 0, so the full gain is retained AND counted as consumed (loss 10, gain 4, rate 1 -> -2 instead of -6, domain backing -4). Upstream does NOT have this: upstream master apply_signed_kf_delta_to_pnl (up_v16 :14640) sets `junior_face_burned = new_face_support` in that branch (no double count). Fork-only divergence from 9a681a69 (#127/#172 fix). Not repro-tested (fixture heavy); code-read is exact. | High |
+| #307 cross-asset K/F loss burns solvent account's partial face (f-4016) | NOT FIXED (Toly-only fix, port needed) | No `settle_kf_loss_before_support_not_atomic` in src/. Upstream has it (master :13982, called :15184) from 7d2e243d, 23d6a727, 891653a6 (never burn partially backed face beyond a cross-domain K/F loss), fd78ec1c, 5f2a7151, 4e3579c4, d5485eab, 827a125f. 891653a6 is NOT an ancestor of HEAD. Only the single-asset case (R1 #281/#282, tests/v22_r1_i457.rs) is covered. | High |
+
+## Proposed approaches
+
+- #306: spec choice for Khubair. Either (a) adopt upstream's `junior_face_burned = new_face_support` when `remaining_loss != 0` (loses the #127 "underwater account unrecoverable" property, which upstream solved differently), or (b) keep the override but give back the consumed support (do not consume from the source domain when the override applies / restore `support_consumed` backing). Prefer porting upstream's reversal-netting set (#307) which supersedes this path. Funds/liquidation safety: stays OPEN.
+- #307: port upstream pre-support settlement stack (commits listed above, in order, ~8 commits; touches S10 budget plumbing, so needs the v2.2 refresh-grant threading). Do together with #306. Not a spec choice, but large and funds-safety: Khubair decides to schedule.
+- #290 residual: optional, add a multi-leg test; no change proposed.
