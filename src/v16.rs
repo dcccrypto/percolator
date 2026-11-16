@@ -15970,6 +15970,106 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index, s10_budget)
     }
 
+    /// Pre-support settlement of a newly observed negative K/F delta (#307; upstream
+    /// aeyakovenko/percolator `settle_kf_loss_before_support_not_atomic`, prog#457 cross-domain case,
+    /// 7d2e243d..d5485eab, 891653a6 "never burn partially backed face beyond a cross-domain K/F loss").
+    ///
+    /// Burning positive face at a source domain's stored partial credit rate before that domain's
+    /// losers have booked destroys value: the face returns to par once their payment lands. When the
+    /// account holds unliened face in a partially backed (rate < 1) domain OTHER than the leg's own
+    /// loss/twin pair, the whole loss is therefore paid from free capital into `loss_domain` and the
+    /// face is kept (it is worth face * rate in health either way). Only a loss beyond free capital
+    /// reaches the ordinary support-and-burn path. Returns the atoms paid here.
+    ///
+    /// Port scope vs upstream: the same-leg reversal (twin face) and the par netting of fully backed
+    /// face (steps 1-2) are NOT ported: this fork's R1 netting (`KfLossNettingV16`, `kf_pending_credit`)
+    /// prices both inside the ordinary path and covers the single-asset case (tests/v22_r1_i457.rs),
+    /// so the face of the loss/twin domains is left to it and only the cross-domain case moves here.
+    fn settle_kf_loss_before_support_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        loss_domain: usize,
+        loss_abs: u128,
+    ) -> V16Result<u128> {
+        if loss_abs == 0
+            || account.header.pnl.get() <= 0
+            || decode_market_mode(self.header.mode)? != MarketModeV16::Live
+        {
+            return Ok(0);
+        }
+        let (asset_index, loss_side) = self.domain_asset_side(loss_domain)?;
+        let twin_domain = self.insurance_domain_index(asset_index, opposite_side(loss_side))?;
+        // Is any unliened face held in a partially backed domain outside the loss/twin pair?
+        let mut partially_backed = false;
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() {
+                let d = source.domain.get() as usize;
+                if d != loss_domain && d != twin_domain {
+                    let locked = source
+                        .source_claim_liened_num
+                        .get()
+                        .checked_add(source.source_claim_impaired_num.get())
+                        .ok_or(V16Error::ArithmeticOverflow)?;
+                    let unliened = source
+                        .source_claim_bound_num
+                        .get()
+                        .checked_sub(locked)
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    if unliened != 0
+                        && self.source_credit_for_domain_shape(d)?.credit_rate_num
+                            != CREDIT_RATE_SCALE
+                    {
+                        partially_backed = true;
+                        break;
+                    }
+                }
+            }
+            slot += 1;
+        }
+        if !partially_backed
+            || !self.loss_domain_books_now(loss_domain)?
+            || self.has_pending_domain_loss_barrier(asset_index, SideV16::Long)?
+            || self.has_pending_domain_loss_barrier(asset_index, SideV16::Short)?
+        {
+            return Ok(0);
+        }
+        let paid = loss_abs.min(account.header.capital.get());
+        if paid == 0 {
+            return Ok(0);
+        }
+        let vault_before = self.header.vault.get();
+        account.header.capital = V16PodU128::new(
+            account
+                .header
+                .capital
+                .get()
+                .checked_sub(paid)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        self.header.c_tot = V16PodU128::new(
+            self.header
+                .c_tot
+                .get()
+                .checked_sub(paid)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        TokenValueFlowProofV16::account_capital_to_realized_loss(
+            paid,
+            vault_before,
+            self.header.vault.get(),
+        )?
+        .validate()?;
+        self.book_realized_loss_backing_for_domain_not_atomic(loss_domain, paid)?;
+        Self::record_account_residual_crystallized_loss(account, paid)?;
+        account.header.health_cert.valid = 0;
+        Ok(paid)
+    }
+
     fn reserve_new_capital_backed_loss_for_source_domain_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -16581,12 +16681,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .map_err(|_| V16Error::ArithmeticOverflow)?;
                 self.add_kf_pending_credit(source_domain, credited)?;
             } else {
+                validate_non_min_i128(prepared.net)?;
+                // #307 (upstream prog#457 cross-domain case): pay this loss from free capital
+                // while the account's partially backed face in another domain is kept.
+                let paid_from_capital = self.settle_kf_loss_before_support_not_atomic(
+                    account,
+                    source_domain,
+                    prepared.net.unsigned_abs(),
+                )?;
+                let ordinary_loss = prepared.net.unsigned_abs() - paid_from_capital;
                 let negative_before = account.header.pnl.get().min(0).unsigned_abs();
                 let source_backed = Self::account_has_source_claims(&account.as_view())?;
-                validate_non_min_i128(prepared.net)?;
                 let support = self.apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(
                     account,
-                    prepared.net.unsigned_abs(),
+                    ordinary_loss,
                     Some(source_domain),
                     Some(source_domain),
                 )?;
