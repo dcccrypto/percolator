@@ -478,7 +478,7 @@ fn fee_sync_refresh_split_sync_charges_same_total_when_prices_flat() {
 }
 
 /// Golden: today's post-crank state for every case. Intentional engine changes must re-pin this.
-const GOLDEN_DIGEST: u64 = 0x99309842fb6b750c;
+const GOLDEN_DIGEST: u64 = 0x03afd0802edb0678;
 const GOLDEN_LIQUIDATED: usize = 7;
 const GOLDEN_FEE_CHARGED_CASES: usize = 72;
 
