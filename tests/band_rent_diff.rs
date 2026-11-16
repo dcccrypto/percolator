@@ -243,7 +243,7 @@ fn band_width_ok_diff() {
         }
     };
     for d in [1u64, 50, 130, 500, 2_000] {
-        for a in 1..=200_000u64.min(if d == 1 { 400_000 } else { 200_000 }) {
+        for a in 1..=200_000u64 {
             check(a, d);
         }
     }
@@ -270,7 +270,7 @@ fn degenerate_d130_price_le_76() {
     }
     // and 77 is NOT degenerate (claim is tight on the "<= 76" side only if lo<hi)
     let (lo, hi) = band_bounds(77, 130).unwrap();
-    println!("BAND_RENT_DIFF d130 a=77 lo={lo} hi={hi}");
+    assert!(lo < hi, "a=77 lo={lo} hi={hi}");
     report("d130_degenerate", n, 0);
 }
 
@@ -541,4 +541,30 @@ fn rent_chargeable_diff() {
         chk(sh(&mut r), sh(&mut r), p);
     }
     report("rent_chargeable_atoms", cases, mism);
+}
+
+#[test]
+fn pinned_boundaries_and_known_values() {
+    // independent hard-coded anchors
+    assert_eq!(band_worst_adverse_bps(2_000), Ok(8_000));
+    assert_eq!(band_bounds(77, 130), Ok((76, 78)));
+    assert_eq!(band_bounds(1, 1), Ok((1, 1)));
+    assert_eq!(band_bounds(10_000, 100), Ok((9_900, 10_100)));
+    assert_eq!(band_bounds(MAX_ORACLE_PRICE, 2_000), Ok((MAX_ORACLE_PRICE / 5 * 4, MAX_ORACLE_PRICE)));
+    // duration pin boundary: pinned iff seg - anc > e
+    let (anc, e) = (1_000u64, 150u64);
+    assert!(!band_duration_pinned(anc + e - 1, anc, e));
+    assert!(!band_duration_pinned(anc + e, anc, e));
+    assert!(band_duration_pinned(anc + e + 1, anc, e));
+    assert!(!band_duration_pinned(anc - 1, anc, e));
+    assert!(!band_duration_pinned(0, anc, 0));
+    assert!(band_duration_pinned(1, 0, 0));
+    // d1: duration pinned with step == current is not a pin
+    assert_eq!(band_d1_pinned_step(500, 500, 1_000, 100, true), Ok((500, false)));
+    assert_eq!(band_d1_pinned_step(500, 501, 1_000, 100, true), Ok((500, true)));
+    // d1 error path
+    assert!(band_d1_pinned_step(5, 5, 0, 100, false).is_err());
+    assert!(band_d1_pinned_step(5, 5, 100, 0, false).is_err());
+    assert!(band_d1_pinned_step(5, 5, MAX_ORACLE_PRICE + 1, 100, false).is_err());
+    report("pinned_boundaries", 17, 0);
 }
