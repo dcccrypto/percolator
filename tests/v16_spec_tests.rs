@@ -19242,3 +19242,52 @@ fn issue176_liquidation_selects_same_leg_for_any_slot_order() {
         "the larger-notional leg is liquidated first"
     );
 }
+
+// #306 / Nacodex f-4020 (upstream aeyakovenko/percolator master: in the burn
+// override `junior_face_burned = new_face_support`). A bankrupt account (pnl -10)
+// takes a +4 K/F gain settled against a source domain that another winner holds
+// a claim on, at credit rate 1. The 4 is consumed as support, so the loss is
+// 6 and nothing of the gain remains: pnl -6. Retaining the gain as well (the
+// old `saturating_sub(old_loss)` override) ended at -2 and spent the domain's
+// backing twice.
+#[cfg(feature = "fuzz")]
+#[test]
+fn gh306_bankrupt_account_gain_consumed_as_support_is_not_also_retained() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 250);
+    let asset_market_id = markets[0].engine.asset.market_id.get();
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: 100 * BOUND_SCALE,
+        exact_positive_claim_num: 100 * BOUND_SCALE,
+        fresh_reserved_backing_num: 1000 * BOUND_SCALE,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let backing = BackingBucketV16 {
+        market_id: asset_market_id,
+        fresh_unliened_backing_num: 1000 * BOUND_SCALE,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    markets[0].engine.source_credit_short = SourceCreditStateV16Account::from_runtime(&source);
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&backing);
+
+    account_header.pnl = V16PodI128::new(-10);
+    header.vault = V16PodU128::new(1000);
+    header.pnl_pos_tot = V16PodU128::new(100);
+    header.pnl_pos_bound_tot = V16PodU128::new(100);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(100 * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(100 * BOUND_SCALE);
+    header.source_fresh_backing_total_num = V16PodU128::new(1000 * BOUND_SCALE);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.validate_shape().expect("fixture shape");
+    let (consumed, _burned) = market
+        .kani_apply_signed_kf_delta_to_pnl(&mut account, 4, Some(1))
+        .expect("gain settles");
+    assert_eq!(consumed, 4);
+    assert_eq!(account.header.pnl.get(), -6, "gain counted twice");
+    market.validate_shape().unwrap();
+}
