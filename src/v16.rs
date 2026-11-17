@@ -4256,16 +4256,6 @@ impl V16Core {
         ))
     }
 
-    fn source_credit_state_realizable_support_for_face(
-        state: SourceCreditStateV16,
-        face_claim: u128,
-    ) -> V16Result<u128> {
-        Self::source_credit_state_realizable_support_for_claim_num(
-            state,
-            Self::bound_num_from_amount(face_claim)?,
-        )
-    }
-
     fn target_effective_lag_loss_penalty(
         abs_pos_q: u128,
         side: SideV16,
@@ -4873,7 +4863,12 @@ pub fn kani_source_credit_state_realizable_support_for_face(
     state: SourceCreditStateV16,
     face_claim: u128,
 ) -> V16Result<u128> {
-    V16Core::source_credit_state_realizable_support_for_face(state, face_claim)
+    // The production `_for_face` wrapper was removed with the prospective-support
+    // rework (issue #172, upstream adf5cb64); the proofs still exercise this composition.
+    V16Core::source_credit_state_realizable_support_for_claim_num(
+        state,
+        V16Core::bound_num_from_amount(face_claim)?,
+    )
 }
 
 /// Haircut-order fix B: the liquidation-only in-flight support kernel.
@@ -12959,7 +12954,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.burn_account_source_claim_bound_num(account, fallback_burn_num)
     }
 
-    fn source_domain_realizable_support_for_face(
+    /// Support a gain that is about to become a claim in `domain` could realize: the incoming
+    /// face at the domain's current credit rate, capped by available backing. Unlike the
+    /// registered-claims path, this does not require the domain to already carry claims. A
+    /// gain arriving at an account with an outstanding loss is such a prospective claim
+    /// (issue #172, site 2; upstream adf5cb64).
+    fn source_domain_prospective_support_for_face(
         &self,
         domain: usize,
         face_claim: u128,
@@ -12968,10 +12968,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         self.validate_source_domain_ledger_current(domain)?;
-        V16Core::source_credit_state_realizable_support_for_face(
-            self.source_credit_for_domain(domain)?,
-            face_claim,
-        )
+        let state = self.source_credit_for_domain(domain)?;
+        // Only fresh, unexpired counterparty backing may cure a loss here.
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status != BackingBucketStatusV16::Fresh
+            || bucket.expiry_slot <= self.header.current_slot.get()
+        {
+            return Ok(0);
+        }
+        let fresh_num = bucket
+            .fresh_unliened_backing_num
+            .min(V16Core::available_backing_num_for_source_credit_state(state)?);
+        let face_limited = V16Core::mul_div_floor_u128_or_wide(
+            V16Core::bound_num_from_amount(face_claim)?,
+            state.credit_rate_num,
+            CREDIT_RATE_SCALE,
+        )? / BOUND_SCALE;
+        Ok(face_limited.min(fresh_num / BOUND_SCALE))
     }
 
     fn account_source_realizable_support(
@@ -15706,7 +15719,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let new_face_support = delta as u128;
         let (effective_available, source_support_domain) = if let Some(domain) = source_domain {
             (
-                self.source_domain_realizable_support_for_face(domain, new_face_support)?,
+                self.source_domain_prospective_support_for_face(domain, new_face_support)?,
                 Some(domain),
             )
         } else if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
@@ -15744,11 +15757,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && decode_market_mode(self.header.mode)? == MarketModeV16::Live)
             || remaining_loss != 0
         {
-            // Burn only the part of the gain EXCEEDING the outstanding loss. The part
-            // that merely NETS against the loss is the counterparty's loss being
-            // realized against a debt already owed, so it needs no source backing.
-            // Burning it made an underwater account permanently unrecoverable.
-            junior_face_burned = new_face_support.saturating_sub(old_loss);
+            // Face consumed as support is burned (upstream #306: it must not also be
+            // retained). The part of the gain that merely NETS against the outstanding
+            // loss was never consumed as support and needs no source backing, so it stays
+            // to cancel the loss; burning it (as a blanket `= new_face_support` would)
+            // stops an underwater account recovering when the gain domain is unbacked.
+            // Of the face not consumed, only what nets against the remaining loss is kept;
+            // the excess is still burned.
+            let unconsumed = new_face_support
+                .checked_sub(junior_face_burned)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            junior_face_burned = junior_face_burned
+                .checked_add(unconsumed.saturating_sub(remaining_loss))
+                .ok_or(V16Error::ArithmeticOverflow)?;
         }
         if junior_face_burned > new_face_support {
             return Err(V16Error::ArithmeticOverflow);

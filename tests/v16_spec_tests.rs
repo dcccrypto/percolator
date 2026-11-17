@@ -15937,7 +15937,8 @@ fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
         assert_eq!((got, v), (paid, vault), "seed {seed}");
     }
     // Liveness: the walk leaves some accounts unclosed only because it stops after 80
-    // random steps; 3ce4cbd1 has exactly these 7. Any other seed here is a new stuck
+    // random steps; 3ce4cbd1 has exactly these 7 (seed 2556 now closes: a backed gain cures
+    // the loss that stranded it, upstream adf5cb64 / #172). Any other seed here is a new stuck
     // account (a port of upstream 94979ede (c) adds 131).
     let mut unclosed = vec![];
     let mut built = 0;
@@ -15950,7 +15951,7 @@ fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
         }
     }
     assert!(built > 5000, "vacuity: {built} scenarios built");
-    assert_eq!(unclosed, vec![648, 1649, 2061, 2556, 5124, 5620, 5942]);
+    assert_eq!(unclosed, vec![648, 1649, 2061, 5124, 5620, 5942]);
 }
 
 // ---- AUD-S1-6 hunks (a)+(c), 2026-10-20: rollback-faithful Resolved close-order walk ----
@@ -16239,7 +16240,7 @@ fn s16ac_excess_late_loss_funds_junior_residual_once_creditors_are_final() {
 /// pre-existing stale-mark round-trip class, not these hunks).
 #[test]
 fn s16ac_resolved_close_walk_is_live_conserving_and_pinned() {
-    for (steps, want_left) in [(80usize, 22_357u128), (0, 23_724)] {
+    for (steps, want_left) in [(80usize, 22_297u128), (0, 23_664)] {
         let (built, stuck, leaky, left) = s16ac_walk_stats(steps);
         eprintln!("S16AC steps {steps}: built {built} stuck {stuck:?} leaky {leaky:?} left {left}");
         assert!(built > 5000, "vacuity: {built} scenarios built");
@@ -19241,4 +19242,53 @@ fn issue176_liquidation_selects_same_leg_for_any_slot_order() {
         AutoCrankPlanV16::Liquidate { asset_index: 0 },
         "the larger-notional leg is liquidated first"
     );
+}
+
+// #306 / Nacodex f-4020 (upstream aeyakovenko/percolator master: in the burn
+// override `junior_face_burned = new_face_support`). A bankrupt account (pnl -10)
+// takes a +4 K/F gain settled against a source domain that another winner holds
+// a claim on, at credit rate 1. The 4 is consumed as support, so the loss is
+// 6 and nothing of the gain remains: pnl -6. Retaining the gain as well (the
+// old `saturating_sub(old_loss)` override) ended at -2 and spent the domain's
+// backing twice.
+#[cfg(feature = "fuzz")]
+#[test]
+fn gh306_bankrupt_account_gain_consumed_as_support_is_not_also_retained() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 250);
+    let asset_market_id = markets[0].engine.asset.market_id.get();
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: 100 * BOUND_SCALE,
+        exact_positive_claim_num: 100 * BOUND_SCALE,
+        fresh_reserved_backing_num: 1000 * BOUND_SCALE,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let backing = BackingBucketV16 {
+        market_id: asset_market_id,
+        fresh_unliened_backing_num: 1000 * BOUND_SCALE,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    markets[0].engine.source_credit_short = SourceCreditStateV16Account::from_runtime(&source);
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&backing);
+
+    account_header.pnl = V16PodI128::new(-10);
+    header.vault = V16PodU128::new(1000);
+    header.pnl_pos_tot = V16PodU128::new(100);
+    header.pnl_pos_bound_tot = V16PodU128::new(100);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(100 * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(100 * BOUND_SCALE);
+    header.source_fresh_backing_total_num = V16PodU128::new(1000 * BOUND_SCALE);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.validate_shape().expect("fixture shape");
+    let (consumed, _burned) = market
+        .kani_apply_signed_kf_delta_to_pnl(&mut account, 4, Some(1))
+        .expect("gain settles");
+    assert_eq!(consumed, 4);
+    assert_eq!(account.header.pnl.get(), -6, "gain counted twice");
+    market.validate_shape().unwrap();
 }
