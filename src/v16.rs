@@ -16009,6 +16009,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             if source.is_occupied() {
                 let d = source.domain.get() as usize;
+                if d == twin_domain && source.source_claim_bound_num.get() != 0 {
+                    // The leg's own twin face cancels this loss at par (upstream step 1, a
+                    // same-leg reversal). R1 prices that in the ordinary path, which must see
+                    // the whole loss, so leave it all to R1 (whatever the slot order).
+                    return Ok(0);
+                }
                 if d != loss_domain && d != twin_domain {
                     let locked = source
                         .source_claim_liened_num
@@ -16020,12 +16026,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         .get()
                         .checked_sub(locked)
                         .ok_or(V16Error::CounterUnderflow)?;
-                    if unliened != 0
+                    if !partially_backed
+                        && unliened != 0
                         && self.source_credit_for_domain_shape(d)?.credit_rate_num
                             != CREDIT_RATE_SCALE
                     {
+                        // keep scanning: a later twin-domain slot must still defer to R1
                         partially_backed = true;
-                        break;
                     }
                 }
             }
@@ -16065,6 +16072,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?
         .validate()?;
         self.book_realized_loss_backing_for_domain_not_atomic(loss_domain, paid)?;
+        // The paid part is realized now: its winners' credits no longer wait on it, and the
+        // ordinary path prices only the rest (`apply_account_kf_settlement_entry`).
+        let paid_num = i128::try_from(
+            paid.checked_mul(BOUND_SCALE)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        )
+        .map_err(|_| V16Error::ArithmeticOverflow)?;
+        self.add_kf_pending_credit(loss_domain, -paid_num)?;
         Self::record_account_residual_crystallized_loss(account, paid)?;
         account.header.health_cert.valid = 0;
         Ok(paid)
@@ -16718,6 +16733,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     prepared
                         .net
                         .unsigned_abs()
+                        .checked_sub(paid_from_capital)
+                        .ok_or(V16Error::CounterUnderflow)?
                         .checked_mul(BOUND_SCALE)
                         .ok_or(V16Error::ArithmeticOverflow)?,
                 )
