@@ -16009,31 +16009,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             if source.is_occupied() {
                 let d = source.domain.get() as usize;
-                if d == twin_domain && source.source_claim_bound_num.get() != 0 {
-                    // The leg's own twin face cancels this loss at par (upstream step 1, a
-                    // same-leg reversal). R1 prices that in the ordinary path, which must see
-                    // the whole loss, so leave it all to R1 (whatever the slot order).
+                let locked = source
+                    .source_claim_liened_num
+                    .get()
+                    .checked_add(source.source_claim_impaired_num.get())
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                let unliened = source
+                    .source_claim_bound_num
+                    .get()
+                    .checked_sub(locked)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                if d == twin_domain && unliened != 0 {
+                    // The leg's own UNLIENED twin face cancels this loss at par (upstream step 1,
+                    // a same-leg reversal). R1 prices that in the ordinary path, which must see
+                    // the whole loss, so leave it all to R1 (whatever the slot order). Fully
+                    // liened twin face keeps the ordinary unwind-and-burn path: no deferral.
                     return Ok(0);
                 }
-                if d != loss_domain && d != twin_domain {
-                    let locked = source
-                        .source_claim_liened_num
-                        .get()
-                        .checked_add(source.source_claim_impaired_num.get())
-                        .ok_or(V16Error::ArithmeticOverflow)?;
-                    let unliened = source
-                        .source_claim_bound_num
-                        .get()
-                        .checked_sub(locked)
-                        .ok_or(V16Error::CounterUnderflow)?;
-                    if !partially_backed
-                        && unliened != 0
-                        && self.source_credit_for_domain_shape(d)?.credit_rate_num
-                            != CREDIT_RATE_SCALE
-                    {
-                        // keep scanning: a later twin-domain slot must still defer to R1
-                        partially_backed = true;
-                    }
+                if d != loss_domain
+                    && d != twin_domain
+                    && !partially_backed
+                    && unliened != 0
+                    // validated rate read (upstream reads the shape-validated stored rate)
+                    && self.source_credit_for_domain(d)?.credit_rate_num != CREDIT_RATE_SCALE
+                {
+                    // keep scanning: a later twin-domain slot must still defer to R1
+                    partially_backed = true;
                 }
             }
             slot += 1;
