@@ -26712,7 +26712,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 else {
                     return Ok(false);
                 };
-                if leg.kf_epoch_snap != Self::kf_epoch_for_leg_from_asset(asset, leg)
+                if !Self::leg_kf_and_rent_are_current(asset, leg)
                     || k_target != leg.k_snap
                     || f_target != leg.f_snap
                 {
