@@ -15757,11 +15757,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && decode_market_mode(self.header.mode)? == MarketModeV16::Live)
             || remaining_loss != 0
         {
-            // Burn only the part of the gain EXCEEDING the outstanding loss. The part
-            // that merely NETS against the loss is the counterparty's loss being
-            // realized against a debt already owed, so it needs no source backing.
-            // Burning it made an underwater account permanently unrecoverable.
-            junior_face_burned = new_face_support.saturating_sub(old_loss);
+            // The whole gain is consumed as support (or, when under-supported, the loss
+            // tail eats it): burn all of it so it is not also retained (upstream #306).
+            // Sound only with prospective support (adf5cb64): the cure is backed, so
+            // burning the netting part no longer strands an underwater account.
+            junior_face_burned = new_face_support;
         }
         if junior_face_burned > new_face_support {
             return Err(V16Error::ArithmeticOverflow);
