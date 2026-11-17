@@ -128,11 +128,13 @@ fn i660_4016_two_asset_solvent_partial_rate() {
     assert!(v >= c + i, "conservation");
 }
 
-/// X holds a twin face (asset-0 short-loser domain, from an asset-0 gain) AND an asset-1 face in a
-/// partially backed domain, then takes an asset-0 K/F loss. The pre-support settle must defer to R1
-/// for the twin face whichever source slot comes first. `asset1_first` picks which gain is booked
-/// (so which claim takes the lower source slot) first.
-fn twin_plus_other_asset(asset1_first: bool) {
+/// X holds a twin face (the loss asset's short-loser domain, from an earlier gain on that asset) AND
+/// a face on the other asset, then takes a K/F loss on the loss asset. Source slots are ordered by
+/// domain, so `loss_asset` 0 puts the twin domain (1) before the other face (3) and `loss_asset` 1
+/// puts it after (3 vs 1): the pre-support settle must defer to R1 for the twin face in both orders.
+fn twin_plus_other_asset(loss_asset: usize) {
+    let other = 1 - loss_asset;
+    let mv = |loss: i64, drift: i64| if loss_asset == 0 { (loss, drift) } else { (drift, loss) };
     let mut w = World::new();
     let (mut maker, mut x, mut win) = (account(10), account(11), account(12));
     w.deposit(&mut maker, 1_000_000_000_000_000);
@@ -143,26 +145,22 @@ fn twin_plus_other_asset(asset1_first: bool) {
     w.trade(1, &mut win, &mut maker);
     let (p0a, p1a) = (w.price(0) as i128, w.price(1) as i128);
     let e_a = equity(&x);
-    // Book both gains on X (one refresh per gain, in the chosen order).
-    if asset1_first {
-        w.step(0, 150);
-    } else {
-        w.step(150, 0);
-    }
+    let (a, b) = mv(150, 150);
+    w.step(a, b);
     w.refresh(&mut maker);
     w.refresh(&mut win);
     w.refresh(&mut x);
-    if asset1_first {
-        w.step(150, 0);
-    } else {
-        w.step(0, 150);
-    }
-    w.refresh(&mut maker);
-    w.refresh(&mut win);
-    w.refresh(&mut x);
-    // Asset 0 falls (X's K/F loss) while asset 1 drifts; asset-1 losers stay unbooked.
+    let mut domains: Vec<usize> = x
+        .source_domains
+        .iter()
+        .filter(|s| s.is_occupied())
+        .map(|s| s.domain.get() as usize)
+        .collect();
+    domains.sort();
+    assert_eq!(domains, vec![1, 3], "X must hold a face in both short-loser domains");
     for _ in 0..18 {
-        w.step(-200, 10);
+        let (a, b) = mv(-200, 10);
+        w.step(a, b);
         w.refresh(&mut maker);
         w.refresh(&mut win);
     }
@@ -171,17 +169,17 @@ fn twin_plus_other_asset(asset1_first: bool) {
     let ideal = UNITS * (p0b - p0a) + UNITS * (p1b - p1a);
     let excess = (equity(&x) - e_a) - ideal;
     assert!(x.capital.get() > 0, "X must stay solvent");
-    assert_eq!(excess, 0, "asset1_first={asset1_first}: excess {excess}");
+    assert_eq!(excess, 0, "loss_asset={loss_asset} other={other}: excess {excess}");
     let (v, c, i) = (w.header.vault.get(), w.header.c_tot.get(), w.header.insurance.get());
     assert!(v >= c + i, "conservation");
 }
 
 #[test]
-fn twin_face_plus_other_asset_face_asset1_slot_first() {
-    twin_plus_other_asset(true);
+fn twin_face_plus_other_asset_face_twin_slot_first() {
+    twin_plus_other_asset(0);
 }
 
 #[test]
-fn twin_face_plus_other_asset_face_twin_slot_first() {
-    twin_plus_other_asset(false);
+fn twin_face_plus_other_asset_face_twin_slot_last() {
+    twin_plus_other_asset(1);
 }
