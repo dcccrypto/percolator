@@ -15762,8 +15762,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // loss was never consumed as support and needs no source backing, so it stays
             // to cancel the loss; burning it (as a blanket `= new_face_support` would)
             // stops an underwater account recovering when the gain domain is unbacked.
-            // The part EXCEEDING the loss is still burned.
-            junior_face_burned = junior_face_burned.max(new_face_support.saturating_sub(old_loss));
+            // Of the face not consumed, only what nets against the remaining loss is kept;
+            // the excess is still burned.
+            let unconsumed = new_face_support
+                .checked_sub(junior_face_burned)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            junior_face_burned = junior_face_burned
+                .checked_add(unconsumed.saturating_sub(remaining_loss))
+                .ok_or(V16Error::ArithmeticOverflow)?;
         }
         if junior_face_burned > new_face_support {
             return Err(V16Error::ArithmeticOverflow);
