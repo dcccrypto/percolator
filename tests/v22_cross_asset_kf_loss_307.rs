@@ -127,3 +127,61 @@ fn i660_4016_two_asset_solvent_partial_rate() {
     let (v, c, i) = (w.header.vault.get(), w.header.c_tot.get(), w.header.insurance.get());
     assert!(v >= c + i, "conservation");
 }
+
+/// X holds a twin face (asset-0 short-loser domain, from an asset-0 gain) AND an asset-1 face in a
+/// partially backed domain, then takes an asset-0 K/F loss. The pre-support settle must defer to R1
+/// for the twin face whichever source slot comes first. `asset1_first` picks which gain is booked
+/// (so which claim takes the lower source slot) first.
+fn twin_plus_other_asset(asset1_first: bool) {
+    let mut w = World::new();
+    let (mut maker, mut x, mut win) = (account(10), account(11), account(12));
+    w.deposit(&mut maker, 1_000_000_000_000_000);
+    w.deposit(&mut x, 1_000_000_000);
+    w.deposit(&mut win, 1_000_000_000);
+    w.trade(0, &mut x, &mut maker);
+    w.trade(1, &mut x, &mut maker);
+    w.trade(1, &mut win, &mut maker);
+    let (p0a, p1a) = (w.price(0) as i128, w.price(1) as i128);
+    let e_a = equity(&x);
+    // Book both gains on X (one refresh per gain, in the chosen order).
+    if asset1_first {
+        w.step(0, 150);
+    } else {
+        w.step(150, 0);
+    }
+    w.refresh(&mut maker);
+    w.refresh(&mut win);
+    w.refresh(&mut x);
+    if asset1_first {
+        w.step(150, 0);
+    } else {
+        w.step(0, 150);
+    }
+    w.refresh(&mut maker);
+    w.refresh(&mut win);
+    w.refresh(&mut x);
+    // Asset 0 falls (X's K/F loss) while asset 1 drifts; asset-1 losers stay unbooked.
+    for _ in 0..18 {
+        w.step(-200, 10);
+        w.refresh(&mut maker);
+        w.refresh(&mut win);
+    }
+    w.refresh(&mut x);
+    let (p0b, p1b) = (w.price(0) as i128, w.price(1) as i128);
+    let ideal = UNITS * (p0b - p0a) + UNITS * (p1b - p1a);
+    let excess = (equity(&x) - e_a) - ideal;
+    assert!(x.capital.get() > 0, "X must stay solvent");
+    assert_eq!(excess, 0, "asset1_first={asset1_first}: excess {excess}");
+    let (v, c, i) = (w.header.vault.get(), w.header.c_tot.get(), w.header.insurance.get());
+    assert!(v >= c + i, "conservation");
+}
+
+#[test]
+fn twin_face_plus_other_asset_face_asset1_slot_first() {
+    twin_plus_other_asset(true);
+}
+
+#[test]
+fn twin_face_plus_other_asset_face_twin_slot_first() {
+    twin_plus_other_asset(false);
+}
