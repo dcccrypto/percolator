@@ -15937,7 +15937,8 @@ fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
         assert_eq!((got, v), (paid, vault), "seed {seed}");
     }
     // Liveness: the walk leaves some accounts unclosed only because it stops after 80
-    // random steps; 3ce4cbd1 has exactly these 7. Any other seed here is a new stuck
+    // random steps; 3ce4cbd1 has exactly these 7 (seed 2556 now closes: a backed gain cures
+    // the loss that stranded it, upstream adf5cb64 / #172). Any other seed here is a new stuck
     // account (a port of upstream 94979ede (c) adds 131).
     let mut unclosed = vec![];
     let mut built = 0;
@@ -15950,7 +15951,7 @@ fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
         }
     }
     assert!(built > 5000, "vacuity: {built} scenarios built");
-    assert_eq!(unclosed, vec![648, 1649, 2061, 2556, 5124, 5620, 5942]);
+    assert_eq!(unclosed, vec![648, 1649, 2061, 5124, 5620, 5942]);
 }
 
 // ---- AUD-S1-6 hunks (a)+(c), 2026-10-20: rollback-faithful Resolved close-order walk ----
@@ -16239,7 +16240,7 @@ fn s16ac_excess_late_loss_funds_junior_residual_once_creditors_are_final() {
 /// pre-existing stale-mark round-trip class, not these hunks).
 #[test]
 fn s16ac_resolved_close_walk_is_live_conserving_and_pinned() {
-    for (steps, want_left) in [(80usize, 22_357u128), (0, 23_724)] {
+    for (steps, want_left) in [(80usize, 22_297u128), (0, 23_664)] {
         let (built, stuck, leaky, left) = s16ac_walk_stats(steps);
         eprintln!("S16AC steps {steps}: built {built} stuck {stuck:?} leaky {leaky:?} left {left}");
         assert!(built > 5000, "vacuity: {built} scenarios built");
