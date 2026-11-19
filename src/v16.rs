@@ -26647,6 +26647,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(ResolvedCloseOutcomeV16::Closed { payout })
     }
 
+    /// Resolved mode. Whether some account is still known to have a loss to settle
+    /// or to book: a stored leg has not settled its final K/F, an account is marked
+    /// with an unsettled B charge or still owes a loss, or a loss barrier is
+    /// pending. (upstream 2ed67b16)
+    fn resolved_residual_can_still_be_booked(&self) -> V16Result<bool> {
+        if self.header.negative_pnl_account_count.get() != 0
+            || self.header.b_stale_account_count.get() != 0
+        {
+            return Ok(true);
+        }
+        let configured = self.header.config.max_market_slots.get() as usize;
+        let mut index = 0usize;
+        while index < configured {
+            let slot = self
+                .markets
+                .get(index)
+                .ok_or(V16Error::InvalidLeg)?
+                .engine_slot();
+            if slot.asset.stale_account_count_long.get() != 0
+                || slot.asset.stale_account_count_short.get() != 0
+                || slot.pending_domain_loss_barrier_long.get() != 0
+                || slot.pending_domain_loss_barrier_short.get() != 0
+            {
+                return Ok(true);
+            }
+            index += 1;
+        }
+        Ok(false)
+    }
+
     fn detach_solvent_active_legs_for_resolved_close(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -26664,6 +26694,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
 
         let configured_max = self.header.config.max_market_slots.get() as usize;
+        // upstream 2ed67b16: a Recovery obligation keeps the account's other legs
+        // attached only while some account still has a loss to settle or book;
+        // after that it holds only itself (else two crossed accounts wait forever).
+        let mut waiting_obligation = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
@@ -26682,7 +26716,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     && leg.loss_weight != 0
                     && !self.recovery_pending_obligation_release_allowed(asset_index, leg.side)?
                 {
-                    return Ok(());
+                    if self.resolved_residual_can_still_be_booked()? {
+                        return Ok(());
+                    }
+                    waiting_obligation[slot] = true;
                 }
                 let asset = self.asset_state(asset_index)?;
                 if Self::leg_has_exhausted_effective_oi(asset, leg) {
@@ -26711,7 +26748,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
-            if leg.active {
+            if leg.active && !waiting_obligation[slot] {
                 let asset_index = leg.asset_index as usize;
                 let asset = self.asset_state(asset_index)?;
                 let side_effective_oi_q = match leg.side {
