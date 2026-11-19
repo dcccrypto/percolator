@@ -1,0 +1,1910 @@
+   Compiling percolator v0.1.1 (/Users/khubair/agent-work/wt/J-20261119-ENG-PORT-TOLYNETTINGb)
+warning: variable does not need to be mutable
+     --> src/v16.rs:21818:13
+      |
+21818 |         let mut ledger = account.header.close_progress.try_to_runtime()?;
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `MAX`, `overflowing_add`, `overflowing_sub`, and `saturating_add` are never used
+   --> src/wide_math.rs:245:15
+    |
+242 | impl U256 {
+    | --------- associated items in this implementation
+...
+245 |     pub const MAX: Self = Self([u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
+    |               ^^^
+...
+358 |     pub fn overflowing_add(self, rhs: U256) -> (U256, bool) {
+    |            ^^^^^^^^^^^^^^^
+...
+364 |     pub fn overflowing_sub(self, rhs: U256) -> (U256, bool) {
+    |            ^^^^^^^^^^^^^^^
+...
+372 |     pub fn saturating_add(self, rhs: U256) -> U256 {
+    |            ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: multiple associated items are never used
+   --> src/wide_math.rs:776:15
+    |
+775 | impl I256 {
+    | --------- associated items in this implementation
+776 |     pub const ZERO: Self = Self([0, 0, 0, 0]);
+    |               ^^^^
+777 |     pub const ONE: Self = Self([1, 0, 0, 0]);
+    |               ^^^
+778 |     pub const MINUS_ONE: Self = Self([u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
+    |               ^^^^^^^^^
+779 |     pub const MAX: Self = Self([u64::MAX, u64::MAX, u64::MAX, u64::MAX >> 1]);
+    |               ^^^
+...
+788 |     pub fn from_u128(v: u128) -> Self {
+    |            ^^^^^^^^^
+...
+792 |     pub fn try_into_i128(&self) -> Option<i128> {
+    |            ^^^^^^^^^^^^^
+...
+811 |     pub fn is_positive(&self) -> bool {
+    |            ^^^^^^^^^^^
+...
+815 |     pub fn signum(&self) -> i8 {
+    |            ^^^^^^
+...
+844 |     pub fn checked_mul_i256(self, rhs: I256) -> Option<I256> {
+    |            ^^^^^^^^^^^^^^^^
+...
+950 |     pub fn saturating_add(self, rhs: I256) -> I256 {
+    |            ^^^^^^^^^^^^^^
+...
+980 |     pub fn from_raw_u256(v: U256) -> Self {
+    |            ^^^^^^^^^^^^^
+...
+985 |     pub fn from_u256_or_overflow(v: U256) -> Option<Self> {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `floor_div_signed_conservative` is never used
+    --> src/wide_math.rs:1366:8
+     |
+1366 | pub fn floor_div_signed_conservative(n: I256, d: U256) -> I256 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ceil_div_positive_checked` is never used
+    --> src/wide_math.rs:1456:8
+     |
+1456 | pub fn ceil_div_positive_checked(n: U256, d: U256) -> U256 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mul_div_ceil_u256` is never used
+    --> src/wide_math.rs:1488:8
+     |
+1488 | pub fn mul_div_ceil_u256(a: U256, b: U256, d: U256) -> U256 {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: function `saturating_mul_u256_u64` is never used
+    --> src/wide_math.rs:1516:8
+     |
+1516 | pub fn saturating_mul_u256_u64(a: U256, b: u64) -> U256 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `fee_debt_u128_checked` is never used
+    --> src/wide_math.rs:1524:8
+     |
+1524 | pub fn fee_debt_u128_checked(fee_credits: i128) -> u128 {
+     |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `wide_signed_mul_div_floor` is never used
+    --> src/wide_math.rs:1541:8
+     |
+1541 | pub fn wide_signed_mul_div_floor(abs_basis: U256, k_diff: I256, denominator: U256) -> I256 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mul_div_floor_u128` is never used
+    --> src/wide_math.rs:1603:8
+     |
+1603 | pub fn mul_div_floor_u128(a: u128, b: u128, d: u128) -> u128 {
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `mul_div_ceil_u128` is never used
+    --> src/wide_math.rs:1610:8
+     |
+1610 | pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: struct `OverI128Magnitude` is never constructed
+    --> src/wide_math.rs:1727:12
+     |
+1727 | pub struct OverI128Magnitude;
+     |            ^^^^^^^^^^^^^^^^^
+
+warning: function `wide_mul_div_ceil_u128_or_over_i128max` is never used
+    --> src/wide_math.rs:1731:8
+     |
+1731 | pub fn wide_mul_div_ceil_u128_or_over_i128max(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `saturating_mul_u128_u64` is never used
+    --> src/wide_math.rs:1748:8
+     |
+1748 | pub fn saturating_mul_u128_u64(a: u128, b: u64) -> u128 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `percolator` (lib) generated 14 warnings (run `cargo fix --lib -p percolator` to apply 1 suggestion)
+warning: function `kani_active_bitmap_set` is never used
+   --> src/v16.rs:307:8
+    |
+307 | pub fn kani_active_bitmap_set(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary parentheses around `for` iterator expression
+   --> tests/config_validation_envelope_edge.rs:679:14
+    |
+679 |     for f in (0..=600u64) {
+    |              ^          ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+679 -     for f in (0..=600u64) {
+679 +     for f in 0..=600u64 {
+    |
+
+warning: `percolator` (lib test) generated 7 warnings (6 duplicates)
+warning: `percolator` (test "config_validation_envelope_edge") generated 1 warning (run `cargo fix --test "config_validation_envelope_edge" -p percolator` to apply 1 suggestion)
+warning: unused import: `PortfolioV16View`
+  --> tests/deposit_live_only_448.rs:25:5
+   |
+25 |     PortfolioV16View, PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `bankrupt_world` is never used
+   --> tests/adl_insurance_edge.rs:231:4
+    |
+231 | fn bankrupt_world() -> World {
+    |    ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `percolator` (test "deposit_live_only_448") generated 1 warning (run `cargo fix --test "deposit_live_only_448" -p percolator` to apply 1 suggestion)
+warning: `percolator` (test "adl_insurance_edge") generated 1 warning
+warning: value assigned to `prev` is never read
+   --> tests/f03_regression.rs:498:13
+    |
+498 |               prev = now;
+    |               ^^^^^^^^^^
+...
+686 | /     probe!(
+687 | |         "restart_empty_asset_preserving_insurance_budget(asset 0)",
+688 | |         {
+689 | |             let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+...   |
+695 | |     );
+    | |_____- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+    = note: this warning originates in the macro `probe` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: `percolator` (test "f03_regression") generated 1 warning
+warning: unused import: `AssetStateV16`
+ --> tests/v16_spec_tests.rs:5:59
+  |
+5 |     v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16, AssetStateV16Account,
+  |                                                           ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> tests/v16_spec_tests.rs:11899:30
+      |
+11899 |             let (mut header, mut markets) = market_fixture(1, 100);
+      |                              ----^^^^^^^
+      |                              |
+      |                              help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> tests/v16_spec_tests.rs:15151:13
+      |
+15151 |         let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> tests/v16_spec_tests.rs:15152:13
+      |
+15152 |         let mut long = PortfolioV16ViewMut::new(&mut w.long);
+      |             ----^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: unused variable: `capital_before_reversal`
+     --> tests/v16_spec_tests.rs:15415:9
+      |
+15415 |     let capital_before_reversal = long.header.capital.get();
+      |         ^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_capital_before_reversal`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `lien_effective`
+     --> tests/v16_spec_tests.rs:15416:9
+      |
+15416 |     let lien_effective = lien_before.source_lien_effective_reserved.get();
+      |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_lien_effective`
+
+warning: unused variable: `backing_before_reversal`
+     --> tests/v16_spec_tests.rs:15417:9
+      |
+15417 |     let backing_before_reversal = market.markets[0]
+      |         ^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_backing_before_reversal`
+
+warning: unused variable: `reservation_before_reversal`
+     --> tests/v16_spec_tests.rs:15422:9
+      |
+15422 |     let reservation_before_reversal = market.markets[0]
+      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_reservation_before_reversal`
+
+warning: unused variable: `insurance_before_reversal`
+     --> tests/v16_spec_tests.rs:15427:9
+      |
+15427 |     let insurance_before_reversal = market.header.insurance.get();
+      |         ^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_insurance_before_reversal`
+
+warning: unused variable: `risk_epoch_before_reversal`
+     --> tests/v16_spec_tests.rs:15428:9
+      |
+15428 |     let risk_epoch_before_reversal = market.header.risk_epoch.get();
+      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_risk_epoch_before_reversal`
+
+warning: unused variable: `source_credit_epoch_before_reversal`
+     --> tests/v16_spec_tests.rs:15429:9
+      |
+15429 |     let source_credit_epoch_before_reversal = market.markets[0]
+      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_source_credit_epoch_before_reversal`
+
+warning: unused variable: `cert`
+     --> tests/v16_spec_tests.rs:15445:9
+      |
+15445 |     let cert = market
+      |         ^^^^ help: if this is intentional, prefix it with an underscore: `_cert`
+
+warning: unreachable pattern
+     --> tests/v16_spec_tests.rs:15564:17
+      |
+15564 |                 Ok(other) => panic!("{label}: unexpected outcome {other:?}"),
+      |                 ^^^^^^^^^ no value can reach this
+      |
+note: multiple earlier patterns match some of the same values
+     --> tests/v16_spec_tests.rs:15564:17
+      |
+15559 |                 Ok(ResolvedCloseOutcomeV16::ProgressOnly) => continue,
+      |                 ----------------------------------------- matches some of the same values
+15560 |                 Ok(ResolvedCloseOutcomeV16::Closed { payout }) => {
+      |                 ---------------------------------------------- matches some of the same values
+...
+15564 |                 Ok(other) => panic!("{label}: unexpected outcome {other:?}"),
+      |                 ^^^^^^^^^ collectively making this unreachable
+      = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `DOMAIN_A0_SHORT` is never used
+   --> tests/gh292_attacks.rs:161:7
+    |
+161 | const DOMAIN_A0_SHORT: usize = 1;
+    |       ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `oi_eff_short_q` is never read
+     --> tests/v16_spec_tests.rs:13670:5
+      |
+13669 | struct AssetSnapshot {
+      |        ------------- field in this struct
+13670 |     oi_eff_short_q: u128,
+      |     ^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `percolator` (test "gh292_attacks") generated 1 warning
+warning: `percolator` (test "v16_spec_tests") generated 14 warnings (run `cargo fix --test "v16_spec_tests" -p percolator` to apply 12 suggestions)
+warning: method `legs` is never used
+   --> tests/e299_loss_provenance.rs:357:8
+    |
+248 | impl W2 {
+    | ------- method in this implementation
+...
+357 |     fn legs(&self, i: usize) -> Vec<(u32, bool)> {
+    |        ^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> tests/f02_regression.rs:226:9
+    |
+226 |     let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `s16ac_walk_stats` is never used
+   --> tests/livefix_rollback_walk.rs:337:4
+    |
+337 | fn s16ac_walk_stats(steps: usize) -> (usize, Vec<u64>, Vec<u64>, u128) {
+    |    ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `percolator` (test "f02_regression") generated 1 warning (run `cargo fix --test "f02_regression" -p percolator` to apply 1 suggestion)
+warning: `percolator` (test "e299_loss_provenance") generated 1 warning
+warning: `percolator` (test "livefix_rollback_walk") generated 1 warning
+warning: constant `DOMAIN_A0_SHORT` is never used
+   --> tests/gh292_att_bprime.rs:161:7
+    |
+161 | const DOMAIN_A0_SHORT: usize = 1;
+    |       ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `percolator` (test "gh292_att_bprime") generated 1 warning
+warning: variable does not need to be mutable
+    --> tests/lp_burn_repro.rs:1377:9
+     |
+1377 |     let mut step = |header: &mut MarketGroupV16HeaderAccount,
+     |         ----^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `ground_truth_does_partial_backing_cost_REAL_dollars` should have a snake case name
+    --> tests/lp_burn_repro.rs:3123:4
+     |
+3123 | fn ground_truth_does_partial_backing_cost_REAL_dollars() {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `ground_truth_does_partial_backing_cost_real_dollars`
+     |
+     = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: function `ground_truth_does_the_zero_seed_loss_SCALE_with_path_length` should have a snake case name
+    --> tests/lp_burn_repro.rs:3152:4
+     |
+3152 | fn ground_truth_does_the_zero_seed_loss_SCALE_with_path_length() {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `ground_truth_does_the_zero_seed_loss_scale_with_path_length`
+
+warning: function `decisive_can_a_DUST_seed_at_max_expiry_give_liveness_without_the_haircut` should have a snake case name
+    --> tests/lp_burn_repro.rs:3202:4
+     |
+3202 | fn decisive_can_a_DUST_seed_at_max_expiry_give_liveness_without_the_haircut() {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `decisive_can_a_dust_seed_at_max_expiry_give_liveness_without_the_haircut`
+
+warning: function `product_what_does_TODAYS_launch_config_actually_cost` should have a snake case name
+    --> tests/lp_burn_repro.rs:3239:4
+     |
+3239 | fn product_what_does_TODAYS_launch_config_actually_cost() {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `product_what_does_todays_launch_config_actually_cost`
+
+warning: function `product_does_the_100pct_seed_survive_a_LONG_LIVED_market` should have a snake case name
+    --> tests/lp_burn_repro.rs:3273:4
+     |
+3273 | fn product_does_the_100pct_seed_survive_a_LONG_LIVED_market() {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `product_does_the_100pct_seed_survive_a_long_lived_market`
+
+warning: `percolator` (test "lp_burn_repro") generated 6 warnings (run `cargo fix --test "lp_burn_repro" -p percolator` to apply 1 suggestion)
+warning: unused variable: `cap`
+   --> tests/gh292_att_d.rs:229:10
+    |
+229 |     let (cap, conv) = winner_cash_out(&mut w, 2);
+    |          ^^^ help: if this is intentional, prefix it with an underscore: `_cap`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `cap`
+   --> tests/gh292_att_d.rs:247:14
+    |
+247 |         let (cap, conv) = winner_cash_out(&mut w, 2);
+    |              ^^^ help: if this is intentional, prefix it with an underscore: `_cap`
+
+warning: constant `DOMAIN_A0_SHORT` is never used
+   --> tests/gh292_att_d.rs:161:7
+    |
+161 | const DOMAIN_A0_SHORT: usize = 1;
+    |       ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `DOMAIN_A1_SHORT` is never used
+   --> tests/gh292_att_d.rs:162:7
+    |
+162 | const DOMAIN_A1_SHORT: usize = 3;
+    |       ^^^^^^^^^^^^^^^
+
+warning: `percolator` (test "gh292_att_d") generated 4 warnings (run `cargo fix --test "gh292_att_d" -p percolator` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19m 40s
+     Running unittests src/lib.rs (/tmp/jnetting-target/debug/deps/percolator-0049bb7cd0b826c5)
+
+running 90 tests
+test v16::attach_writer_cross_side_oi_tripwire_tests::attach_contribution_is_independent_of_the_side_a_scale ... ok
+test v16::attach_writer_cross_side_oi_tripwire_tests::attach_onto_asymmetric_a_preserves_cross_side_oi_equality ... ok
+test v16::attach_writer_cross_side_oi_tripwire_tests::audit_scanner_rejects_a_one_atom_cross_side_divergence ... ok
+test v16::attach_writer_cross_side_oi_tripwire_tests::fixture_is_reachable_and_audit_clean ... ok
+test v16::attach_writer_cross_side_oi_tripwire_tests::recovery_lifecycle_exempts_the_cross_side_oi_symmetry_requirement ... ok
+test v16::attach_writer_cross_side_oi_tripwire_tests::the_fixture_is_one_where_an_a_scaled_writer_would_diverge ... ok
+test v16::bankruptcy_hlock_clear_predicate_tests::a_drain_only_side_never_holds_the_hlock ... ok
+test v16::bankruptcy_hlock_clear_predicate_tests::a_reset_pending_side_never_holds_the_hlock ... ok
+test v16::bankruptcy_hlock_clear_predicate_tests::an_unallocatable_write_off_atom_does_not_latch_the_hlock ... ok
+test v16::bankruptcy_hlock_clear_predicate_tests::hlock_clears_with_open_position_and_no_unabsorbed_loss ... ok
+test v16::bankruptcy_hlock_clear_predicate_tests::hlock_held_while_asset_close_ledger_has_residual ... ok
+test v16::close_drift_scope_tests::detached_originating_leg_never_stales_an_open_close ... ok
+test v16::close_drift_scope_tests::originating_asset_accrual_stales_an_open_close ... ok
+test v16::close_drift_scope_tests::unrelated_asset_accrual_does_not_stale_an_open_close ... ok
+test v16::e6_finalized_close_inert_tests::finalized_inert_close_allows_next_close_to_begin ... ok
+test v16::empty_leg_image_tests::empty_image_is_the_encoding_of_empty ... ok
+test v16::empty_leg_image_tests::single_byte_corruptions_of_an_empty_leg_decode_like_the_reference ... ok
+test v16::empty_leg_image_tests::field_compare_matches_byte_compare_on_every_single_byte_change ... ok
+test v16::margin_rounding_tests::margin_requirement_is_conservative_under_partition ... ok
+test v16::margin_rounding_tests::margin_requirement_partition_regression ... ok
+test v16::position_change_risk_classifier_126_tests::close_to_flat_and_flat_to_flat_are_not_risk_increasing ... ok
+test v16::position_change_risk_classifier_126_tests::flip_with_larger_abs_is_risk_increasing ... ok
+test v16::position_change_risk_classifier_126_tests::flip_with_smaller_abs_is_risk_increasing ... ok
+test v16::position_change_risk_classifier_126_tests::initial_margin_gate_keeps_flips_and_exempts_only_strict_same_side_reductions ... ok
+test v16::position_change_risk_classifier_126_tests::long_to_short_equal_size_is_risk_increasing ... ok
+test v16::position_change_risk_classifier_126_tests::open_from_flat_is_risk_increasing ... ok
+test v16::position_change_risk_classifier_126_tests::same_side_increase_is_risk_increasing ... ok
+test v16::position_change_risk_classifier_126_tests::same_side_reduction_is_not_risk_increasing ... ok
+test v16::position_change_risk_classifier_126_tests::short_to_long_equal_size_is_risk_increasing ... ok
+test v16::position_change_risk_classifier_126_tests::unchanged_position_is_not_risk_increasing ... ok
+test v16::r1_netting_rate_tests::booked_amount_is_not_scaled ... ok
+test v16::r1_netting_rate_tests::domain_lock_covers_every_lien_class ... ok
+test v16::r1_netting_rate_tests::empty_domain_keeps_the_stored_rate ... ok
+test v16::r1_netting_rate_tests::exact_values_pin_booked_extra_and_pending ... ok
+test v16::r1_netting_rate_tests::never_below_stored_never_above_one_and_monotone ... ok
+test v16::r1_netting_rate_tests::protective_rate_is_the_loser_first_rate ... ok
+test v16::rent_not_kf_cohort_tests::leg_guard_requires_both_the_kf_epoch_and_the_rent_snapshot ... ok
+test v16::rent_not_kf_cohort_tests::rent_only_move_does_not_mark_the_cohort_and_kf_still_do ... ok
+test v16::margin_rounding_tests::margin_requirement_is_exact_ceiled_with_min ... ok
+test wide_math::tests::test_ceil_div_positive ... ok
+test wide_math::tests::test_fee_debt ... ok
+test wide_math::tests::test_floor_div_negative_exact ... ok
+test wide_math::tests::test_floor_div_negative_remainder ... ok
+test wide_math::tests::test_floor_div_positive ... ok
+test wide_math::tests::test_i256_abs_u256 ... ok
+test wide_math::tests::test_i256_add ... ok
+test wide_math::tests::test_i256_from_i128 ... ok
+test wide_math::tests::test_i256_from_u128 ... ok
+test wide_math::tests::test_i256_mul_negative_above_i128_magnitude ... ok
+test wide_math::tests::test_i256_neg ... ok
+test wide_math::tests::test_i256_ordering ... ok
+test wide_math::tests::test_i256_overflow ... ok
+test wide_math::tests::test_i256_saturating_add ... ok
+test wide_math::tests::test_i256_sub ... ok
+test wide_math::tests::test_i256_sub_min ... ok
+test wide_math::tests::test_i256_zero_one_minusone ... ok
+test wide_math::tests::test_mul_div_ceil ... ok
+test wide_math::tests::test_mul_div_exact ... ok
+test wide_math::tests::test_mul_div_floor ... ok
+test wide_math::tests::test_mul_div_large ... ok
+test wide_math::tests::test_mul_div_max ... ok
+test wide_math::tests::test_saturating_mul_u256_u64 ... ok
+test wide_math::tests::test_u256_add_op_panic - should panic ... ok
+test wide_math::tests::test_u256_add_overflow ... ok
+test wide_math::tests::test_u256_add_with_carry ... ok
+test wide_math::tests::test_u256_assign_ops ... ok
+test wide_math::tests::test_u256_bitand_bitor ... ok
+test wide_math::tests::test_u256_checked_add ... ok
+test wide_math::tests::test_u256_checked_mul_cross ... ok
+test wide_math::tests::test_u256_checked_mul_small ... ok
+test wide_math::tests::test_u256_checked_sub ... ok
+test wide_math::tests::test_u256_div_basic ... ok
+test wide_math::tests::test_u256_div_by_zero ... ok
+test wide_math::tests::test_u256_div_large ... ok
+test wide_math::tests::test_u256_from_u128 ... ok
+test wide_math::tests::test_u256_mul_overflow ... ok
+test wide_math::tests::test_u256_ordering ... ok
+test wide_math::tests::test_u256_overflowing ... ok
+test wide_math::tests::test_u256_saturating_add ... ok
+test wide_math::tests::test_u256_shl_shr ... ok
+test wide_math::tests::test_u256_sub_op_panic - should panic ... ok
+test wide_math::tests::test_u256_sub_underflow ... ok
+test wide_math::tests::test_u256_try_into_u128_overflow ... ok
+test wide_math::tests::test_u256_zero_one_max ... ok
+test wide_math::tests::test_wide_signed_mul_div_floor_exact_negative ... ok
+test wide_math::tests::test_wide_signed_mul_div_floor_negative ... ok
+test wide_math::tests::test_wide_signed_mul_div_floor_positive ... ok
+test wide_math::tests::test_wide_signed_mul_div_floor_zero ... ok
+test wide_math::tests::test_widening_mul_u128 ... ok
+test v16::scaled_adl_carry_fast_tests::fast_path_with_carry_matches_the_wide_path ... ok
+
+test result: ok. 90 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.81s
+
+     Running tests/account_close_dust_reuse_edge.rs (/tmp/jnetting-target/debug/deps/account_close_dust_reuse_edge-cea5b056d3aff017)
+
+running 17 tests
+test close_deregister_at_count_zero_is_refused_and_changes_nothing ... ok
+test close_deregister_of_a_fresh_account_after_a_dirty_one_is_independent ... ok
+test close_deregister_refused_with_dust_capital_until_it_is_withdrawn ... ok
+test close_every_single_stale_field_blocks_deregister ... ok
+test close_fresh_account_is_not_billed_for_slots_before_it_existed ... ignored, bug: new/reused account is billed fees from slot 0 (src/v16.rs:28058, spec.md:793)
+test close_register_refused_with_one_atom_of_capital ... ok
+test close_freed_slot_is_reusable_many_times_and_conserves_value ... ok
+test close_register_then_deregister_returns_count_to_zero ... ok
+test close_reinit_over_a_used_account_leaves_no_stale_state ... ok
+test close_repeated_register_counts_each_call ... ok
+test close_resolved_all_accounts_close_vault_equals_insurance ... ok
+test close_resolved_fee_larger_than_dust_capital_takes_all_capital_and_leaves_no_debt ... ok
+test close_resolved_fee_rate_u128_max_does_not_overflow_or_mint ... ok
+test close_resolved_fee_smaller_than_capital_pays_the_remainder ... ok
+test close_resolved_one_atom_dust_pays_it_out_and_account_can_deregister ... ok
+test close_resolved_zero_capital_pays_zero_and_changes_no_totals ... ok
+test close_resolved_twice_second_pays_zero_for_every_dust_size ... ok
+
+test result: ok. 16 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/adl_insurance_edge.rs (/tmp/jnetting-target/debug/deps/adl_insurance_edge-2715cada990ba12d)
+
+running 5 tests
+test adl_state_and_wind_down_dust_boundary ... ok
+test hlock_clears_after_winners_settle_close_and_convert ... ok
+test other_domains_insurance_is_not_spent ... ok
+test loss_socialized_never_exceeds_deficit_and_vault_covers_claims ... ok
+test waterfall_splits_deficit_between_insurance_and_b_at_every_boundary ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/asset_slot_lifecycle_edge.rs (/tmp/jnetting-target/debug/deps/asset_slot_lifecycle_edge-c82df7d51c0e635c)
+
+running 34 tests
+test activate_cooldown_boundary_is_exact ... ok
+test activate_first_slot_at_slot_zero_is_allowed ... ok
+test activate_price_bounds ... ok
+test activate_rejects_index_at_or_past_capacity ... ok
+test activate_rejects_index_past_configured_slots_even_with_spare_capacity ... ok
+test activate_rejects_time_going_backwards ... ok
+test activate_twice_on_same_slot_is_rejected_and_changes_nothing ... ok
+test activated_slot_starts_with_zero_budgets_and_empty_state ... ok
+test activation_counters_and_market_ids_are_strictly_monotonic ... ok
+test activation_in_any_order_is_allowed_and_conserves_value ... ok
+test canonicalize_rejects_active_and_never_activated_slots ... ok
+test canonicalize_rejects_slot_with_unspent_budget_and_changes_nothing ... ok
+test canonicalize_retired_slot_is_idempotent_and_value_neutral ... ok
+test canonicalized_slot_can_be_reactivated_after_cooldown ... ok
+test capacity_from_len_header_only_is_zero ... ok
+test capacity_from_len_huge_account_len_does_not_overflow ... ok
+test capacity_from_len_rejects_partial_trailing_slot ... ok
+test capacity_from_len_round_trips_exact_lengths ... ok
+test capacity_from_len_shorter_than_header_is_rejected ... ok
+test deregister_with_zero_registered_underflows_cleanly ... ok
+test deregister_rejects_account_holding_capital_and_conserves_value ... ok
+test failed_activation_leaves_header_and_slot_untouched ... ok
+test register_deregister_round_trip_and_repeat_counts ... ok
+test register_rejects_non_empty_account ... ok
+test retire_conserves_value_and_bumps_epochs_once ... ok
+test retire_is_idempotent_and_keeps_first_retired_slot ... ok
+test retire_never_activated_slot_is_rejected ... ok
+test retire_rejects_stale_time_and_out_of_range_index ... ok
+test retire_then_reactivate_respects_cooldown_boundary ... ok
+test retire_reuse_cycles_never_reuse_a_market_id ... ok
+test slot_offset_and_len_overflow_are_errors_not_wraps ... ok
+test slot_retired_at_slot_zero_can_be_reactivated_later ... ignored, BUG: slot retired at slot 0 cannot be activated or canonicalized (retired_slot == 0 treated as invalid)
+test slot_offset_is_header_plus_stride_times_index ... ok
+test validate_account_len_rejects_off_by_one_both_ways ... ok
+
+test result: ok. 33 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/backing_buckets_edge.rs (/tmp/jnetting-target/debug/deps/backing_buckets_edge-d4fe86f69f29d8b6)
+
+running 33 tests
+test backing_adjust_principal_add_overflow_errors_and_keeps_value ... ok
+test backing_adjust_principal_add_zero_is_noop ... ok
+test backing_adjust_principal_remove_saturates_at_zero ... ok
+test backing_adjust_principal_sides_are_independent ... ok
+test backing_deposit_different_expiry_on_live_bucket_is_refused ... ok
+test backing_deposit_expiry_must_be_strictly_after_current_slot ... ok
+test backing_deposit_long_and_short_domains_are_independent ... ok
+test backing_deposit_max_amount_overflows_on_scaling_and_leaves_state_clean ... ok
+test backing_deposit_one_atom_scales_by_bound_scale ... ok
+test backing_deposit_out_of_range_domain_is_invalid_leg ... ok
+test backing_deposit_repeated_same_expiry_accumulates_exactly ... ok
+test backing_deposit_vault_overflow_is_refused ... ok
+test backing_deposit_zero_is_invalid_and_changes_nothing ... ok
+test backing_earnings_above_whole_vault_is_lock_active ... ok
+test backing_earnings_accumulate_and_do_not_move_vault_or_principal ... ok
+test backing_earnings_are_per_domain ... ok
+test backing_earnings_bad_domain_is_invalid_leg_even_for_zero ... ok
+test backing_earnings_cannot_eat_backing_principal ... ok
+test backing_earnings_exact_boundary_against_vault_less_backing ... ok
+test backing_earnings_max_amount_overflows_cleanly ... ok
+test backing_earnings_need_a_fresh_bucket ... ok
+test backing_earnings_refused_after_expiry ... ok
+test backing_earnings_refused_at_expiry_slot_allowed_one_before ... ok
+test backing_earnings_zero_amount_is_noop_even_without_bucket ... ok
+test backing_expire_after_earnings_keeps_earnings_total_consistent ... ok
+test backing_expire_at_exact_expiry_slot_clears_bucket_and_keeps_vault ... ok
+test backing_expire_bad_domain_errors ... ok
+test backing_expire_before_expiry_slot_is_stale_and_changes_nothing ... ok
+test backing_expire_on_empty_bucket_is_stale ... ok
+test backing_expire_only_touches_its_own_domain ... ok
+test backing_expire_twice_second_call_is_stale ... ok
+test backing_redeposit_after_expiry_starts_a_new_fresh_bucket ... ok
+test backing_vault_equals_sum_of_deposits_through_full_cycle ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/backing_double_claim_fuzz.rs (/tmp/jnetting-target/debug/deps/backing_double_claim_fuzz-971b351d714635ae)
+
+running 13 tests
+test bounded_terminal_realization_caps_the_next_domain_by_released_pnl ... ok
+test bounded_terminal_source_realization_preserves_intermediate_attribution ... ok
+test realization_after_snapshot_refines_unreceipted_bound ... ok
+test resolved_close_prepares_lapsed_backing_before_pending_k_loss ... ok
+test terminal_claim_free_overlap_recredit_is_capped_without_value_drift ... ok
+test backed_winner_close_conserves_across_all_backing_levels ... ok
+test terminal_close_realizes_backed_source_claim ... ok
+test terminal_close_realizes_one_source_domain_per_call ... ok
+test terminal_close_with_expired_backing_does_not_strand ... ok
+test terminal_realization_scans_past_a_claim_free_leading_domain ... ok
+test terminal_source_realization_recredits_paired_insurance_overlap ... ok
+test terminal_close_realizes_liened_backed_source_claim ... ok
+test winner_payout_and_provider_principal_never_overlap ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.89s
+
+     Running tests/band_rent_edge.rs (/tmp/jnetting-target/debug/deps/band_rent_edge-12fde1040441658d)
+
+running 47 tests
+test bounds_at_anchor_one_collapse_to_the_anchor ... ok
+test bounds_exact_multiples_have_no_rounding ... ok
+test bounds_hi_is_capped_at_max_oracle_price ... ok
+test bounds_reject_out_of_domain_inputs ... ok
+test bounds_round_inward_by_one_tick_off_multiples ... ok
+test bounds_sweep_keeps_ordering_and_containment ... ok
+test chargeable_handles_extreme_pnl_and_capital ... ok
+test chargeable_is_min_of_due_and_loss_free_capital ... ok
+test chargeable_never_exceeds_due_nor_capital_nor_leaves_loss_uncovered ... ok
+test clamp_is_identity_inside_and_snaps_to_nearest_edge_outside ... ok
+test d1_step_pinned_always_feeds_the_current_price ... ok
+test d1_step_unpinned_clamps_and_flags_only_when_it_moved_the_step ... ok
+test due_carry_rolls_into_one_atom_exactly_at_the_denominator ... ok
+test due_is_monotone_in_size_and_index ... ok
+test due_one_whole_atom_for_one_whole_unit_and_den_of_index ... ok
+test due_rejects_snapshot_ahead_of_index_and_oversized_carry ... ok
+test due_saturates_instead_of_wrapping_for_absurd_sizes ... ok
+test due_split_settles_equal_one_settle_when_carry_is_threaded ... ok
+test due_u128_path_and_u256_path_agree_at_the_overflow_seam ... ok
+test due_with_unchanged_index_charges_nothing_and_keeps_the_carry ... ok
+test due_without_carry_never_exceeds_exact_rent ... ok
+test due_zero_size_charges_nothing_and_keeps_the_carry ... ok
+test duration_pin_boundary_is_strictly_after_the_window ... ok
+test index_delta_fits_at_the_documented_maxima ... ok
+test genesis_price_rule_is_100x_the_min_wide_anchor ... ok
+test index_delta_is_zero_when_any_factor_is_zero ... ok
+test index_delta_overflow_fails_closed ... ok
+test min_wide_anchor_has_a_nine_long_wide_run_and_rejects_bad_d ... ok
+test price_in_band_is_inclusive_at_both_edges ... ok
+test rent_accrual_with_empty_book_leaves_the_indices_alone ... ok
+test rent_flat_account_pays_nothing_while_the_index_grows ... ok
+test rent_closed_leg_pays_only_for_the_time_it_was_open ... ok
+test rent_index_never_decreases_through_a_long_mixed_schedule ... ok
+test rent_index_uses_the_fed_price_per_segment ... ok
+test rent_out_of_band_accrual_with_rent_changes_nothing ... ok
+test rent_moves_capital_to_insurance_one_for_one ... ok
+test rent_rate_above_config_max_is_refused_and_changes_nothing ... ok
+test rent_partial_close_charges_the_remaining_size_afterwards ... ok
+test rent_rates_apply_per_side_and_only_where_there_is_open_interest ... ok
+test rent_reopened_leg_starts_from_the_current_index ... ok
+test rent_routing_twice_pays_out_once ... ok
+test rent_second_refresh_in_the_same_slot_is_a_no_op ... ok
+test rent_short_leg_pays_the_short_index_and_a_winner_still_pays ... ok
+test rent_settle_schedule_does_not_change_the_total_engine_level ... ok
+test width_ok_flips_exactly_at_the_documented_threshold ... ok
+test worst_adverse_rejects_bad_d_and_is_strictly_above_two_d ... ok
+test rent_thin_account_settles_every_slot_and_the_books_balance ... ok
+
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/bigtest_f2_liquidation_adl_latch.rs (/tmp/jnetting-target/debug/deps/bigtest_f2_liquidation_adl_latch-e82f5aa22fee88ea)
+
+running 13 tests
+test f2_auto_crank_counterparty_bound_to_another_asset_is_ignored ... ok
+test f2_auto_crank_refresh_plan_ignores_the_counterparty ... ok
+test f2_b_stale_counterparty_falls_back_without_failing_the_liquidation ... ok
+test f2_auto_crank_with_bound_counterparty_matches_and_keeps_the_asset_open ... ok
+test f2_bankrupt_close_keeps_the_unilateral_path ... ok
+test f2_counterparty_too_small_falls_back_to_the_unilateral_close ... ok
+test f2_counterparty_without_an_opposite_leg_falls_back_to_the_unilateral_close ... ok
+test f2_locked_counterparty_falls_back ... ok
+test f2_matched_liquidation_keeps_the_asset_open_and_matches_the_unilateral_outcome ... ok
+test f2_regression_matched_liquidation_on_a_latched_asset_neither_deepens_nor_lifts_the_latch ... ok
+test f2_regression_sequential_matched_liquidations_keep_a_one ... ok
+test f2_regression_unilateral_second_liquidation_deepens_the_latch ... ok
+test f2_unilateral_liquidation_latches_the_asset_reduce_only ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/config_validation_envelope_edge.rs (/tmp/jnetting-target/debug/deps/config_validation_envelope_edge-006434d33c32eac3)
+
+running 23 tests
+test config_envelope_accept_set_is_downward_closed_in_loss_inputs ... ok
+test config_envelope_asset_count_and_slot_count_bounds ... ok
+test config_envelope_backing_fee_bounds ... ok
+test config_envelope_band_field_bounds ... ok
+test config_envelope_band_requires_single_asset_and_off_means_zero_clocks ... ok
+test config_envelope_band_safety_law_limits_epoch_and_band_width ... ok
+test config_envelope_base_fixtures_are_accepted ... ok
+test config_envelope_chunk_and_lifetime_counters_nonzero ... ok
+test config_envelope_funding_rate_bounds ... ok
+test config_envelope_h_min_h_max_bounds ... ok
+test config_envelope_liquidation_fee_bps_bounds_at_mm_5pct ... ok
+test config_envelope_liquidation_fee_cap_and_floor_pair ... ok
+test config_envelope_accrual_dt_and_funding_lifetime_pair ... ok
+test config_envelope_mandatory_policy_flags_cannot_be_turned_off ... ok
+test config_envelope_margin_bps_bounds ... ok
+test config_envelope_min_nonzero_requirement_pair ... ok
+test config_envelope_nonzero_fee_needs_mm_req_2_im_req_3 ... ok
+test config_envelope_liquidation_fee_limit_by_mm ... ok
+test config_envelope_price_move_cap_bounds ... ok
+test config_envelope_random_accepted_configs_with_fees_survive_max_move ... ok
+test config_envelope_random_accepted_configs_600_survive_max_move ... ok
+test config_envelope_trading_fee_cap_bounds ... ok
+test config_envelope_random_edge_configs_500_survive_max_move has been running for over 60 seconds
+test config_envelope_random_edge_configs_500_survive_max_move ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 77.91s
+
+     Running tests/crank_edge.rs (/tmp/jnetting-target/debug/deps/crank_edge-5ba5afa7766597be)
+
+running 9 tests
+test crank_auto_crank_after_fixpoint_is_a_noop ... ok
+test crank_auto_crank_all_24_orders_agree ... ok
+test crank_one_jump_vs_slot_by_slot_agree_within_rounding ... ok
+test crank_partial_then_more_slots_equals_single_catch_up ... ok
+test crank_liquidation_all_24_orders_agree ... ok
+test crank_refresh_and_auto_crank_agree ... ok
+test crank_refresh_all_24_orders_agree ... ok
+test crank_repeated_refresh_in_one_slot_is_idempotent ... ok
+test crank_refresh_interleaved_repeats_agree_with_single_pass ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+     Running tests/deposit_live_only_448.rs (/tmp/jnetting-target/debug/deps/deposit_live_only_448-82616ad46d1a6476)
+
+running 4 tests
+test a_zero_amount_deposit_is_still_refused_when_not_live ... ok
+test deposit_is_accepted_while_live ... ok
+test deposit_is_refused_once_the_market_is_resolved ... ok
+test the_close_path_requires_resolved_so_the_windows_cannot_overlap ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/domain_insurance_edge.rs (/tmp/jnetting-target/debug/deps/domain_insurance_edge-47dd3f6dcbf7f744)
+
+running 31 tests
+test domain_insurance_account_credit_additional_reserved_boundary ... ok
+test domain_insurance_account_credit_cannot_touch_deposited_budget_so_full_withdraw_succeeds ... ok
+test domain_insurance_account_credit_exactly_unbudgeted_surplus_then_one_more_fails ... ok
+test domain_insurance_account_credit_u128_max_is_rejected ... ok
+test domain_insurance_account_credit_with_no_insurance_underflows_cleanly ... ok
+test domain_insurance_account_credit_repeated_small_credits_equal_one_big_credit ... ok
+test domain_insurance_account_credit_zero_is_a_noop_even_with_no_insurance ... ok
+test domain_insurance_capacity_equals_budget_when_budget_insurance_and_vault_agree ... ok
+test domain_insurance_capacity_ignores_unbudgeted_surplus ... ok
+test domain_insurance_credit_batch_equals_sequence_of_single_credits ... ok
+test domain_insurance_credit_batch_order_does_not_change_the_result ... ok
+test domain_insurance_credit_batch_over_insurance_in_aggregate_is_rejected ... ok
+test domain_insurance_credit_empty_list_is_rejected ... ok
+test domain_insurance_credit_exactly_all_insurance_is_allowed_one_more_is_not ... ok
+test domain_insurance_credit_leaves_vault_and_insurance_untouched ... ok
+test domain_insurance_credit_one_over_insurance_is_rejected_with_no_change ... ok
+test domain_insurance_credit_to_out_of_range_domain_is_rejected ... ok
+test domain_insurance_credit_u128_max_reports_error_not_wrap ... ok
+test domain_insurance_credit_zero_is_a_noop ... ok
+test domain_insurance_deposit_credits_only_its_domain ... ok
+test domain_insurance_deposit_exactly_to_vault_tvl_cap_is_accepted ... ok
+test domain_insurance_deposit_past_vault_tvl_cap_is_rejected ... ok
+test domain_insurance_deposit_repeated_accumulates_exactly ... ok
+test domain_insurance_deposit_to_out_of_range_domain_is_rejected_and_changes_nothing ... ok
+test domain_insurance_deposit_u128_max_fails_without_state_change ... ok
+test domain_insurance_deposit_zero_is_a_noop ... ok
+test domain_insurance_deposit_withdraw_repeated_round_trips_return_to_zero ... ok
+test domain_insurance_remaining_and_capacity_on_fresh_domain_are_zero ... ok
+test domain_insurance_withdraw_cannot_dip_into_another_domains_budget ... ok
+test domain_insurance_withdraw_exactly_capacity_works_one_more_fails ... ok
+test domain_insurance_withdraw_zero_changes_nothing ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/e299_loss_provenance.rs (/tmp/jnetting-target/debug/deps/e299_loss_provenance-669fd2df77bbe624)
+
+running 15 tests
+test e299_a_loss_absorbed_by_positive_face_is_still_recorded ... ok
+test e299_charge_decision_table ... ok
+test e299_crank_order_cannot_choose_the_payer_one_loser ... FAILED
+test e299_engine_marks_a_two_domain_deficit_unattributable ... ok
+test e299_engine_records_the_realizing_domain_and_clears_it_on_resolution ... FAILED
+test e299_gains_keep_the_record_while_negative_and_clear_it_at_zero ... ok
+test e299_locked_charge_never_names_the_closed_leg_unless_it_is_the_record ... ok
+test e299_crank_order_cannot_choose_the_payer_two_losers ... ok
+test e299_multi_leg_record_is_sticky_until_one_leg_and_pnl_nonnegative ... ok
+test e299_negative_phase_record_is_order_independent ... ok
+test e299_no_record_on_a_negative_pnl_is_never_attributed ... ok
+test e299_out_of_range_record_fails_closed ... FAILED
+test e299_provenance_wire_round_trips ... ok
+test e299_record_names_the_single_realizing_domain ... ok
+test e299_multi_leg_episode_record_is_order_independent_with_gains ... ok
+
+failures:
+
+---- e299_crank_order_cannot_choose_the_payer_one_loser stdout ----
+
+thread 'e299_crank_order_cannot_choose_the_payer_one_loser' (214615321) panicked at tests/e299_loss_provenance.rs:485:9:
+assertion `left == right` failed: order [0, 1, 2]
+  left: Unattributable
+ right: Domain(0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- e299_engine_records_the_realizing_domain_and_clears_it_on_resolution stdout ----
+
+thread 'e299_engine_records_the_realizing_domain_and_clears_it_on_resolution' (214615326) panicked at tests/e299_loss_provenance.rs:391:13:
+Unattributable
+
+---- e299_out_of_range_record_fails_closed stdout ----
+
+thread 'e299_out_of_range_record_fails_closed' (214615621) panicked at tests/e299_loss_provenance.rs:391:13:
+Unattributable
+
+
+failures:
+    e299_crank_order_cannot_choose_the_payer_one_loser
+    e299_engine_records_the_realizing_domain_and_clears_it_on_resolution
+    e299_out_of_range_record_fails_closed
+
+test result: FAILED. 12 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.67s
+
+error: test failed, to rerun pass `--test e299_loss_provenance`
+     Running tests/extreme_price_jump_edge.rs (/tmp/jnetting-target/debug/deps/extreme_price_jump_edge-1f2c73d5dd4b118e)
+
+running 29 tests
+test jump_100x_in_one_slot_is_refused_and_leaves_state_untouched ... ok
+test jump_100x_up_bankrupts_short_and_conservation_holds ... ok
+test jump_99pct_down_bankrupts_long_and_conservation_holds ... ok
+test jump_100x_up_short_bankruptcy_spends_only_the_long_side_domain ... ok
+test jump_99pct_down_in_one_slot_is_refused_and_leaves_state_untouched ... ok
+test jump_above_max_oracle_price_is_rejected ... ok
+test jump_after_a_long_stale_gap_is_bounded_by_dt_not_by_wall_clock ... ok
+test jump_after_stale_gap_then_normal_step_still_works ... ok
+test jump_crash_spends_only_the_winners_side_domain ... ok
+test jump_down_99pct_ladder_conserves_value ... ok
+test jump_exactly_at_the_cap_down_passes_and_one_atom_past_is_refused ... ok
+test jump_down_walk_stalls_at_a_tiny_price_because_one_atom_exceeds_the_cap ... ok
+test jump_exactly_at_the_cap_passes_and_one_atom_past_is_refused ... ok
+test jump_gap_one_past_max_dt_does_not_widen_the_cap ... ok
+test jump_ladder_to_100x_in_capped_steps_conserves_value ... ok
+test jump_insurance_spend_stays_inside_the_winners_domain ... ok
+test jump_liquidating_twice_after_a_crash_does_not_double_charge ... ok
+test jump_mixed_sizes_in_a_row_work_but_the_same_total_in_one_call_is_refused ... ok
+test jump_liquidation_after_a_crash_never_moves_the_vault ... ok
+test jump_one_step_flips_a_healthy_account_to_liquidatable ... ok
+test jump_refused_retry_is_repeatable_and_does_not_creep ... ok
+test jump_same_slot_price_change_is_refused ... ok
+test jump_oscillation_repeated_does_not_leak_or_mint_value ... ok
+test jump_small_move_does_not_liquidate_a_healthy_account ... ok
+test jump_to_price_zero_is_rejected ... ok
+test jump_trade_after_a_huge_move_is_priced_at_the_new_mark ... ok
+test jump_up_then_down_back_to_start_returns_to_start_equity ... ok
+test jump_with_no_open_interest_may_move_freely ... ok
+test jump_winner_cannot_withdraw_more_than_the_loser_could_fund ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/f02_regression.rs (/tmp/jnetting-target/debug/deps/f02_regression-5e31afba10722372)
+
+running 8 tests
+test route1_fixed_the_loss_side_is_charged_the_fresh_residual_and_the_close_finalizes ... ok
+test route1_control_without_the_mid_close_deposit_the_charge_equals_the_residual ... ok
+test route1b_fixed_the_live_advancer_books_the_fresh_residual_and_finalizes ... ok
+test route1c_fixed_a_capped_chunk_no_longer_bricks_the_close_or_holds_the_barrier ... ok
+test route2_liquidation_meeting_a_pending_ledger_is_refused_at_begin_close_progress_ledger ... ok
+test route2_positive_control_the_same_liquidation_books_when_no_close_is_open ... ok
+test route3_positive_control_the_same_forfeit_books_when_no_close_is_open ... ok
+test route3_recovery_forfeit_completes_once_principal_extinguishes_the_pending_ledger ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/f02_stale_residual_poc.rs (/tmp/jnetting-target/debug/deps/f02_stale_residual_poc-d730bd83b56baeb8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/f03_regression.rs (/tmp/jnetting-target/debug/deps/f03_regression-63404c924b3324c4)
+
+running 4 tests
+test f03_a_public_liquidation_sets_bankruptcy_hlock_and_socializes_loss ... ok
+test f03_b_ordinary_close_crossing_one_atom_writes_explicit_unallocated_loss ... ok
+test f03_c_a_realized_write_off_atom_no_longer_latches_the_hlock ... ok
+test f03_d_no_public_entry_lowers_the_counter ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/f04_regression.rs (/tmp/jnetting-target/debug/deps/f04_regression-d2ee83d6c05120f7)
+
+running 9 tests
+test f04_as02_minimal_active_asymmetry_is_unreachable ... ok
+test f04_c04_recovery_lifecycle_owner_exit_still_works ... ok
+test f04_x01_barrier_off_clean_detach_exit_is_refused_too ... ok
+test f04_x01_barrier_retention_forfeit_on_an_active_asset_is_refused ... ok
+test f04_x01_state_before_the_forfeit_is_accepted_under_both_feature_sets ... ok
+test f04_x01_the_surviving_short_keeps_every_exit ... ok
+test f04_x02_funding_keeps_running_for_the_whole_asset ... ok
+test f04_x02_third_party_is_never_left_holding_a_one_sided_book ... ok
+test f04_as02_no_public_entry_sequence_reaches_a_dispatchable_asymmetry ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.74s
+
+     Running tests/f04l_regression.rs (/tmp/jnetting-target/debug/deps/f04l_regression-82abe44f2e5e45e9)
+
+running 4 tests
+test f04l_active_lifecycle_drainonly_side_mode_forfeit_is_still_refused ... ok
+test f04l_c04_recovery_lifecycle_owner_exit_still_works ... ok
+test f04l_drainonly_with_live_oi_forfeit_is_still_refused ... ok
+test f04l_drainonly_zero_oi_owner_forfeit_clears_both_sides_and_the_slot_retires_and_reuses ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/fee_sync_refresh_equivalence.rs (/tmp/jnetting-target/debug/deps/fee_sync_refresh_equivalence-bc3dbd1246356f7c)
+
+running 7 tests
+test fee_sync_refresh_case_matrix_covers_cap_and_both_fee_modes ... ok
+test fee_sync_refresh_golden_post_crank_state ... ok
+test fee_sync_refresh_golden_run_is_deterministic ... ok
+test fee_sync_refresh_invariants_hold_for_every_case ... ok
+test fee_sync_refresh_split_sync_charges_same_total_when_prices_flat ... ok
+test fee_sync_refresh_zero_fee_order_does_not_matter ... ok
+test fee_sync_refresh_second_crank_at_same_slot_changes_nothing ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.30s
+
+     Running tests/fees_liens_edge.rs (/tmp/jnetting-target/debug/deps/fees_liens_edge-c813717592c55b63)
+
+running 28 tests
+test backing_fee_equal_to_capital_is_charged_in_full ... ok
+test backing_fee_insurance_only_is_accepted_after_bucket_expiry ... ok
+test backing_fee_more_than_capital_is_refused_not_partially_charged ... ok
+test backing_fee_provider_share_refused_from_the_expiry_slot ... ok
+test backing_fee_unknown_domain_is_refused ... ok
+test backing_fee_with_stale_certificate_is_refused ... ok
+test backing_fee_zero_total_is_a_noop_even_on_stale_negative_account ... ok
+test fee_band_maker_exempt_entry_still_charges_the_taker ... ok
+test fee_sync_overflowing_rate_charges_at_most_capital ... ok
+test fee_sync_refuses_earlier_slot_and_charges_nothing_twice ... ok
+test fee_batch_rounds_each_leg_up_separately ... ok
+test fee_trade_at_cap_accepted_one_over_cap_rejected_without_charge ... ok
+test fee_trade_fractional_bps_rounds_up_to_one_atom ... ok
+test fee_trade_exact_bps_product_charges_no_extra_atom ... ok
+test fee_trade_moves_capital_to_insurance_and_keeps_vault ... ok
+test fee_trade_shortfall_long_taker_maker_pays_only_remainder ... ok
+test fee_trade_shortfall_short_taker_maker_pays_only_remainder ... ok
+test lien_fee_interval_is_forgiven_when_the_account_has_no_capital ... ok
+test lien_fee_single_collection_matches_closed_form ... ok
+test lien_fee_frequent_refresh_drops_the_floored_fraction_each_collection ... ok
+test lien_fee_split_full_insurance_share_and_zero_delta ... ok
+test lien_fee_split_rejects_unaligned_delta_and_bps_over_100_percent ... ok
+test lien_fee_split_rounds_total_up_and_insurance_share_down ... ok
+test lien_release_after_close_collects_fee_and_restores_live_backing ... ok
+test lien_release_of_a_capital_covered_lien_pays_the_fee_first ... ok
+test lien_fee_sub_atom_per_slot_carries_until_it_is_collected ... ok
+test lien_release_without_any_lien_is_a_noop ... ok
+test lien_release_refused_while_the_lien_is_still_needed_for_margin ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/funding_edge.rs (/tmp/jnetting-target/debug/deps/funding_edge-63664f5b1be9a15e)
+
+running 19 tests
+test funding_active_without_protective_progress_is_refused_atomically ... ok
+test funding_counter_is_gross_of_mark_to_market ... ok
+test funding_asymmetric_a_rounds_payer_up_receiver_down ... ok
+test funding_empty_book_rate_is_inert_and_clock_advances ... ok
+test funding_flip_without_refresh_books_old_side ... ok
+test funding_flow_counters_follow_side_across_flip ... ok
+test funding_index_move_is_exact_and_opposite ... ok
+test funding_flow_counters_match_settled_equity_both_signs ... ok
+test funding_index_overflow_is_refused_atomically ... ok
+test funding_late_entrant_pays_only_from_entry ... ok
+test funding_long_gap_is_charged_one_capped_segment_per_call ... ok
+test funding_path_accrual_matches_per_slot_accrual ... ok
+test funding_rate_cap_is_inclusive_and_refusal_is_atomic ... ok
+test funding_refresh_is_idempotent ... ok
+test funding_same_slot_accrual_is_noop ... ok
+test funding_split_accrual_equals_single_segment ... ok
+test funding_settlement_cadence_invariant_with_sub_atom_slots ... ok
+test funding_zero_rate_on_positioned_book_moves_nothing ... ok
+test funding_stale_epoch_leg_settles_against_epoch_start ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/gh290_recovery_leg_rounding_gap.rs (/tmp/jnetting-target/debug/deps/gh290_recovery_leg_rounding_gap-db322d4a772af35b)
+
+running 4 tests
+test controls_oi_exceeding_the_leg_is_not_touched ... ok
+test controls_a_gap_wider_than_the_leg_count_still_fails_closed ... ok
+test forfeit_then_withdraw_succeed_on_a_one_atom_gap ... ok
+test the_fixture_has_a_one_atom_ceil_over_floor_gap ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/gh292_att_bprime.rs (/tmp/jnetting-target/debug/deps/gh292_att_bprime-731d01938be695f5)
+
+running 11 tests
+test att_attributable_loss_escapes_insurance_via_trade_close ... FAILED
+test att_conservation_and_drain_dip_vs_control ... ok
+test att_d6_shape_steers_payer ... ok
+test att_order_independence_and_double_writeoff_unattributable ... ok
+test att_cross_domain_socialization_of_write_off ... ok
+test att_probe_dip_vs_control ... ok
+test att_same_domain_split_counterparties_prorata ... ok
+test att_trade_close_flat_deficit_resolved_by_refresh_only ... ok
+test att_writeoff_hlock_pinned_by_honest_open_winner ... ok
+test att_same_domain_first_converter_vs_prorata ... ok
+test att_writeoff_rearms_global_claim_term_latch ... ok
+
+failures:
+
+---- att_attributable_loss_escapes_insurance_via_trade_close stdout ----
+    accrue a1 err Err(NonProgress)
+trade-close a0 Ok(())  a1 Ok(())
+[after trade closes] vault=200260000 c_tot=100000000 ins=100000000 pnl_pos_tot=260435 neg_cnt=0 hlock=1 mode=0
+   acct0: cap=0 pnl=0 lock=0 legs=[(0, false), (0, false), (0, false), (0, false)]
+   acct1: cap=50000000 pnl=0 lock=0 legs=[(0, false), (0, false), (0, false), (0, false)]
+   acct2: cap=50000000 pnl=260435 lock=0 legs=[(0, false), (0, false), (0, false), (0, false)]
+RESULT trade-close: insurance 100000000 -> 100000000 (liquidation control charged 435), pnl=0 mode=0
+
+thread 'att_attributable_loss_escapes_insurance_via_trade_close' (214621443) panicked at tests/gh292_att_bprime.rs:432:5:
+assertion `left == right` failed: attributable loss must be charged to insurance
+  left: 0
+ right: 435
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    att_attributable_loss_escapes_insurance_via_trade_close
+
+test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+error: test failed, to rerun pass `--test gh292_att_bprime`
+     Running tests/gh292_att_d.rs (/tmp/jnetting-target/debug/deps/gh292_att_d-e81df45d2a29c7bb)
+
+running 7 tests
+test att_d1_conservation_after_writeoff ... ok
+test att_d2_insurance_never_used_money ... FAILED
+test att_d3_dormant_winner_keeps_hlock ... ok
+test att_d4_cowinner_order ... ok
+test att_d5_unrelated_winner_keeps_group_hlock ... ok
+test att_d7_reuse_after_writeoff_counters_stay_consistent ... ok
+test att_d6_shape_steers_payer ... ok
+
+failures:
+
+---- att_d2_insurance_never_used_money stdout ----
+    accrue a1 err Err(NonProgress)
+  winner 2: pnl=1 convert=Ok(259999) cap_before_wd=50259999 withdraw=Ok(()) legs=[(0, false), (0, false), (0, false), (0, false)]
+  [t2] vault=150000001 c_tot=50000000 ins=100000000 pnl_pos_tot=1 neg_cnt=0 hlock=0 mode=0
+T2 depth=0 deficit=435 insurance 100000000->100000000 used=0 winner pnl_face_before_cashout=260435 converted=259999 winner_shortfall~435
+
+thread 'att_d2_insurance_never_used_money' (214621473) panicked at tests/gh292_att_d.rs:251:9:
+assertion `left == right` failed: attributable loss charged to insurance
+  left: 0
+ right: 435
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    att_d2_insurance_never_used_money
+
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `--test gh292_att_d`
+     Running tests/gh292_attacks.rs (/tmp/jnetting-target/debug/deps/gh292_attacks-857d62bd0c4360d8)
+
+running 7 tests
+test atk_control_a1_only_loss_is_attributed_and_resolved ... ok
+test atk_close_order_changes_payer ... ok
+test atk_double_liquidation_does_not_recharge ... ok
+test atk_stale_a0_dip_forces_recovery_on_a1_only_deficit ... ok
+test atk_surviving_leg_after_charge_is_zero_equity ... ok
+test atk_three_leg_all_crash_liquidation_sequence ... ok
+test atk_unattributable_with_all_domains_insured_goes_recovery_not_pooled ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/gh292_locked_liquidation_recovery.rs (/tmp/jnetting-target/debug/deps/gh292_locked_liquidation_recovery-04d4355f4b273dd6)
+
+running 14 tests
+test e299_closing_the_other_leg_first_charges_nothing ... ok
+test e299_close_order_does_not_change_who_pays ... FAILED
+test e299_liquidator_cannot_steer_a0_loss_onto_a1_insurance ... FAILED
+test gh292_locked_close_with_open_risk_remaining_charges_nothing ... ok
+test e299_two_domain_deficit_is_unattributable_and_is_written_off_not_recovered ... ok
+test gh292_locked_flat_close_resolves_the_deficit_in_the_live_market ... FAILED
+test gh292_only_the_charged_domains_holder_bears_the_booking ... FAILED
+test gh292_sim_sweep_covers_every_waterfall_outcome ... FAILED
+test gh292_single_asset_bankruptcy_still_resolves_in_place ... ok
+test gh292_small_residual_after_insurance_does_not_escalate ... FAILED
+test gh292_stage_insurance_only_cover_books_nothing ... FAILED
+test gh292_stage_insurance_then_b_booking_in_order ... FAILED
+test gh292_uncoverable_deficit_is_charged_partially_and_written_off_never_recovery ... FAILED
+test gh292_sim_locked_flat_close_invariants ... FAILED
+
+failures:
+
+---- e299_close_order_does_not_change_who_pays stdout ----
+
+thread 'e299_close_order_does_not_change_who_pays' (214621507) panicked at tests/gh292_locked_liquidation_recovery.rs:575:9:
+assertion `left == right` failed: []: whole deficit charged
+  left: (0, 0)
+ right: (286, 0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- e299_liquidator_cannot_steer_a0_loss_onto_a1_insurance stdout ----
+
+thread 'e299_liquidator_cannot_steer_a0_loss_onto_a1_insurance' (214621509) panicked at tests/gh292_locked_liquidation_recovery.rs:593:5:
+assertion `left == right` failed: asset 0's winners bear it via B
+  left: 0
+ right: 286
+
+---- gh292_locked_flat_close_resolves_the_deficit_in_the_live_market stdout ----
+
+thread 'gh292_locked_flat_close_resolves_the_deficit_in_the_live_market' (214621512) panicked at tests/gh292_locked_liquidation_recovery.rs:322:5:
+assertion `left == right` failed: deficit = principal paid + insurance + booked residual + written off (nothing lost)
+  left: 0
+ right: 286
+
+---- gh292_only_the_charged_domains_holder_bears_the_booking stdout ----
+
+thread 'gh292_only_the_charged_domains_holder_bears_the_booking' (214621513) panicked at tests/gh292_locked_liquidation_recovery.rs:403:5:
+assertion `left == right` failed: precondition: the whole deficit was booked (non-vacuous)
+  left: 0
+ right: 286
+
+---- gh292_sim_sweep_covers_every_waterfall_outcome stdout ----
+
+thread 'gh292_sim_sweep_covers_every_waterfall_outcome' (214621515) panicked at tests/gh292_locked_liquidation_recovery.rs:322:5:
+assertion `left == right` failed: deficit = principal paid + insurance + booked residual + written off (nothing lost)
+  left: 0
+ right: 6375
+
+---- gh292_small_residual_after_insurance_does_not_escalate stdout ----
+
+thread 'gh292_small_residual_after_insurance_does_not_escalate' (214621517) panicked at tests/gh292_locked_liquidation_recovery.rs:322:5:
+assertion `left == right` failed: deficit = principal paid + insurance + booked residual + written off (nothing lost)
+  left: 0
+ right: 286
+
+---- gh292_stage_insurance_only_cover_books_nothing stdout ----
+
+thread 'gh292_stage_insurance_only_cover_books_nothing' (214621518) panicked at tests/gh292_locked_liquidation_recovery.rs:322:5:
+assertion `left == right` failed: deficit = principal paid + insurance + booked residual + written off (nothing lost)
+  left: 0
+ right: 286
+
+---- gh292_stage_insurance_then_b_booking_in_order stdout ----
+
+thread 'gh292_stage_insurance_then_b_booking_in_order' (214621519) panicked at tests/gh292_locked_liquidation_recovery.rs:322:5:
+assertion `left == right` failed: deficit = principal paid + insurance + booked residual + written off (nothing lost)
+  left: 0
+ right: 286
+
+---- gh292_uncoverable_deficit_is_charged_partially_and_written_off_never_recovery stdout ----
+
+thread 'gh292_uncoverable_deficit_is_charged_partially_and_written_off_never_recovery' (214621520) panicked at tests/gh292_locked_liquidation_recovery.rs:423:9:
+assertion `left == right` failed: one atom of B booked
+  left: (0, 0, 0)
+ right: (0, 1, 0)
+
+---- gh292_sim_locked_flat_close_invariants stdout ----
+proptest: FileFailurePersistence::SourceParallel set, but failed to find lib.rs or main.rs
+proptest: FileFailurePersistence::SourceParallel set, but failed to find lib.rs or main.rs
+proptest: Saving this and future failures in /Users/khubair/agent-work/wt/J-20261119-ENG-PORT-TOLYNETTINGb/tests/gh292_locked_liquidation_recovery.proptest-regressions
+proptest: If this test was run on a CI system, you may wish to add the following line to your copy of the file. (You may need to create it.)
+cc 652f6e42e827053a1aa896dad65d9442bebfd617e75f8047002dd8d022b45d66
+
+thread 'gh292_sim_locked_flat_close_invariants' (214621514) panicked at tests/gh292_locked_liquidation_recovery.rs:650:1:
+Test failed: assertion failed: `(left == right)` 
+  left: `0`,
+ right: `6375` at tests/gh292_locked_liquidation_recovery.rs:682.
+minimal failing input: deposit = 200000, seed_pct = 0, chunk_sel = 0, first = 0
+	successes: 0
+	local rejects: 0
+	global rejects: 0
+
+
+
+failures:
+    e299_close_order_does_not_change_who_pays
+    e299_liquidator_cannot_steer_a0_loss_onto_a1_insurance
+    gh292_locked_flat_close_resolves_the_deficit_in_the_live_market
+    gh292_only_the_charged_domains_holder_bears_the_booking
+    gh292_sim_locked_flat_close_invariants
+    gh292_sim_sweep_covers_every_waterfall_outcome
+    gh292_small_residual_after_insurance_does_not_escalate
+    gh292_stage_insurance_only_cover_books_nothing
+    gh292_stage_insurance_then_b_booking_in_order
+    gh292_uncoverable_deficit_is_charged_partially_and_written_off_never_recovery
+
+test result: FAILED. 4 passed; 10 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.76s
+
+error: test failed, to rerun pass `--test gh292_locked_liquidation_recovery`
+     Running tests/gh302_r4_attacks.rs (/tmp/jnetting-target/debug/deps/gh302_r4_attacks-330d92891a81493e)
+
+running 7 tests
+test r4_order_independence_and_reporting_with_surviving_winners ... ok
+test r4_partial_charge_accounting ... ok
+test r4_second_chunk_with_surviving_winners ... ok
+test r4_stale_record_after_partial_charge ... ok
+test r4_recovery_sweep_two_and_three_assets ... ok
+test r4_winner_realization_probe ... ok
+test r4_trade_route_sweep ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.59s
+
+     Running tests/grief_econ_final.rs (/tmp/jnetting-target/debug/deps/grief_econ_final-de2c357e096ff294)
+
+running 7 tests
+test devnet_parameterised_holdout_cost ... ok
+test drain_only_blocks_increases_but_never_forces_a_close ... ok
+test drain_only_entry_is_a_pure_oi_ratio_when_a_starts_at_one ... ok
+test healthy_holdout_cannot_be_liquidated_by_anyone ... ok
+test holdout_of_one_quantum_cannot_hold_the_group_hlock ... ok
+test liquidating_a_broke_holdout_releases_the_group_hlock ... ok
+test minimum_capital_to_sustain_the_holdout ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/hedged_refresh_fee_loss.rs (/tmp/jnetting-target/debug/deps/hedged_refresh_fee_loss-42fea72383d33992)
+
+running 9 tests
+test hedged_fee_loss_account_first_loss_table_100_bps ... ok
+test hedged_fee_loss_at_the_loss_cap_the_fee_is_not_collected ... ok
+test hedged_fee_loss_account_first_loss_table_50_bps ... ok
+test hedged_fee_loss_fee_config_fee_ceiling_follows_maintenance_margin ... ok
+test hedged_fee_loss_fee_config_floor_one_is_rejected ... ok
+test hedged_fee_loss_fee_config_needs_mm_floor_two_and_im_floor_three ... ok
+test hedged_fee_loss_peak_loss_percent_of_equity ... ok
+test hedged_fee_loss_counterparty_first_costs_nothing_at_any_step ... ok
+test hedged_fee_loss_zero_fee_has_zero_loss_in_both_orders ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+     Running tests/hedged_refresh_order_liquidation.rs (/tmp/jnetting-target/debug/deps/hedged_refresh_order_liquidation-0392db7d18f71cf1)
+
+running 18 tests
+test hedged_refresh_asset_one_target_is_refused_too ... ok
+test hedged_refresh_account_first_order_no_longer_liquidates_solvent_hedge ... ok
+test hedged_refresh_both_orders_hold_the_same_total_value ... ok
+test hedged_refresh_counterparty_refresh_only_does_not_move_equity_of_a ... ok
+test hedged_refresh_early_equity_is_capital_minus_loss_and_backed_equity_is_capital ... ok
+test hedged_refresh_fix_b_auto_crank_does_not_liquidate_the_hedge ... ok
+test hedged_refresh_fix_b_bankrupt_counterparty_settles_then_hedge_is_liquidatable ... ok
+test hedged_refresh_fix_b_in_flight_gain_is_not_certified_equity ... ok
+test hedged_refresh_margin_size_does_not_close_the_window_at_the_loss_cap ... ok
+test hedged_refresh_no_price_move_no_window ... ok
+test hedged_refresh_repeated_liquidation_after_early_crank_ends_and_conserves ... ok
+test hedged_refresh_repeated_refresh_after_backing_changes_nothing ... ok
+test hedged_refresh_rounding_boundary_equity_exactly_at_maintenance_is_not_liquidatable ... ok
+test hedged_refresh_smallest_window_point_must_not_liquidate_before_counterparty_refresh ... ok
+test hedged_refresh_solvent_hedge_must_not_be_liquidated_before_counterparty_refresh ... ok
+test hedged_refresh_counterparty_first_order_never_liquidates_in_the_window ... ok
+test hedged_refresh_thinnest_margin_window_is_800_to_888 ... ok
+test hedged_refresh_window_shifts_with_margin_but_never_closes ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.91s
+
+     Running tests/i2_regression.rs (/tmp/jnetting-target/debug/deps/i2_regression-5ca15c2b091329d3)
+
+running 6 tests
+test i2_cursor_above_a_pending_recredit_rewinds_instead_of_burning ... ok
+test i2_every_cursor_above_the_pending_recredit_rewinds ... ok
+test i2_reaching_fixture_direct_entry_still_refuses_and_crank_recredits ... ok
+test i2_rewind_converges_on_the_reaching_fixture_too ... ok
+test i2_rewind_converges_to_the_restart_from_zero_state ... ok
+test i2_sanctioned_persisted_cursor_no_longer_burns_the_owed_recredit ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/issue172_crank_order_double_charge.rs (/tmp/jnetting-target/debug/deps/issue172_crank_order_double_charge-25bb34c4fbea6e71)
+
+running 4 tests
+test issue172_control_solvent_liquidation_is_order_independent ... ok
+test issue172_provider_pays_the_default_when_the_loser_is_cranked_first ... ok
+test issue172_small_default_consumes_unowed_backing_when_the_loser_is_cranked_first ... ok
+test issue172_winner_pays_the_default_twice_when_the_loser_is_cranked_first ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/issue172_kf_pnl_writeoff.rs (/tmp/jnetting-target/debug/deps/issue172_kf_pnl_writeoff-8104086a57c87923)
+
+running 4 tests
+test control_monotonic_paths_are_exact ... ok
+test issue172_site1_zero_net_price_churn_is_value_neutral ... ok
+test issue172_site2_exhausted_lp_recovers_on_reversal ... ok
+test issue172_site2_reversal_is_independent_of_refresh_order ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+
+     Running tests/k_regression.rs (/tmp/jnetting-target/debug/deps/k_regression-4273d21ba8c0fe15)
+
+running 4 tests
+test k_attribution_check_accepts_a_fully_backed_positive_pnl ... ok
+test k_attribution_check_refuses_an_under_backed_positive_pnl ... ok
+test k_reserved_pnl_above_positive_pnl_fails_closed ... ok
+test k_the_dominating_guard_is_what_refuses_today ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lien_fee_through_expiry.rs (/tmp/jnetting-target/debug/deps/lien_fee_through_expiry-c2f961c2364f0a49)
+
+running 2 tests
+test lien_fee_earned_before_expiry_survives_expiry ... ignored, known red: lien fee earned before expiry is lost once the bucket expires first
+test lien_fee_is_collected_while_the_bucket_is_live ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lifecycle_edge.rs (/tmp/jnetting-target/debug/deps/lifecycle_edge-e3847e5b4046967c)
+
+running 24 tests
+test lifecycle_after_resolve_deposit_and_withdraw_are_refused ... ok
+test lifecycle_close_resolved_is_refused_while_the_market_is_live ... ok
+test lifecycle_deposit_above_max_tvl_is_refused_and_changes_nothing ... ok
+test lifecycle_deposit_moves_vault_ctot_and_capital_together ... ok
+test lifecycle_deposit_to_exactly_max_tvl_across_accounts_ok_then_withdraw_frees_room ... ok
+test lifecycle_deposit_zero_is_a_noop ... ok
+test lifecycle_insurance_deposit_and_withdraw_balance_the_vault ... ok
+test lifecycle_one_atom_dust_round_trip ... ok
+test lifecycle_one_leg_left_open_among_three_still_blocks_withdraw ... ok
+test lifecycle_position_closed_then_capital_withdrawn_then_reuse ... ok
+test lifecycle_positions_on_three_assets_then_unwind_then_withdraw_everything ... ok
+test lifecycle_random_sequences_conserve_money_one_asset_no_fees ... ok
+test lifecycle_random_sequences_conserve_money_three_assets_no_fees ... ok
+test lifecycle_resolved_close_pays_flat_capital_and_empties_the_account ... ok
+test lifecycle_resolved_close_twice_pays_nothing_the_second_time ... ok
+test lifecycle_same_account_can_be_emptied_and_refilled_many_times ... ok
+test lifecycle_slot_reuse_after_full_withdraw_starts_clean ... ok
+test lifecycle_two_accounts_do_not_touch_each_others_balance ... ok
+test lifecycle_user_cannot_withdraw_insurance_money ... ok
+test lifecycle_winner_and_loser_capital_sums_to_deposits_after_a_price_move ... ok
+test lifecycle_withdraw_in_pieces_then_exact_remainder_leaves_zero ... ok
+test lifecycle_withdraw_one_atom_over_capital_is_refused_and_changes_nothing ... ok
+test lifecycle_withdraw_zero_is_a_noop ... ok
+test lifecycle_random_sequences_conserve_money_with_trade_fees ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.44s
+
+     Running tests/liquidations_edge.rs (/tmp/jnetting-target/debug/deps/liquidations_edge-734c1086b56773a5)
+
+running 25 tests
+test liq_edge_clean_unilateral_partial_does_not_charge_the_winner ... ok
+test liq_edge_bankrupt_full_close_insurance_covers_exactly ... ok
+test liq_edge_cross_margin_bankrupt_two_legs_resolves_without_recovery ... FAILED
+test liq_edge_cross_margin_partial_on_either_leg_restores_account_health ... ok
+test liq_edge_fee_floor_allows_partial_when_raw_fee_clears_it ... ok
+test liq_edge_equity_exactly_at_maintenance_is_not_liquidated ... ok
+test liq_edge_fee_floor_forces_full_close_when_partial_is_below_floor ... ok
+test liq_edge_fee_is_capped ... ok
+test liq_edge_flat_account_is_refused ... ok
+test liq_edge_fee_never_exceeds_capital_on_full_close ... ok
+test liq_edge_full_insurance_cover_hlock_waits_only_for_winner_claim ... ok
+test liq_edge_healthy_account_is_refused_and_untouched ... ok
+test liq_edge_insurance_of_other_domain_is_not_spent ... ok
+test liq_edge_matched_entry_on_bankrupt_close_equals_plain ... ok
+test liq_edge_matched_partial_reduces_both_legs_equally ... ok
+test liq_edge_partial_close_accounts_for_target_lag_penalty ... ok
+test liq_edge_partial_close_is_minimal_and_restores_health_long ... ok
+test liq_edge_partial_close_is_minimal_and_restores_health_short ... ok
+test liq_edge_residual_after_partial_insurance ... ok
+test liq_edge_repeated_partial_closes_on_a_falling_price ... ok
+test liq_edge_second_call_after_partial_is_refused ... ok
+test liq_edge_residual_with_no_insurance_books_to_winners ... ok
+test liq_edge_wrong_asset_index_is_refused ... ok
+test liq_edge_short_bankrupt_full_close_uses_winners_domain ... ok
+test liq_edge_zero_fee_partial_close ... ok
+
+failures:
+
+---- liq_edge_cross_margin_bankrupt_two_legs_resolves_without_recovery stdout ----
+
+thread 'liq_edge_cross_margin_bankrupt_two_legs_resolves_without_recovery' (214624859) panicked at tests/liquidations_edge.rs:1125:17:
+assertion `left != right` failed: order [1, 0]: asset 0 short B charged
+  left: 0
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    liq_edge_cross_margin_bankrupt_two_legs_resolves_without_recovery
+
+test result: FAILED. 24 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `--test liquidations_edge`
+     Running tests/live_g9_native.rs (/tmp/jnetting-target/debug/deps/live_g9_native-d5e147f071ca8ca3)
+
+running 9 tests
+test g9_f_live_1_red_crank_liquidates_a_below_maintenance_account_with_a_liquidatable_leg ... ok
+test g9_livefix_r2_control_without_barrier_selects_the_riskiest_leg ... ok
+test g9_livefix_r2_short_barrier_three_legs_crank_liquidates_the_riskiest_unblocked_leg ... ok
+test g9_livefix_r3_all_legs_behind_barriers_still_refused_without_state_change ... ok
+test g9_livefix_r4_bankrupt_account_with_barrier_leg_is_reduced_on_its_unblocked_leg ... ok
+test g9_r1_barrier_on_the_first_leg_no_longer_blocks_the_crank_when_another_leg_is_liquidatable ... ok
+test g9_r1_control_without_barrier_the_crank_liquidates ... ok
+test g9_e7_native_twin_of_the_kani_fixture ... ok
+test g9_s1_below_maintenance_is_always_liquidated_by_the_public_crank ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.06s
+
+     Running tests/live_g9_upstream230_replay.rs (/tmp/jnetting-target/debug/deps/live_g9_upstream230_replay-fa4efef0eba999ac)
+
+running 7 tests
+test g9_230_fork_lien_holder ... ok
+test g9_230_fork_losing_side ... ok
+test g9_f_live_2_red_bankrupt_losing_side_account_is_liquidatable ... ok
+test g9_livefix_l2_mirrored_losing_long_is_liquidated_by_the_public_crank ... ok
+test lien_holder_overstates_equity_and_then_cannot_be_settled ... ignored, upstream #230 expectation verbatim; the fork certifies 1_110 (no overstatement), see g9_230_fork_lien_holder
+test losing_side_cannot_be_settled_or_liquidated ... ignored, upstream #230 expectation verbatim; the fork diverges (LossStale), see g9_230_fork_losing_side
+test g9_livefix_l3_lapsed_bucket_without_lien_needs_the_permissionless_expiry ... ok
+
+test result: ok. 5 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/livefix_rollback_walk.rs (/tmp/jnetting-target/debug/deps/livefix_rollback_walk-cd0194d01e1d6bb2)
+
+running 1 test
+test livefix_walk_dump ... ignored, measurement harness; run with --ignored and LIVEFIX_WALK_DUMP set
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/low_price_memecoin_floor.rs (/tmp/jnetting-target/debug/deps/low_price_memecoin_floor-6de9231dee77d63a)
+
+running 31 tests
+test low_price_floor_bug_forged_remainder_must_not_beat_the_cap ... ignored, real bug: caller-chosen remainder bypasses the per-slot cap (src/v16.rs:18221)
+test low_price_floor_bug_moving_target_must_make_progress_upward_below_34_atoms ... ignored, real bug: moving oracle target pins a sub-34-atom market (src/v16.rs:7203, :18203)
+test low_price_floor_bug_moving_target_must_still_make_progress_below_34_atoms ... ignored, real bug: moving oracle target pins a sub-34-atom market (src/v16.rs:7203, :18203)
+test low_price_floor_above_max_oracle_price_and_zero_are_rejected_at_listing ... ok
+test low_price_floor_carry_remainder_is_not_stored_so_a_caller_chosen_value_buys_one_atom ... ok
+test low_price_floor_direct_path_one_atom_step_is_legal_exactly_from_34_atoms ... ok
+test low_price_floor_direct_path_one_atom_up_from_one_is_a_100_percent_move_and_refused ... ok
+test low_price_floor_direct_path_two_slot_gap_halves_the_floor_to_17 ... ok
+test low_price_floor_dust_position_pnl_rounds_but_conserves ... ok
+test low_price_floor_five_e7_dollar_token_at_9_decimals_is_500_atoms_and_walks ... ok
+test low_price_floor_five_e7_dollar_token_has_no_usable_price_with_6_decimal_quote ... ok
+test low_price_floor_fixed_target_99pct_crash_takes_33_slots_and_the_next_leg_to_one_about_33_more ... ok
+test low_price_floor_fixed_target_crash_speed_is_the_same_at_every_price_scale ... ok
+test low_price_floor_fixed_target_walks_up_from_one_to_two_in_34_slots_and_conserves ... ok
+test low_price_floor_funding_on_a_tiny_notional_rounds_per_slot_but_conserves ... ok
+test low_price_floor_liquidation_fires_at_tiny_price_and_conserves_value ... ok
+test low_price_floor_listing_at_one_atom_and_at_max_price_is_accepted ... ok
+test low_price_floor_max_size_position_at_max_price_does_not_overflow_on_a_99pct_crash ... ok
+test low_price_floor_moving_target_from_1000_atoms_walks_down_and_pins_at_33 ... ok
+test low_price_floor_moving_target_pins_at_33_atoms_today ... ok
+test low_price_floor_moving_target_pins_even_when_the_oracle_says_one_atom ... ok
+test low_price_floor_no_open_interest_price_moves_freely_to_one_and_to_max ... ok
+test low_price_floor_one_atom_position_at_price_one_has_zero_notional_and_conserves ... ok
+test low_price_floor_price_one_with_open_interest_needs_34_slots_per_atom ... ok
+test low_price_floor_recovery_from_price_one_is_slow_with_one_fixed_target ... ok
+test low_price_floor_refused_move_is_repeatable_and_does_not_creep ... ok
+test low_price_floor_same_price_accrual_at_tiny_price_is_a_clean_repeat ... ok
+test low_price_floor_small_move_does_not_liquidate_a_healthy_tiny_price_account ... ok
+test low_price_floor_smallest_safe_price_table ... ok
+test low_price_floor_two_slot_crank_moves_a_moving_target_down_and_pins_at_16 ... ok
+test low_price_floor_crash_to_one_then_recover_never_mints_value ... ok
+
+test result: ok. 28 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.90s
+
+     Running tests/lp_burn_repro.rs (/tmp/jnetting-target/debug/deps/lp_burn_repro-871155463e55225a)
+
+running 36 tests
+test adv_2_nonzero_trading_fees ... ok
+test adv_1_site2_exact_boundary_gain_equals_debt ... ok
+test adv_3_multiple_traders_against_one_lp ... ok
+test adv_4_position_changes_midway ... ok
+test adv_5_resolved_and_recovery_mode_reachability ... ok
+test adv_6_liquidation_path ... ok
+test adv_8_nonzero_funding_rate ... ok
+test adv_7_multi_asset_cross_domain_support ... ok
+test cadence_sweep_does_pushing_fewer_prices_reduce_backing_burn ... ok
+test decisive_can_the_lp_extract_unbacked_pnl ... ok
+test diag_is_the_clamp_regime_discrepancy_the_engine_or_the_harness ... ok
+test decisive_can_a_DUST_seed_at_max_expiry_give_liveness_without_the_haircut ... ok
+test does_the_lp_ever_actually_get_paid ... ok
+test e1_production_shape_lp_only_crank ... ok
+test e2_crank_both_sides_is_the_control ... ok
+test e3_gain_domain_backing_seed_sweep ... ok
+test e4_crank_cadence_sweep ... ok
+test e5_monotonic_paths_are_the_discriminator ... ok
+test e6_amplitude_and_cycles_scaling ... ok
+test e7_seed_exhaustion_cliff ... ok
+test diagnose_what_the_residual_actually_is ... ok
+test e9_mitigations ... ok
+test fix_regression_lp_honest_across_volatilities ... ok
+test e8_realistic_market has been running for over 60 seconds
+test e8_realistic_market ... ok
+test ground_truth_does_partial_backing_cost_REAL_dollars ... ok
+test ground_truth_does_the_zero_seed_loss_SCALE_with_path_length ... ok
+test product_what_does_TODAYS_launch_config_actually_cost ... ok
+test product_does_the_100pct_seed_survive_a_LONG_LIVED_market has been running for over 60 seconds
+test product_does_the_100pct_seed_survive_a_LONG_LIVED_market ... ok
+test site2_direct_probe_gain_arriving_on_underwater_account ... ok
+test residual_is_a_baseline_artifact_not_an_engine_defect ... ok
+test structural_what_does_an_unfundable_gain_domain_actually_cost_postfix ... ok
+test structural_seed_sweep_partial_backing_is_worse_than_none ... ok
+test suite_2_underwater_account_can_recover ... ok
+test suite_3_no_value_creation_under_counterparty_insolvency ... ok
+test suite_4_unbacked_profit_is_not_withdrawable_while_open ... ok
+test suite_1_lp_honest_both_sides_all_volatilities ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 255.11s
+
+     Running tests/margin_edge.rs (/tmp/jnetting-target/debug/deps/margin_edge-9daf9341b7e65bcd)
+
+running 29 tests
+test margin_after_close_the_realized_loss_comes_out_of_capital_then_withdraw_is_capped_by_it ... ok
+test margin_between_mm_and_im_you_may_hold_but_not_increase ... ok
+test margin_config_rejects_maintenance_above_initial ... ok
+test margin_cross_margin_closing_one_leg_frees_its_requirement_for_the_other ... ok
+test margin_cross_margin_offsetting_legs_on_equal_assets_do_not_net_requirement ... ok
+test margin_cross_margin_loss_on_one_asset_shrinks_headroom_on_the_other ... ok
+test margin_cross_margin_requirement_adds_across_assets_exactly ... ok
+test margin_cushion_topup_restores_headroom_by_exactly_the_deposit ... ok
+test margin_equal_size_flip_is_a_risk_increase_and_needs_im ... ok
+test margin_dust_flip_past_flat_is_covered_by_the_min_nonzero_requirement ... ok
+test margin_flip_landing_at_exactly_ten_x_is_accepted ... ok
+test margin_flip_under_initial_margin_is_rejected ... ok
+test margin_flip_with_smaller_absolute_size_is_not_a_reduction ... ok
+test margin_full_close_of_an_underwater_position_is_a_reduction_not_a_flip ... ok
+test margin_im_equal_to_mm_is_a_valid_config_and_the_limit_is_the_same ... ok
+test margin_increase_one_atom_short_of_limit_by_capital ... ok
+test margin_increase_to_exactly_the_limit_ok_and_one_more_unit_rejected ... ok
+test margin_leverage_limit_is_per_notional_not_per_size_for_a_cheaper_asset ... ok
+test margin_leverage_one_hundred_percent_im_means_no_leverage ... ok
+test margin_one_atom_of_size_over_the_limit_is_rejected ... ok
+test margin_open_long_at_exactly_initial_margin_is_accepted_one_atom_less_is_rejected ... ok
+test margin_reduce_of_a_short_below_initial_margin_is_not_blocked ... ok
+test margin_reduce_only_is_never_blocked_even_when_below_initial_margin ... ok
+test margin_open_short_at_exactly_initial_margin_is_accepted_one_atom_less_is_rejected ... ok
+test margin_tiny_position_pays_the_minimum_nonzero_requirement_not_zero ... ok
+test margin_reduce_only_is_never_blocked_even_when_below_maintenance_margin ... ok
+test margin_withdraw_flat_exact_capital_ok_one_atom_more_refused ... ok
+test margin_withdraw_with_an_open_position_is_refused_at_any_amount ... ok
+test margin_withdraw_zero_is_a_noop_even_with_a_position ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/market_state_transition_edge.rs (/tmp/jnetting-target/debug/deps/market_state_transition_edge-61649eb864e882a0)
+
+running 22 tests
+test mst_drain_only_blocks_new_open_but_allows_resolve ... ok
+test mst_force_asset_recovery_in_the_past_is_refused ... ok
+test mst_force_asset_recovery_then_resolve_still_closes_value ... ok
+test mst_force_asset_recovery_twice_is_idempotent_or_refused ... ok
+test mst_live_refuses_resolved_only_ops_and_changes_nothing ... ok
+test mst_insurance_deposit_after_resolve_is_value_conserving ... ok
+test mst_max_tvl_deposit_survives_resolve_and_pays_in_full ... ok
+test mst_recovery_asset_refuses_new_trades_but_flat_owner_can_withdraw ... ok
+test mst_resolve_again_does_not_rewrite_resolved_slot ... ok
+test mst_resolve_at_current_slot_is_allowed ... ok
+test mst_resolve_at_u64_max_sets_both_clocks ... ok
+test mst_resolve_before_or_after_flat_deposit_pays_the_same ... ok
+test mst_resolve_empty_market_then_terminal_state_is_clean ... ok
+test mst_resolve_in_the_past_is_stale_and_changes_nothing ... ok
+test mst_resolve_moves_no_value_and_keeps_open_positions ... ok
+test mst_resolved_flat_deposit_returns_exactly_and_empties_vault ... ok
+test mst_resolved_close_order_does_not_change_total_paid ... ok
+test mst_resolved_open_pair_at_flat_price_conserves_value ... ok
+test mst_resolved_refuses_live_ops_and_changes_nothing ... ok
+test mst_second_resolve_never_moves_resolved_slot_back ... ok
+test mst_zero_deposit_after_resolve_is_still_refused ... ok
+test mst_zero_withdraw_after_resolve_is_a_noop ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/multi_asset_portfolio_cross_edge.rs (/tmp/jnetting-target/debug/deps/multi_asset_portfolio_cross_edge-b860cfced09ed372)
+
+running 24 tests
+test multi_asset_all_sixteen_assets_open_close_middle_and_reopen ... ok
+test multi_asset_all_sixteen_assets_move_and_value_is_conserved ... ok
+test multi_asset_bankrupt_two_leg_account_ends_flat_with_no_negative_pnl_left ... ok
+test multi_asset_close_order_of_legs_gives_the_same_final_value ... ok
+test multi_asset_bankrupt_close_order_does_not_change_who_pays ... ok
+test multi_asset_closing_the_losing_leg_does_not_need_initial_margin_on_the_other ... ok
+test multi_asset_closing_one_asset_leaves_the_other_leg_and_conserves_value ... ok
+test multi_asset_equity_exactly_at_shared_maintenance_is_not_liquidatable_on_either_asset ... ok
+test multi_asset_conservation_through_loss_liquidation_and_close ... ok
+test multi_asset_liquidation_is_repeatable_until_healthy_or_flat_and_then_stops ... ok
+test multi_asset_liquidation_request_for_an_asset_the_account_does_not_hold_is_refused ... ok
+test multi_asset_liquidation_of_one_asset_keeps_the_other_leg_bitmap_and_counts ... ok
+test multi_asset_loss_on_asset_one_never_spends_asset_zero_insurance ... ok
+test multi_asset_loss_on_one_asset_alone_tips_a_two_leg_account ... ok
+test multi_asset_loss_on_two_assets_is_not_charged_to_either_domain_insurance ... ok
+test multi_asset_maintenance_requirement_is_the_sum_of_per_leg_requirements ... ok
+test multi_asset_one_atom_under_shared_maintenance_is_liquidatable_through_the_flat_asset ... ok
+test multi_asset_one_position_atom_legs_on_every_asset_open_and_close ... ok
+test multi_asset_profit_on_one_leg_covers_loss_on_the_other_for_maintenance ... ok
+test multi_asset_repeated_refresh_changes_nothing ... ok
+test multi_asset_partial_close_in_many_small_fills_equals_one_fill ... ok
+test multi_asset_round_trip_price_on_both_assets_returns_to_start_value ... ok
+test multi_asset_zero_size_trade_on_second_asset_is_refused_and_first_leg_untouched ... ok
+test multi_asset_single_domain_loss_spends_exactly_the_deficit_from_that_domain_insurance ... FAILED
+
+failures:
+
+---- multi_asset_single_domain_loss_spends_exactly_the_deficit_from_that_domain_insurance stdout ----
+
+thread 'multi_asset_single_domain_loss_spends_exactly_the_deficit_from_that_domain_insurance' (214645460) panicked at tests/multi_asset_portfolio_cross_edge.rs:450:5:
+assertion `left == right` failed
+  left: 0
+ right: 10000
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    multi_asset_single_domain_loss_spends_exactly_the_deficit_from_that_domain_insurance
+
+test result: FAILED. 23 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+error: test failed, to rerun pass `--test multi_asset_portfolio_cross_edge`
+     Running tests/no_seniority_bypass_143.rs (/tmp/jnetting-target/debug/deps/no_seniority_bypass_143-842cb07ae9cff5ff)
+
+running 3 tests
+test matched_settle_recycles_loser_principal_as_source_backing ... ok
+test stressed_winner_cannot_drain_funded_senior ... ok
+test winner_junior_profit_is_inert_in_live_before_loser_close ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/p2b_live_replay.rs (/tmp/jnetting-target/debug/deps/p2b_live_replay-d138e654a7af4885)
+
+running 3 tests
+test p2b_live_fixtures_load_and_validate ... ok
+test replay_percolator_adl_wind_down_exits_close_only_and_conserves_value ... ok
+test replay_hlock_legacy_latch_holds_and_attributed_latch_tracks_its_domain ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+
+     Running tests/p2b_lock_exits.rs (/tmp/jnetting-target/debug/deps/p2b_lock_exits-5455d563866b1bca)
+
+running 22 tests
+test e7_lifecycle_lock_keeps_lock_active ... ok
+test e7_adl_reduce_only_open_returns_adl_reduce_only_not_lock_active ... ok
+test e7_loss_stale_open_returns_loss_stale_not_lock_active ... ok
+test issue126_equal_size_side_flip_is_rejected_while_loss_stale ... ok
+test issue126_same_side_reduction_and_close_stay_allowed_while_loss_stale ... ok
+test issue126_side_flip_is_rejected_while_target_lags_effective ... ok
+test issue126_smaller_abs_side_flip_is_rejected_while_loss_stale ... ok
+test l1_deployed_shape_many_configured_slots_one_activated_is_attributed ... ok
+test l1_hlock_clears_when_the_bankrupt_domain_claims_retire_while_unrelated_claims_remain ... ok
+test l1_multi_asset_group_records_unattributed_and_keeps_the_global_predicate ... ok
+test l1_wire_encoding_is_legacy_compatible_and_sticky ... ok
+test l1_scoped_clear_still_requires_every_other_health_term ... ok
+test l2_dust_bound_is_checked_by_the_engine ... ok
+test l2_replay_shape_jimothy_10_04 ... ok
+test l2_replay_shape_stonk_10_04 ... ok
+test l2_wind_down_exits_adl_conserves_value_and_reopens_only_after_reset ... ok
+test l2_wind_down_refuses_a_market_not_in_adl ... ok
+test l2_wind_down_refuses_an_account_with_a_liquidation_deficit ... ok
+test l3_mg_flat_account_without_a_close_ledger_stays_unattributed ... ok
+test l3_mh_wind_down_refuses_while_a_domain_loss_barrier_is_pending ... ok
+test m1_wind_down_refuses_while_the_mark_lags_the_oracle_target ... ok
+test l2_prop_wind_down_always_exits_and_conserves_value ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.91s
+
+     Running tests/pnl_warmup_haircut_edge.rs (/tmp/jnetting-target/debug/deps/pnl_warmup_haircut_edge-18add8ea7ce146cd)
+
+running 12 tests
+test convert_fully_backed_profit_moves_whole_pnl_into_capital ... ok
+test convert_conserves_vault_and_moves_c_tot_by_exactly_the_converted_amount ... ok
+test convert_negative_pnl_is_a_noop ... ok
+test convert_is_idempotent_repeated_calls_return_zero ... ok
+test convert_refused_while_position_is_open_and_unsettled ... ok
+test convert_order_of_two_winners_does_not_change_totals ... ok
+test convert_tiny_profit_one_price_step_rounds_down_never_up ... ok
+test convert_total_value_is_conserved_across_both_sides ... ok
+test convert_with_huge_capital_does_not_overflow ... ok
+test convert_without_fresh_cert_is_refused_stale_after_a_conversion ... ok
+test convert_zero_pnl_is_a_noop ... ok
+test haircut_bankrupt_loser_caps_winner_pnl_at_loser_capital ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/position_flip_through_zero_edge.rs (/tmp/jnetting-target/debug/deps/position_flip_through_zero_edge-e947d084212cd0f4)
+
+running 18 tests
+test fee_at_an_exactly_flat_close_is_charged_on_the_closed_size ... ok
+test fee_at_a_flip_is_charged_on_the_whole_trade_notional ... ok
+test fee_rounding_at_a_one_atom_flip_does_not_go_negative_or_charge_extra ... ok
+test flip_after_a_gain_banks_the_gain_and_opens_the_remainder_flat ... ok
+test fees_over_repeated_flips_only_move_value_out_of_the_pair ... ok
+test flip_and_price_loss_on_both_sides_conserves_value ... ok
+test flip_back_and_forth_through_price_moves_conserves_total_value ... ok
+test flip_from_a_one_atom_position_to_a_large_opposite_one ... ok
+test funding_accrued_before_a_flip_is_charged_to_the_old_side ... ok
+test funding_after_a_flip_runs_in_the_new_direction ... ok
+test funding_with_zero_rate_across_a_flip_moves_nothing ... ok
+test flip_in_two_partial_trades_equals_one_flip ... ok
+test new_leg_after_a_flip_earns_from_the_flip_price_only ... ok
+test one_atom_past_flat_leaves_a_one_atom_opposite_leg ... ok
+test one_atom_short_of_flat_keeps_a_one_atom_long ... ok
+test rejected_flip_leaves_state_untouched ... ok
+test many_flips_keep_open_interest_balanced_and_counts_one_each ... ok
+test selling_exactly_the_position_ends_flat_not_flipped ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/proofs_e299_loss_provenance.rs (/tmp/jnetting-target/debug/deps/proofs_e299_loss_provenance-1955adbc06bb5458)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/proofs_gh292_latch.rs (/tmp/jnetting-target/debug/deps/proofs_gh292_latch-31cdd833a05297fc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/proofs_v16.rs (/tmp/jnetting-target/debug/deps/proofs_v16-13c3f89f51135230)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/proofs_v16_arithmetic.rs (/tmp/jnetting-target/debug/deps/proofs_v16_arithmetic-2b70fc9dbb7cc1b4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/proofs_v16_asymmetric_a_accrual.rs (/tmp/jnetting-target/debug/deps/proofs_v16_asymmetric_a_accrual-290095dc640c2fd2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/proofs_v17_fork.rs (/tmp/jnetting-target/debug/deps/proofs_v17_fork-53f88e9902fea115)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/proofs_v21_funding_scale.rs (/tmp/jnetting-target/debug/deps/proofs_v21_funding_scale-2741db19dc72e39c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/proofs_v22_funding_exact.rs (/tmp/jnetting-target/debug/deps/proofs_v22_funding_exact-7ceaf1a91864550c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/proofs_v22_livefix.rs (/tmp/jnetting-target/debug/deps/proofs_v22_livefix-8ef1e6d83ff87dc6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/proofs_v22_rentstale.rs (/tmp/jnetting-target/debug/deps/proofs_v22_rentstale-800b46a06fa3e04e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/q_regression.rs (/tmp/jnetting-target/debug/deps/q_regression-1984f33b5e820b64)
+
+running 9 tests
+test q2_withdraw_gate_now_agrees_with_its_siblings_on_the_clock ... ok
+test q2_withdraw_gate_refuses_a_lapsed_fresh_bucket ... ok
+test q2_withdraw_gate_still_allows_an_unexpired_fresh_bucket ... ok
+test q_live_burn_first_and_expire_first_orderings_converge ... ok
+test q_live_burn_on_lapsed_bucket_forfeits_principal_instead_of_returning_it ... ok
+test q_live_burn_on_unexpired_bucket_still_returns_principal_to_provider ... ok
+test q_live_tag48_sync_maintenance_fee_also_forfeits ... ok
+test q_resolved_close_on_lapsed_bucket_forfeits_instead_of_un_pledging ... ok
+test q_resolved_crank_order_no_longer_decides_the_stock_class ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/r_regression.rs (/tmp/jnetting-target/debug/deps/r_regression-b7b2331fe4d2e5a2)
+
+running 6 tests
+test r_regression_fresh_unexpired_backing_still_supports_in_full ... ok
+test r_regression_flat_normalizer_still_clears_and_valuation_is_clearer_invariant ... ok
+test r_regression_holder_only_two_crank_route_also_certifies_honestly ... ok
+test r_regression_impaired_backing_yields_no_support_and_the_account_is_liquidatable ... ok
+test r_regression_insurance_backed_lien_survives_a_dead_counterparty_bucket ... ok
+test r_regression_withdraw_and_convert_refusals_are_unchanged ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/resolve_once_guard.rs (/tmp/jnetting-target/debug/deps/resolve_once_guard-1f54ad97cc4e4605)
+
+running 2 tests
+test live_resolve_still_works ... ok
+test second_resolve_is_refused_and_changes_nothing ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/resolved_close_obligation_gate.rs (/tmp/jnetting-target/debug/deps/resolved_close_obligation_gate-30eb82601563146e)
+
+running 3 tests
+test an_ordinary_leg_on_the_same_recovery_asset_still_detaches ... ok
+test gated_obligation_releases_once_the_opposite_side_has_cleared ... ok
+test resolved_close_must_not_release_a_gated_recovery_obligation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/resolved_insolvent_fuzz.rs (/tmp/jnetting-target/debug/deps/resolved_insolvent_fuzz-d1e5a92760658c2f)
+
+running 2 tests
+test topup_does_not_clear_while_rate_nonterminal ... ok
+test close_resolved_insolvent_winner_dematerializes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s
+
+     Running tests/resolved_payout_edge.rs (/tmp/jnetting-target/debug/deps/resolved_payout_edge-e590127202ce6043)
+
+running 27 tests
+test resolved_payout_advance_slot_backwards_is_stale ... ok
+test resolved_payout_advance_slot_forward_to_u64_max ... ok
+test resolved_payout_advance_slot_in_live_mode_is_lock_active ... ok
+test resolved_payout_advance_slot_same_slot_is_ok_and_noop ... ok
+test resolved_payout_advance_slot_keeps_resolved_slot_and_payout ... ok
+test resolved_payout_close_empty_account_pays_zero ... ok
+test resolved_payout_close_flat_account_returns_exact_deposit ... ok
+test resolved_payout_close_in_live_mode_is_refused_and_changes_nothing ... ok
+test resolved_payout_close_max_tvl_deposit_pays_in_full ... ok
+test resolved_payout_close_one_atom_dust ... ok
+test resolved_payout_close_order_does_not_change_total_paid ... ok
+test resolved_payout_second_close_pays_nothing_more ... ok
+test resolved_payout_terminal_slab_advances_the_clock ... ok
+test resolved_payout_terminal_slab_backwards_slot_is_stale ... ok
+test resolved_payout_terminal_slab_after_all_closed_conserves_value ... ok
+test resolved_payout_terminal_slab_empty_market_is_ready_with_zero_retired ... ok
+test resolved_payout_terminal_slab_in_live_mode_is_lock_active ... ok
+test resolved_payout_terminal_slab_refused_while_accounts_remain ... ok
+test resolved_payout_terminal_slab_reserve_never_exceeds_vault_drop ... ok
+test resolved_payout_terminal_slab_start_index_out_of_range_is_invalid_config ... ok
+test resolved_payout_topup_before_any_receipt_pays_zero_or_refuses ... ok
+test resolved_payout_topup_in_live_mode_is_lock_active ... ok
+test resolved_payout_topup_is_idempotent_after_close ... ok
+test resolved_payout_winner_close_waits_for_loser_then_pays ... ok
+test resolved_payout_winner_gets_more_than_deposit_loser_less ... ok
+test resolved_payout_zero_price_move_returns_deposits ... ok
+test resolved_payout_winner_and_loser_conserve_total_value ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/rounding_edge.rs (/tmp/jnetting-target/debug/deps/rounding_edge-37f07de01131332c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/rounding_residue_fuzz.rs (/tmp/jnetting-target/debug/deps/rounding_residue_fuzz-b086b43215233370)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/s10_keeper_replay.rs (/tmp/jnetting-target/debug/deps/s10_keeper_replay-9e032df93c3a0a6d)
+
+running 2 tests
+test s10_keeper_replay ... ignored, measurement harness, driven by environment variables
+test s10_keeper_settle_patterns_do_not_leak_to_the_ideal has been running for over 60 seconds
