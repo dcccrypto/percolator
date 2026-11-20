@@ -1175,7 +1175,11 @@ receivable first) unless `L`'s bucket is Impaired; in Resolved mode nothing is
 booked for a terminal domain (Impaired, or no claim and no creditor leg left),
 otherwise `L` takes what the resolved loss-backing capacity allows (the whole
 amount while `L`'s bucket is Fresh, unlapsed and funded; otherwise its support
-gap plus the provider receivable already advanced). Whatever that rule does
+gap plus the provider receivable already advanced; v2.2: that cap applies
+only once `L`'s creditor claims are final, before that `L` takes the whole
+amount). v2.2 also does not expire a lapsed but still Fresh `L` bucket here
+(F-LIVE-2): while it is lapsed and unexpired, the consumed atoms stay junior
+residual. Whatever that rule does
 not book stays junior residual, where consumption already put it; `V`,
 `C_tot` and `I` are flat throughout. Insurance-funded support and junior-pool
 (haircut) support are not counterparty backing and are not moved, and nothing
