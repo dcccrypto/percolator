@@ -1,0 +1,35 @@
+warning: variable does not need to be mutable
+     --> src/v16.rs:21426:13
+      |
+21426 |         let mut ledger = account.header.close_progress.try_to_runtime()?;
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `kani_trade_fee_atoms_per_side` is never used
+     --> src/v16.rs:29193:8
+      |
+29193 | pub fn kani_trade_fee_atoms_per_side(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scaled_adl_delta_fast` is never used
+     --> src/v16.rs:29532:4
+      |
+29532 | fn scaled_adl_delta_fast(abs_basis_q: u128, a_basis: u128, then: i128, now: i128) -> Option<i128> {
+      |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `percolator` (lib) generated 3 warnings (run `cargo fix --lib -p percolator` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+
+running 4 tests
+test a_claim_waits_exactly_until_the_lien_is_released ... ok
+test a_waiting_claim_is_released_when_the_bucket_lapses ... ok
+test without_a_lien_nothing_waits ... ok
+test claim_is_paid_its_share_whether_or_not_the_lien_holder_closed_first ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.99s
+
