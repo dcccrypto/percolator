@@ -47,7 +47,7 @@ fn fixture_dir(name: &str) -> PathBuf {
 // encoding is the same bytes with the new words zeroed (I-B7). These upgraders insert
 // exactly those zero words, so the replays keep exercising the live v2.1 state.
 const V22_CONFIG_EXTRA: usize = 6 * 8; // band_bps, E, Pmax, rent_max, band_max_positions_per_side, band_min_leg_notional
-const V22_ASSET_EXTRA: usize = 8 * 8 + 3 * 16; // 8 band u64 words + 3 rent u128 words
+const V22_ASSET_EXTRA: usize = 8 * 8 + 3 * 16 + 2; // 8 band u64 words + 3 rent u128 words + u16 price-step carry
 const V22_LEG_EXTRA: usize = 8 + 1 + 16 + 8; // band_epoch_snap, band_liq_pending, rent_snap, rent_carry
 
 fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
