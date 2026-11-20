@@ -16965,14 +16965,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         if prepared.net != 0 {
             if prepared.net > 0 {
-                let claims_before = self.source_credit_for_domain(source_domain)?.positive_claim_bound_num;
                 self.apply_signed_kf_delta_to_pnl(account, prepared.net, Some(source_domain))?;
-                let claims_after = self.source_credit_for_domain(source_domain)?.positive_claim_bound_num;
-                // claims actually credited by this settlement (a gain that nets against the
-                // account's own debt credits less than `net`)
-                let credited = i128::try_from(claims_after.saturating_sub(claims_before))
-                    .map_err(|_| V16Error::ArithmeticOverflow)?;
-                self.add_kf_pending_credit(source_domain, credited)?;
             } else {
                 let negative_before = account.header.pnl.get().min(0).unsigned_abs();
                 let loss_abs = prepared.net.unsigned_abs();
@@ -16997,23 +16990,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     negative_after,
                     0,
                 )?;
-                // the loser has realized its loss: its winners' credits no longer wait on it
-                let realized_num = i128::try_from(
-                    prepared
-                        .net
-                        .unsigned_abs()
-                        .checked_mul(BOUND_SCALE)
-                        .ok_or(V16Error::ArithmeticOverflow)?,
-                )
-                .map_err(|_| V16Error::ArithmeticOverflow)?;
-                self.add_kf_pending_credit(source_domain, -realized_num)?;
             }
-        }
-        // S9: every claim burn this settlement made (netting, tail against retained face) leaves
-        // the counter at or below the claim stock of both domains of the asset.
-        for side in [SideV16::Long, SideV16::Short] {
-            let domain = self.insurance_domain_index(asset_index, side)?;
-            self.clamp_kf_pending_credit_to_claims(domain)?;
         }
         Self::record_account_funding_flow(account, leg.side, prepared.f_delta)?;
         self.settle_kf_laggard(asset_index, &asset, &leg)?;
