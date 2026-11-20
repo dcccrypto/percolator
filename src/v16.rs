@@ -8076,6 +8076,10 @@ struct KfLossNettingV16 {
 struct SupportLossApplicationV16 {
     support_consumed: u128,
     junior_face_burned: u128,
+    /// The part of `support_consumed` that was drawn from counterparty backing
+    /// behind the account's own source claims (not insurance credit and not the
+    /// junior pool), in atoms (upstream 487b49c0, #175).
+    counterparty_support_consumed: u128,
 }
 
 const ACCOUNT_KF_SETTLEMENT_DOMAIN_MAX: u64 = u32::MAX as u64 * 2 + 1;
@@ -15987,6 +15991,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
                 junior_face_burned: 0,
+                counterparty_support_consumed: 0,
             });
         }
         let old_positive_face = account.header.pnl.get().max(0) as u128;
@@ -16002,9 +16007,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
                 junior_face_burned: 0,
+                counterparty_support_consumed: 0,
             });
         }
         let has_source_claims = Self::account_has_source_claims(&account.as_view())?;
+        let mut counterparty_support_consumed = 0u128;
         let (support_consumed, support_face_burned, preburned_source_claim_num) =
             if has_source_claims {
                 let source_support_limit = loss_abs.min(old_positive_face);
@@ -16037,6 +16044,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         false,
                         netting,
                     )?;
+                counterparty_support_consumed = consumption.counterparty_credit_consumed;
                 (
                     support_consumed,
                     consumption.face_burn.min(old_positive_face),
@@ -16098,6 +16106,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(SupportLossApplicationV16 {
             support_consumed,
             junior_face_burned,
+            counterparty_support_consumed,
         })
     }
 
@@ -16112,6 +16121,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
                 junior_face_burned: 0,
+                counterparty_support_consumed: 0,
             });
         }
         if delta < 0 {
@@ -16138,6 +16148,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
                 junior_face_burned: 0,
+                counterparty_support_consumed: 0,
             });
         }
 
@@ -16214,6 +16225,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(SupportLossApplicationV16 {
             support_consumed,
             junior_face_burned,
+            // A gain curing an outstanding negative PnL: which domain that older loss
+            // was owed to is no longer known, so nothing is attributed here.
+            counterparty_support_consumed: 0,
         })
     }
 
@@ -17023,24 +17037,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let remaining_loss = loss_abs
                     .checked_sub(netted)
                     .ok_or(V16Error::CounterUnderflow)?;
+                let mut support_paid = 0u128;
                 if remaining_loss != 0 {
-                    let remaining_i128 =
-                        i128::try_from(remaining_loss).map_err(|_| V16Error::ArithmeticOverflow)?;
-                    let _ = remaining_i128;
-                    self.apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(
+                    // upstream 487b49c0 (#175): the un-netted remainder takes the ordinary
+                    // support-and-burn path at the stored rate (no R1 netting rate), and the
+                    // counterparty backing it consumed from the account's own claims is booked
+                    // for the loss domain below. Fork adaptation: the loss provenance (#299)
+                    // is still recorded as `source_domain` (upstream passes no provenance).
+                    let support = self.apply_haircut_bounded_close_loss_to_pnl(
                         account,
                         remaining_loss,
                         Some(source_domain),
-                        Some(source_domain),
                     )?;
+                    // Once the resolved payout snapshot is captured the junior residual is
+                    // committed to receipts, so nothing is taken back out of it.
+                    if support.counterparty_support_consumed != 0
+                        && !decode_bool(self.header.payout_snapshot_captured)?
+                    {
+                        support_paid = support.counterparty_support_consumed;
+                    }
                 }
                 let negative_after = account.header.pnl.get().min(0).unsigned_abs();
+                // Fork adaptation of upstream's `book_kf_loss_support_for_source_domain_not_atomic`:
+                // the fork's capital reservation already books a `support_paid` part through the
+                // same destination rule (`book_realized_loss_backing_for_domain_not_atomic`).
                 self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
                     account,
                     source_domain,
                     negative_before,
                     negative_after,
-                    0,
+                    support_paid,
                 )?;
             }
         }
