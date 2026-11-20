@@ -471,6 +471,17 @@ fn hedged_refresh_fix_b_in_flight_gain_is_not_certified_equity() {
     w.sound(&mut [&mut a, &mut b]);
 }
 
+/// spec.md:266 / maintenance equity: a hedged account's unbacked positive PnL does not lift
+/// maintenance equity. After refreshing only `a`, `capital + pnl` would include the winning leg's
+/// credit; the certified equity must stay strictly below that and equal capital minus the loss.
+#[test]
+fn hedged_refresh_unbacked_positive_pnl_does_not_lift_maintenance_equity() {
+    let (mut w, mut a, _b) = hedged(THIN, 850, 0);
+    let cert = w.refresh(&mut a);
+    assert!(cert.certified_equity < value(&a), "unbacked gain must not count");
+    assert_eq!(cert.certified_equity, THIN as i128 - 15_000);
+}
+
 /// The auto-crank on `a` alone (its counterparty never touched) does not select Liquidate.
 #[test]
 fn hedged_refresh_fix_b_auto_crank_does_not_liquidate_the_hedge() {
