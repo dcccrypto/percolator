@@ -156,6 +156,50 @@ fn liquidation_trigger_gate(cert: HealthCertV16) -> V16Result<()> {
     Ok(())
 }
 
+/// Pure kernel of `charge_account_fee_current_not_atomic`: the scalar value movement of one
+/// fee charge. Returns `(charged, capital_after, c_tot_after, insurance_after)`.
+/// `charged == 0` means nothing moves (zero fee, `pnl < 0` waiver, or zero capital) and the three
+/// balances are returned unchanged. Otherwise `charged = min(requested_fee, capital)` leaves the
+/// account's capital and `c_tot` and enters insurance; an inconsistent `c_tot` or an insurance
+/// overflow fails closed with an error before any balance is written.
+#[inline]
+fn fee_charge_capital_to_insurance(
+    requested_fee: u128,
+    pnl: i128,
+    capital: u128,
+    c_tot: u128,
+    insurance: u128,
+) -> V16Result<(u128, u128, u128, u128)> {
+    if requested_fee == 0 || pnl < 0 {
+        return Ok((0, capital, c_tot, insurance));
+    }
+    let charged = requested_fee.min(capital);
+    if charged == 0 {
+        return Ok((0, capital, c_tot, insurance));
+    }
+    let capital_after = capital
+        .checked_sub(charged)
+        .ok_or(V16Error::CounterUnderflow)?;
+    let c_tot_after = c_tot
+        .checked_sub(charged)
+        .ok_or(V16Error::CounterUnderflow)?;
+    let insurance_after = insurance
+        .checked_add(charged)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    Ok((charged, capital_after, c_tot_after, insurance_after))
+}
+
+#[cfg(kani)]
+pub fn kani_fee_charge_capital_to_insurance(
+    requested_fee: u128,
+    pnl: i128,
+    capital: u128,
+    c_tot: u128,
+    insurance: u128,
+) -> V16Result<(u128, u128, u128, u128)> {
+    fee_charge_capital_to_insurance(requested_fee, pnl, capital, c_tot, insurance)
+}
+
 #[cfg(kani)]
 pub fn kani_liquidation_trigger_deficit(liquidation_equity: i128, maintenance_req: u128) -> u128 {
     liquidation_trigger_deficit(liquidation_equity, maintenance_req)
@@ -24918,32 +24962,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         requested_fee: u128,
     ) -> V16Result<u128> {
-        if requested_fee == 0 || account.header.pnl.get() < 0 {
-            return Ok(0);
-        }
-        let charged = requested_fee.min(account.header.capital.get());
+        let (charged, capital, c_tot, insurance) = fee_charge_capital_to_insurance(
+            requested_fee,
+            account.header.pnl.get(),
+            account.header.capital.get(),
+            self.header.c_tot.get(),
+            self.header.insurance.get(),
+        )?;
         if charged == 0 {
             return Ok(0);
         }
         let vault_before = self.header.vault.get();
-        let capital = account
-            .header
-            .capital
-            .get()
-            .checked_sub(charged)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let c_tot = self
-            .header
-            .c_tot
-            .get()
-            .checked_sub(charged)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let insurance = self
-            .header
-            .insurance
-            .get()
-            .checked_add(charged)
-            .ok_or(V16Error::ArithmeticOverflow)?;
         account.header.capital = V16PodU128::new(capital);
         self.header.c_tot = V16PodU128::new(c_tot);
         self.header.insurance = V16PodU128::new(insurance);
