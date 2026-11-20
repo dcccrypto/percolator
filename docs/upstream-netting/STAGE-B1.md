@@ -23,8 +23,11 @@ an R1 number that Toly's code replaces. They all protect the fork's #299 loss pr
 routing that follows from it (`realized_by` = the leg's loss domain). Stage A had dropped that provenance when
 7d2e243d replaced the R1 call (`realized_by = None`); 99b1f870 put it back. No real conflict remains among the 17.
 
-Note: EXISTING-FAILS.md lists one binary with 12 passed / 3 failed; that is the Stage A partial default run
-and not one of the five files above (the 17 names all map to the five files).
+Correction: 3 of the 17 (`e299_crank_order_cannot_choose_the_payer_one_loser`,
+`e299_engine_records_the_realizing_domain_and_clears_it_on_resolution`, `e299_out_of_range_record_fails_closed`)
+are in a sixth file, `tests/e299_loss_provenance.rs` (the 12 passed / 3 failed binary of EXISTING-FAILS.md). On the
+ported head it passes 15/15 (`stageB1-head-ported-e299-r1.txt`, `stageB1-head-final-15files.txt`). Not measured on
+99b1f870 itself.
 
 ## 2. Ports in this run
 
@@ -37,4 +40,66 @@ and not one of the five files above (the 17 names all map to the five files).
 
 ## 3. Counts after the ports (HEAD)
 
-RESULTS_PLACEHOLDER
+### 3a. One more fork adaptation: keep the `kf_pending_credit` feeder (`a679c1b9`, revert of 121b1cfb)
+
+review-loop round 1 (S1) found that 121b1cfb removed the only writers that raise `kf_pending_credit`. The
+fork-only fix B (#356) still reads it for liquidation equity (`account_liquidation_equity` -> in-flight support).
+Upstream has no reader of this counter, so this is fork-only behaviour that Toly's code does not touch. Measured
+on 736c0239 (feeder removed), `stageB1-head-ported-hedged.txt`:
+- hedged_refresh_order_liquidation: **6 passed / 12 failed**
+- hedged_refresh_fee_loss: **4 passed / 5 failed** (e.g. `px 888: fix B (was liquidated at fee 0 too, #346)`)
+
+After a679c1b9: 18/0 and 9/0. The revert did not change any other number below.
+
+### 3b. Final head a679c1b9 (release, `stageB1-head-final-15files.txt`)
+
+| file | base 696fd81b | 99b1f870 | final head |
+|---|---|---|---|
+| gh292_att_bprime | 11/0 | 11/0 | 11/0 |
+| gh292_att_d | 7/0 | 7/0 | 7/0 |
+| gh292_locked_liquidation_recovery | 14/0 | 14/0 | 14/0 |
+| liquidations_edge | 25/0 | 25/0 | 25/0 |
+| multi_asset_portfolio_cross_edge | 24/0 | 24/0 | 24/0 |
+| e299_loss_provenance | not measured | not measured | 15/0 |
+| hedged_refresh_order_liquidation | not measured | not measured | 18/0 |
+| hedged_refresh_fee_loss | not measured | not measured | 9/0 |
+| v16_kf_loss_domain_attribution (Toly, 487b49c0) | 9/2 (3e5970f3, `before.txt`) | not measured | **11/0** |
+| v16_kf_loss_same_domain_face (Toly, 6666a2ab) | 5/7 (3e5970f3, `before.txt`) | not measured | **12/0** |
+| v22_r1_deep_book | (green on the v2.2 line) | not measured | **1/2** |
+| v22_r1_i457 | " | not measured | **4/1** |
+| v22_r1_multi_claimant | " | not measured | **2/2** |
+| v22_r1_reversal | " | not measured | **21/1** (1 ignored) |
+| v22_r1_settle_order | " | not measured | **4/4** |
+
+(passed/failed. The R1 numbers are identical on 736c0239 and a679c1b9.)
+
+## 4. Real conflicts: the 10 failing R1 tests (not rewritten)
+
+These are not in the 17. They assert R1's S5 / neutral-rate guarantees, mostly in worlds with **liened** claims.
+Upstream handles liened face with #250 (c7ae2256+596b3d98, lien-aware rate) and 1683b11d, both held in this run by
+instruction. So the head's numbers are neither R1's nor Toly's: rewriting them would pin a hybrid that upstream does not
+produce. One of them (`rule_a_...`) pins the fork-only S10 provider-principal ledger. Numbers (expected = test, got = head):
+
+| test | assertion | expected | got |
+|---|---|---|---|
+| v22_r1_deep_book::deep_book_maker_is_never_below_the_pre_r1_worst_order | sum of maker's worst order >= pre-R1 worst (175 of 187 worlds liened) | >= -78,538,861 | -80,615,589 |
+| v22_r1_deep_book::liened_domain_multi_claimant_ratchets | same, liened multi-claimant | >= pre-R1 worst | below (message only) |
+| v22_r1_i457::i457_resolved_close_order_does_not_change_payouts | payouts, close order [0,1,2,3] vs [3,2,1,0], peak 0,1,2, reverse_first | equal | [0, 494527388, 1185878296, 1000000619594320] vs [0, 494527386, 1217566000, 1000000725220000] |
+| v22_r1_multi_claimant::r1_multi_claimant_residual_ratchets | resolved solvent worst gap | <= 116,400 | 144,500 |
+| v22_r1_multi_claimant::mixed_liened_and_rich_flippers_ratchets | per-account worst orders | no regression | -13,613,431 |
+| v22_r1_reversal::rule_a_residual_provider_ends_short_of_principal_where_base_stays_above_seed_3000121 | base engine (fresh, S10 ledger principal) at op 113 | (5,699,125, 3,632,500) | (5,599,922, 3,632,500) |
+| v22_r1_settle_order::r1_bankrupt_victim_is_order_independent_and_not_over_credited | (victim, winner) winner-first == victim-first | equal, (-414,343, 329,999) | (-403,993, 329,999) vs (-377,346, 329,999) |
+| v22_r1_settle_order::r1_equal_size_flip_victim_is_liened_and_order_independent | liened victim, both orders | equal | (-603,702, 299,999) vs (-537,447, 299,999) |
+| v22_r1_settle_order::r1_liened_victim_is_order_independent_and_pinned | counterparty >= pre-R1 worst order | >= pre-R1 worst | below (message only) |
+| v22_r1_settle_order::r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1 | pinned neutral-rate result 330000 5 200x14 | (-553,486, -518,502) | (-581,887, -518,502) |
+
+Not measured (time): whether these 10 already failed at 99b1f870 / the Stage A head (the attribution run was stopped
+to make room for the fix-B run). Not run here: full suite, fuzz, Kani, build-sbf (left to the merge gate).
+
+## 5. Outcome
+
+Not all tests in the touched area pass (10 R1 failures above), so per the goal **no PR was opened**. The branch
+`agent/J-20261120-ENG-PORT-TOLYNETTINGd` holds the ports and this file. Choices left for Khubair, not taken here:
+(a) accept that the R1 guarantees go away with R1 and rewrite or delete these 10 tests to the head's numbers (that would
+pin a state upstream does not produce for liened claims); or (b) port #250 + c3988149 + #206 + 1683b11d (option A of
+SCOPE.md) and then re-measure the 10 against Toly's own numbers.
