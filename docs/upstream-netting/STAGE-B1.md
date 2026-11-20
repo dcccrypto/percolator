@@ -16,7 +16,7 @@ Run of the 5 affected files on 99b1f870 (`stageB1-head-99b1f870-5files.txt`):
 | gh292_att_d | 7/0 | 6 / 1 | 7 / 0 |
 | gh292_locked_liquidation_recovery | 14/0 | 4 / 10 | 14 / 0 |
 | liquidations_edge | 25/0 | 24 / 1 | 25 / 0 |
-| multi_asset_portfolio_cross_edge | 24/0 | 23 / 1 (+3 in a 15-test binary, see note) | 24 / 0 |
+| multi_asset_portfolio_cross_edge | 24/0 | 23 / 1 (3 more are in e299_loss_provenance, see correction) | 24 / 0 |
 
 All 17 pass on 99b1f870, so **no test was rewritten** (0 lines of "old value -> new value"): none of them asserts
 an R1 number that Toly's code replaces. They all protect the fork's #299 loss provenance and the insurance
@@ -65,11 +65,11 @@ After a679c1b9: 18/0 and 9/0. The revert did not change any other number below.
 | hedged_refresh_fee_loss | not measured | not measured | 9/0 |
 | v16_kf_loss_domain_attribution (Toly, 487b49c0) | 9/2 (3e5970f3, `before.txt`) | not measured | **11/0** |
 | v16_kf_loss_same_domain_face (Toly, 6666a2ab) | 5/7 (3e5970f3, `before.txt`) | not measured | **12/0** |
-| v22_r1_deep_book | (green on the v2.2 line) | not measured | **1/2** |
-| v22_r1_i457 | " | not measured | **4/1** |
-| v22_r1_multi_claimant | " | not measured | **2/2** |
-| v22_r1_reversal | " | not measured | **21/1** (1 ignored) |
-| v22_r1_settle_order | " | not measured | **4/4** |
+| v22_r1_deep_book | not measured here | not measured | **1/2** |
+| v22_r1_i457 | not measured here | not measured | **4/1** |
+| v22_r1_multi_claimant | not measured here | not measured | **2/2** |
+| v22_r1_reversal | not measured here | not measured | **21/1** (1 ignored) |
+| v22_r1_settle_order | not measured here | not measured | **4/4** |
 
 (passed/failed. The R1 numbers are identical on 736c0239 and a679c1b9.)
 
