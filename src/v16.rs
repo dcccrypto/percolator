@@ -134,6 +134,38 @@ fn apply_backing_provider_earnings_withdraw(
     Ok((next_vault, bucket_earnings - amount))
 }
 
+/// Pure kernel of the liquidation trigger: the `certified_liq_deficit` that
+/// `account_liquidation_deficit` certifies for a given liquidation equity and maintenance
+/// requirement. Zero exactly when `equity >= 0 && equity >= maintenance_req`.
+#[inline]
+fn liquidation_trigger_deficit(liquidation_equity: i128, maintenance_req: u128) -> u128 {
+    if liquidation_equity < 0 {
+        liquidation_equity.unsigned_abs()
+    } else {
+        maintenance_req.saturating_sub(liquidation_equity as u128)
+    }
+}
+
+/// Pure kernel of the gate `liquidate_account_not_atomic` applies to the freshly certified
+/// health cert: a cert with no liquidation deficit is refused with `NonProgress`.
+#[inline]
+fn liquidation_trigger_gate(cert: HealthCertV16) -> V16Result<()> {
+    if cert.certified_liq_deficit == 0 {
+        return Err(V16Error::NonProgress);
+    }
+    Ok(())
+}
+
+#[cfg(kani)]
+pub fn kani_liquidation_trigger_deficit(liquidation_equity: i128, maintenance_req: u128) -> u128 {
+    liquidation_trigger_deficit(liquidation_equity, maintenance_req)
+}
+
+#[cfg(kani)]
+pub fn kani_liquidation_trigger_gate(cert: HealthCertV16) -> V16Result<()> {
+    liquidation_trigger_gate(cert)
+}
+
 fn health_cert_after_capital_debit(cert: HealthCertV16, amount: u128) -> V16Result<HealthCertV16> {
     let amount_i128 = i128::try_from(amount).map_err(|_| V16Error::ArithmeticOverflow)?;
     let next_equity = cert
@@ -14889,11 +14921,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         maintenance_req: u128,
     ) -> V16Result<u128> {
         let equity = self.account_liquidation_equity(account)?;
-        Ok(if equity < 0 {
-            equity.unsigned_abs()
-        } else {
-            maintenance_req.saturating_sub(equity as u128)
-        })
+        Ok(liquidation_trigger_deficit(equity, maintenance_req))
     }
 
     fn account_equity_inner(
@@ -22342,9 +22370,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             AccountRefreshCertOutcomeV16::SourceBackingExpired(_) => return Err(V16Error::Stale),
         }
         let cert = account.header.health_cert.try_to_runtime()?;
-        if cert.certified_liq_deficit == 0 {
-            return Err(V16Error::NonProgress);
-        }
+        liquidation_trigger_gate(cert)?;
         let before_score = self.risk_score_unchecked(&account.as_view())?;
         let leg_slot =
             Self::require_active_leg_slot_for_asset(&account.as_view(), request.asset_index)?;
