@@ -603,7 +603,7 @@ soft_leg_credit =
           / CREDIT_RATE_SCALE)
 ```
 
-Soft credit is recomputed on every full refresh and every favorable action. It creates no payout right and no durable support. If the source rate falls, health falls immediately.
+Soft credit is part of `PNL_eff_maint_i`: it applies only to backed value (the source domain's `credit_rate_num` already reflects booked backing) and never to unbacked open PnL. Soft credit is recomputed on every full refresh and every favorable action. It creates no payout right and no durable support. If the source rate falls, health falls immediately.
 
 Trade approval that increases risk MUST create liens for any positive credit beyond no-positive-credit equity. Purely risk-reducing trades may use soft credit only for validation.
 
@@ -898,9 +898,11 @@ Equity lanes, all exact wide signed:
 ```text
 Eq_withdraw_raw_i = C_i + min(PNL_i,0) + PNL_eff_matured_i - FeeDebt_i
 Eq_trade_raw_i    = C_i + min(PNL_i,0) + PNL_eff_trade_i   - FeeDebt_i
-Eq_maint_raw_i    = C_i + PNL_i                            - FeeDebt_i
+Eq_maint_raw_i    = C_i + min(PNL_i,0) + PNL_eff_maint_i   - FeeDebt_i
 Eq_net_i          = max(0, Eq_maint_raw_i)
 ```
+
+`PNL_eff_maint_i` is the part of `PosPNL_i` that is backed under section 2: the sum, over the account's source claims, of the realizable source support (stored credit rate, capped by the domain's booked available backing; liened claims at their valid (non-impaired, unexpired) lien value only). Open positive PnL that is not backed is not counted (spec.md section 2.2, line 266: "Open positive PnL that is not converted into a source-credit lien is not backing"): `PNL_eff_maint_i <= PosPNL_i`, and `PNL_eff_maint_i = 0` for a claim whose source domain holds no booked backing. In particular a gain credited by K/F settlement whose losing counterparty has not yet been refreshed and booked is unbacked and does NOT count toward maintenance until that backing is booked. Maintenance equity is not `C_i + PNL_i - FeeDebt_i`; a loss (`PNL_i < 0`) always counts in full.
 
 Candidate trade approval MUST neutralize that trade’s own positive slippage:
 
@@ -1217,6 +1219,8 @@ Maintenance healthy iff `Eq_net_i >= MM_req_i` (equity exactly at maintenance is
 A trade is risk-increasing if it increases absolute effective position, flips sign, or opens from flat. It is strictly risk-reducing if same sign, nonzero before/after, and absolute position decreases.
 
 An account is liquidatable iff after full authoritative live touch it has nonzero effective position and `Eq_net_i < MM_req_i` (equity exactly at maintenance is NOT liquidatable; this matches `certified_equity_maint < certified_maintenance_req` in section 10 and the engine's `maintenance_req.saturating_sub(equity)` deficit). If recurring fees are enabled, the account MUST be fee-current first.
+
+`Eq_net_i` counts only backed positive PnL (section 3 `PNL_eff_maint_i`). A hedged account whose gain is credited but whose losing counterparty has not yet been refreshed is therefore measured without that gain; the gain counts once the counterparty's loss is booked. Refresh is permissionless, so the window ends when the counterparty is refreshed.
 
 Partial liquidation requires `0 < q_close_q < abs(old_eff_pos_q_i)`. It closes synthetically at oracle price, attaches the remaining position, settles losses from principal, charges liquidation fee, invokes `enqueue_adl(ctx, liq_side, q_close_q, 0)`, and requires the remaining nonzero position to be maintenance healthy after the step.
 
