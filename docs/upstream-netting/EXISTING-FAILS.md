@@ -26,3 +26,9 @@ test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
 
 passed/failed totals:
 835 passed, 17 failed
+
+## Base measurement (attempt 2, 696fd81b)
+Ran the five affected test files on base (multi_asset_portfolio_cross_edge, gh292_att_d, gh292_locked_liquidation_recovery, liquidations_edge, gh292_att_bprime): 0 FAILED, all ok (output: base-existing-fail-binaries.txt).
+So the 17 failures above are REGRESSIONS introduced by the Stage A port (7d2e243d replacing R1 loss-domain handling), not pre-existing.
+They are existing tests and may not be edited, so Stage A is Blocked. Needs a decision (Stage B): keep R1 loss-domain/insurance routing around Toly's netting call, or accept Toly's numbers and rewrite those tests.
+Not run here: full suite counts (fuzz, fuzz+audit-scan) and Kani; e299_loss_provenance.rs not re-measured on base.
