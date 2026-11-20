@@ -1,0 +1,101 @@
+warning: variable does not need to be mutable
+     --> src/v16.rs:21426:13
+      |
+21426 |         let mut ledger = account.header.close_progress.try_to_runtime()?;
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `kani_trade_fee_atoms_per_side` is never used
+     --> src/v16.rs:29133:8
+      |
+29133 | pub fn kani_trade_fee_atoms_per_side(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scaled_adl_delta_fast` is never used
+     --> src/v16.rs:29472:4
+      |
+29472 | fn scaled_adl_delta_fast(abs_basis_q: u128, a_basis: u128, then: i128, now: i128) -> Option<i128> {
+      |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `percolator` (lib) generated 3 warnings (run `cargo fix --lib -p percolator` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.02s
+
+running 7 tests
+test reversal_leaves_provider_fronted_twin_backing_with_the_provider ... FAILED
+test a_payment_stranded_by_a_reversal_follows_the_regain ... FAILED
+test losses_first_settled_past_the_backing_horizon_still_close ... FAILED
+test net_payments_after_a_partial_reversal_stay_with_the_remaining_claims ... FAILED
+test more_stranded_payments_than_one_call_places_wind_down_fairly ... FAILED
+test own_face_in_the_loss_domain_is_not_burned_at_a_stale_rate ... FAILED
+test stranded_payments_are_placed_a_bounded_number_per_call ... FAILED
+
+failures:
+
+---- reversal_leaves_provider_fronted_twin_backing_with_the_provider stdout ----
+
+thread 'reversal_leaves_provider_fronted_twin_backing_with_the_provider' (214971245) panicked at tests/v16_resolved_kf_loss_netting.rs:48:9:
+assertion `left == right` failed: close order [0, 1]
+  left: WindDown { provider_out: [40000000, 960000000], payouts: [1000000000000, 1000000000000], retired: 0, insurance: 0, vault_end: 0 }
+ right: WindDown { provider_out: [0, 1000000000], payouts: [1000000000000, 1000000000000], retired: 0, insurance: 0, vault_end: 0 }
+
+---- a_payment_stranded_by_a_reversal_follows_the_regain stdout ----
+
+thread 'a_payment_stranded_by_a_reversal_follows_the_regain' (214971240) panicked at tests/v16_resolved_kf_loss_netting.rs:48:9:
+assertion `left == right` failed: close order [0, 1]
+  left: WindDown { provider_out: [980000000, 20000000], payouts: [1000000000000, 1000000000000], retired: 0, insurance: 0, vault_end: 0 }
+ right: WindDown { provider_out: [1000000000, 0], payouts: [1000000000000, 1000000000000], retired: 0, insurance: 0, vault_end: 0 }
+
+---- losses_first_settled_past_the_backing_horizon_still_close stdout ----
+
+thread 'losses_first_settled_past_the_backing_horizon_still_close' (214971241) panicked at tests/v16_resolved_kf_loss_netting.rs:212:9:
+assertion `left == right` failed: order [0, 1, 2]
+  left: [999973333333, 999920000000, 1000080000000]
+ right: [1000000000000, 999920000000, 1000080000000]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- net_payments_after_a_partial_reversal_stay_with_the_remaining_claims stdout ----
+
+thread 'net_payments_after_a_partial_reversal_stay_with_the_remaining_claims' (214971243) panicked at tests/v16_resolved_kf_loss_netting.rs:48:9:
+assertion `left == right` failed: close order [0, 1, 2, 3]
+  left: WindDown { provider_out: [17000000, 1983000000], payouts: [1000024000000, 1000027000000, 999976000000, 999973000000], retired: 0, insurance: 0, vault_end: 0 }
+ right: WindDown { provider_out: [0, 2000000000], payouts: [1000024000000, 1000027000000, 999976000000, 999973000000], retired: 0, insurance: 0, vault_end: 0 }
+
+---- more_stranded_payments_than_one_call_places_wind_down_fairly stdout ----
+
+thread 'more_stranded_payments_than_one_call_places_wind_down_fairly' (214971242) panicked at tests/v16_resolved_kf_loss_netting.rs:48:9:
+assertion `left == right` failed: close order [0, 1]
+  left: WindDown { provider_out: [980000000, 20000000, 980000000, 20000000, 980000000, 20000000, 980000000, 20000000, 980000000, 20000000], payouts: [1000000000000, 1000000000000], retired: 0, insurance: 0, vault_end: 0 }
+ right: WindDown { provider_out: [1000000000, 0, 1000000000, 0, 1000000000, 0, 1000000000, 0, 1000000000, 0], payouts: [1000000000000, 1000000000000], retired: 0, insurance: 0, vault_end: 0 }
+
+---- own_face_in_the_loss_domain_is_not_burned_at_a_stale_rate stdout ----
+
+thread 'own_face_in_the_loss_domain_is_not_burned_at_a_stale_rate' (214971244) panicked at tests/v16_resolved_kf_loss_netting.rs:48:9:
+assertion `left == right` failed: close order [1, 2, 0]
+  left: WindDown { provider_out: [13333334, 0], payouts: [999986666666, 999920000000, 1000080000000], retired: 0, insurance: 0, vault_end: 0 }
+ right: WindDown { provider_out: [0, 0], payouts: [1000000000000, 999920000000, 1000080000000], retired: 0, insurance: 0, vault_end: 0 }
+
+---- stranded_payments_are_placed_a_bounded_number_per_call stdout ----
+
+thread 'stranded_payments_are_placed_a_bounded_number_per_call' (214971246) panicked at tests/v16_resolved_kf_loss_netting.rs:293:9:
+assertion `left == right` failed: call 1 places the bound's worth
+  left: 9
+ right: 5
+
+
+failures:
+    a_payment_stranded_by_a_reversal_follows_the_regain
+    losses_first_settled_past_the_backing_horizon_still_close
+    more_stranded_payments_than_one_call_places_wind_down_fairly
+    net_payments_after_a_partial_reversal_stay_with_the_remaining_claims
+    own_face_in_the_loss_domain_is_not_burned_at_a_stale_rate
+    reversal_leaves_provider_fronted_twin_backing_with_the_provider
+    stranded_payments_are_placed_a_bounded_number_per_call
+
+test result: FAILED. 0 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--test v16_resolved_kf_loss_netting`

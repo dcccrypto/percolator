@@ -26166,6 +26166,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?;
             converted = (credited_num / BOUND_SCALE)
                 .min(self.source_credit_available_backing_num(source_domain)? / BOUND_SCALE);
+            // upstream 8e23d98b: a claim whose share is partly pledged to a co-claimant's lien
+            // waits for the release, as a zero conversion does below. Nothing has been
+            // mutated on this path yet.
+            if converted != 0
+                && self.source_claim_share_is_partly_pledged(
+                    source_domain,
+                    source,
+                    claim_num,
+                    converted,
+                )?
+            {
+                return Err(V16Error::LockActive);
+            }
             if converted != 0 {
                 let consumption = self.consume_source_domain_credit_for_effective_not_atomic(
                     source_domain,
@@ -26239,6 +26252,53 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         account.compact_source_domains();
         Ok(true)
+    }
+
+    /// upstream 8e23d98b. Whether a claim that converts to `converted` whole atoms now
+    /// would convert to more with every lien on the domain's backing released, in a
+    /// bucket that can still change.
+    ///
+    /// A lien takes its backing out of the available backing. In a domain whose backing
+    /// does not cover its claims, the unliened face then shares what is left, at a lower
+    /// rate than the domain's backing over its claims. Resolved close releases every lien
+    /// before its holder realizes, so that lower rate lasts only until the lien holders
+    /// have been closed. A claim realized in between is paid from the unpledged remainder
+    /// alone, and the rest of its share goes to the lien holders when they realize: who is
+    /// closed first decides who is paid. Such a claim waits (`LockActive`, as the
+    /// zero-conversion wait). The wait ends once every lien holder has been closed (its
+    /// first close step releases its liens) or once the bucket lapses or is impaired,
+    /// after which no release can change what the claim gets.
+    fn source_claim_share_is_partly_pledged(
+        &self,
+        domain: usize,
+        source: PortfolioSourceDomainV16Account,
+        claim_num: u128,
+        converted: u128,
+    ) -> V16Result<bool> {
+        if source.source_claim_impaired_num.get() != 0
+            || matches!(
+                self.backing_bucket_for_domain(domain)?.status,
+                BackingBucketStatusV16::Expired | BackingBucketStatusV16::Impaired
+            )
+        {
+            return Ok(false);
+        }
+        let mut unpledged = self.source_credit_for_domain(domain)?;
+        if unpledged.valid_liened_backing_num == 0 && unpledged.valid_liened_insurance_num == 0 {
+            return Ok(false);
+        }
+        unpledged.valid_liened_backing_num = 0;
+        unpledged.valid_liened_insurance_num = 0;
+        unpledged.credit_rate_num = V16Core::expected_source_credit_rate_num_for_state(unpledged)?;
+        let credited_num = U256::from_u128(claim_num)
+            .checked_mul(U256::from_u128(unpledged.credit_rate_num))
+            .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let unpledged_converted = (credited_num / BOUND_SCALE).min(
+            V16Core::available_backing_num_for_source_credit_state(unpledged)? / BOUND_SCALE,
+        );
+        Ok(converted < unpledged_converted)
     }
 
     fn source_domain_terminal_for_haircut_demote(
@@ -26530,6 +26590,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
         }
+        let mut lien_released = false;
         if let Some(preparation) =
             self.prepare_one_source_domain_for_resolved_close_not_atomic(account)?
         {
@@ -26538,6 +26599,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             {
                 return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
             }
+            lien_released = true;
         }
         if self
             .expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic(
@@ -26578,7 +26640,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
-        if self.realize_one_source_domain_for_resolved_close_not_atomic(account)?
+        // A realization that waits (`LockActive`, e.g. for a co-claimant's lien, upstream
+        // 8e23d98b) must not roll back the lien release this call already made: the other
+        // claims on the domain wait for that release (upstream #251 rule, release half).
+        let realized = match self.realize_one_source_domain_for_resolved_close_not_atomic(account)
+        {
+            Err(V16Error::LockActive) if lien_released => {
+                self.validate_shape()?;
+                account.validate_with_market(&self.as_view())?;
+                return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+            }
+            r => r?,
+        };
+        if realized
             && Self::account_has_source_claims(&account.as_view())?
         {
             self.validate_shape()?;
