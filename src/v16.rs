@@ -16980,7 +16980,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if remaining_loss != 0 {
                     let remaining_i128 =
                         i128::try_from(remaining_loss).map_err(|_| V16Error::ArithmeticOverflow)?;
-                    self.apply_signed_kf_delta_to_pnl(account, -remaining_i128, None)?;
+                    let _ = remaining_i128;
+                    self.apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(
+                        account,
+                        remaining_loss,
+                        Some(source_domain),
+                        Some(source_domain),
+                    )?;
                 }
                 let negative_after = account.header.pnl.get().min(0).unsigned_abs();
                 self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
