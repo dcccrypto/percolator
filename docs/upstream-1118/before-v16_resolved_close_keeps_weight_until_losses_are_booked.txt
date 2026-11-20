@@ -1,0 +1,68 @@
+warning: variable does not need to be mutable
+     --> src/v16.rs:21426:13
+      |
+21426 |         let mut ledger = account.header.close_progress.try_to_runtime()?;
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `kani_trade_fee_atoms_per_side` is never used
+     --> src/v16.rs:29133:8
+      |
+29133 | pub fn kani_trade_fee_atoms_per_side(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scaled_adl_delta_fast` is never used
+     --> src/v16.rs:29472:4
+      |
+29472 | fn scaled_adl_delta_fast(abs_basis_q: u128, a_basis: u128, then: i128, now: i128) -> Option<i128> {
+      |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `percolator` (lib) generated 3 warnings (run `cargo fix --lib -p percolator` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.35s
+
+running 4 tests
+test a_winner_keeps_its_leg_until_the_loser_opposite_has_settled ... FAILED
+test the_public_crank_reports_no_progress_for_a_close_that_only_waits ... FAILED
+test a_solvent_pair_is_paid_exactly_in_either_order ... FAILED
+test a_bankrupt_shortfall_is_shared_by_weight_in_every_close_order ... FAILED
+
+failures:
+
+---- a_winner_keeps_its_leg_until_the_loser_opposite_has_settled stdout ----
+
+thread 'a_winner_keeps_its_leg_until_the_loser_opposite_has_settled' (214968557) panicked at tests/v16_resolved_close_keeps_weight_until_losses_are_booked.rs:167:5:
+W's leg waits for T
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- the_public_crank_reports_no_progress_for_a_close_that_only_waits stdout ----
+
+thread 'the_public_crank_reports_no_progress_for_a_close_that_only_waits' (214968558) panicked at tests/v16_resolved_close_keeps_weight_until_losses_are_booked.rs:212:5:
+assertion failed: attached(&w, W)
+
+---- a_solvent_pair_is_paid_exactly_in_either_order stdout ----
+
+thread 'a_solvent_pair_is_paid_exactly_in_either_order' (214968556) panicked at tests/v16_resolved_close_keeps_weight_until_losses_are_booked.rs:251:5:
+assertion `left == right` failed
+  left: Ok(Closed { payout: 999000000 })
+ right: Ok(ProgressOnly)
+
+---- a_bankrupt_shortfall_is_shared_by_weight_in_every_close_order stdout ----
+
+thread 'a_bankrupt_shortfall_is_shared_by_weight_in_every_close_order' (214968555) panicked at tests/v16_resolved_close_keeps_weight_until_losses_are_booked.rs:133:13:
+close order [1, 0, 2]: WindDown { provider_out: [1, 0], payouts: [0, 1129999999, 21000000], retired: 0, insurance: 0, vault_end: 0 }: account 1 is paid 1129999999 of 1100899101
+
+
+failures:
+    a_bankrupt_shortfall_is_shared_by_weight_in_every_close_order
+    a_solvent_pair_is_paid_exactly_in_either_order
+    a_winner_keeps_its_leg_until_the_loser_opposite_has_settled
+    the_public_crank_reports_no_progress_for_a_close_that_only_waits
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--test v16_resolved_close_keeps_weight_until_losses_are_booked`

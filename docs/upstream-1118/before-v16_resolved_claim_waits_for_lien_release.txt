@@ -1,0 +1,64 @@
+warning: variable does not need to be mutable
+     --> src/v16.rs:21426:13
+      |
+21426 |         let mut ledger = account.header.close_progress.try_to_runtime()?;
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `kani_trade_fee_atoms_per_side` is never used
+     --> src/v16.rs:29133:8
+      |
+29133 | pub fn kani_trade_fee_atoms_per_side(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scaled_adl_delta_fast` is never used
+     --> src/v16.rs:29472:4
+      |
+29472 | fn scaled_adl_delta_fast(abs_basis_q: u128, a_basis: u128, then: i128, now: i128) -> Option<i128> {
+      |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `percolator` (lib) generated 3 warnings (run `cargo fix --lib -p percolator` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.25s
+
+running 4 tests
+test a_waiting_claim_is_released_when_the_bucket_lapses ... FAILED
+test a_claim_waits_exactly_until_the_lien_is_released ... FAILED
+test without_a_lien_nothing_waits ... ok
+test claim_is_paid_its_share_whether_or_not_the_lien_holder_closed_first ... FAILED
+
+failures:
+
+---- a_waiting_claim_is_released_when_the_bucket_lapses stdout ----
+
+thread 'a_waiting_claim_is_released_when_the_bucket_lapses' (214969724) panicked at tests/v16_resolved_claim_waits_for_lien_release.rs:368:5:
+assertion `left == right` failed
+  left: Ok(Closed { payout: 1000128 })
+ right: Err(LockActive)
+
+---- a_claim_waits_exactly_until_the_lien_is_released stdout ----
+
+thread 'a_claim_waits_exactly_until_the_lien_is_released' (214969723) panicked at tests/v16_resolved_claim_waits_for_lien_release.rs:345:9:
+assertion `left == right` failed
+  left: Ok(Closed { payout: 1000128 })
+ right: Err(LockActive)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- claim_is_paid_its_share_whether_or_not_the_lien_holder_closed_first stdout ----
+
+thread 'claim_is_paid_its_share_whether_or_not_the_lien_holder_closed_first' (214969725) panicked at tests/v16_resolved_claim_waits_for_lien_release.rs:322:13:
+lien 4791, close order [2, 1, 4, 0, 3]: Y and X must be paid 12_123 and 1_003_077; paid as [Z, Y, X, H, S]: [0, 15072, 1000128, 995000, 1024000]
+
+
+failures:
+    a_claim_waits_exactly_until_the_lien_is_released
+    a_waiting_claim_is_released_when_the_bucket_lapses
+    claim_is_paid_its_share_whether_or_not_the_lien_holder_closed_first
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+error: test failed, to rerun pass `--test v16_resolved_claim_waits_for_lien_release`
