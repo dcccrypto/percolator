@@ -26590,6 +26590,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
         }
+        let mut lien_released = false;
         if let Some(preparation) =
             self.prepare_one_source_domain_for_resolved_close_not_atomic(account)?
         {
@@ -26598,6 +26599,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             {
                 return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
             }
+            lien_released = true;
         }
         if self
             .expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic(
@@ -26638,7 +26640,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
-        if self.realize_one_source_domain_for_resolved_close_not_atomic(account)?
+        // A realization that waits (`LockActive`, e.g. for a co-claimant's lien, upstream
+        // 8e23d98b) must not roll back the lien release this call already made: the other
+        // claims on the domain wait for that release (upstream #251 rule, release half).
+        let realized = match self.realize_one_source_domain_for_resolved_close_not_atomic(account)
+        {
+            Err(V16Error::LockActive) if lien_released => {
+                self.validate_shape()?;
+                account.validate_with_market(&self.as_view())?;
+                return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+            }
+            r => r?,
+        };
+        if realized
             && Self::account_has_source_claims(&account.as_view())?
         {
             self.validate_shape()?;

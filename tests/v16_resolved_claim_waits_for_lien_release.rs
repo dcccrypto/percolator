@@ -407,3 +407,72 @@ fn without_a_lien_nothing_waits() {
         assert!(pro_rata(&w), "close order {order:?}: {:?}", w.paid);
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Fork-only test (not upstream): the fork has no #251 commit-progress handling, so the wait
+// above returns `LockActive` and would roll back a lien release made earlier in the same
+// close. With two lien holders on one domain, each holder's close released its own last
+// lien, then waited on the other holder's lien and rolled the release back: neither lien
+// could ever be released before the bucket lapsed.
+
+const Y2: usize = 5;
+
+/// As `under_backed_domain_with_a_lien`, but the 5_000 of domain 2 are owed to two
+/// winners, Y and Y2 (5_100 of capital and 2_500 each), and each pledges 980 of it to
+/// carry 640 units. Domain 2 ends with 5_000 of backing, 1_960 pledged, for claims of
+/// 2_500 (Y), 2_500 (Y2) and 8_000 (X).
+fn under_backed_domain_with_two_liens() -> World {
+    let mut w = World::new(
+        2,
+        &[24_000, 5_100, 1_000_000, 1_000_000, 1_000_000, 5_100],
+        margin_10_percent,
+    );
+    w.trade(1, H, Y, 500 * UNIT, 100);
+    w.trade(1, H, Y2, 500 * UNIT, 100);
+    w.mark(&[95, 95]);
+    w.refresh(H);
+    w.refresh(Y);
+    w.refresh(Y2);
+    assert_eq!(w.domain(2), (5_000, 5_000));
+    for y in [Y, Y2] {
+        w.trade(1, H, y, 140 * UNIT, 95);
+    }
+    for y in [Y, Y2] {
+        w.trade(1, y, H, 640 * UNIT, 95);
+    }
+    assert_eq!(w.source(2).valid_liened_backing_num, 1_960 * BOUND_SCALE);
+    w.trade(0, Z, S, 1_500 * UNIT, 95);
+    w.trade(1, Z, X, 1_000 * UNIT, 95);
+    for marks in [[91, 91], [87, 87], [83, 87], [79, 87]] {
+        w.mark(&marks);
+    }
+    w.resolve();
+    w.settle_positions(&[X, S, Z]);
+    assert_eq!(w.domain(2), (13_000, 5_000));
+    assert_eq!(w.source(2).valid_liened_backing_num, 1_960 * BOUND_SCALE);
+    w
+}
+
+/// Each lien holder's first close releases its lien and commits the release, even though
+/// its own claim then waits for the other holder's lien. All three are paid pro rata in
+/// the resolved slot: 5_000 * 2_500 / 13_000 = 961.5 each for Y and Y2, 3_076.9 for X.
+#[test]
+fn a_lien_release_commits_when_the_holder_then_waits_for_another_lien() {
+    let mut w = under_backed_domain_with_two_liens();
+    let before = w.source(2).valid_liened_backing_num;
+    assert_eq!(
+        w.on(Y, |m, a| m.close_resolved_account_not_atomic(a, 0)),
+        Ok(ResolvedCloseOutcomeV16::ProgressOnly),
+        "Y's close releases Y's lien and reports progress"
+    );
+    assert_eq!(
+        w.source(2).valid_liened_backing_num,
+        before - 980 * BOUND_SCALE,
+        "Y's release is committed"
+    );
+    assert_eq!(w.paid[Y], 0, "Y waits for Y2's lien");
+    let w = w.sweep(&[Y, Y2, X, S, Z, H]);
+    for (i, share) in [(Y, 5_100 + 961), (Y2, 5_100 + 961), (X, 1_000_000 + 3_077)] {
+        assert!(w.paid[i].abs_diff(share) <= 1, "account {i}: {:?}", w.paid);
+    }
+}
