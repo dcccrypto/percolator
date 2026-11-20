@@ -65,11 +65,11 @@ After a679c1b9: 18/0 and 9/0. The revert did not change any other number below.
 | hedged_refresh_fee_loss | not measured | not measured | 9/0 |
 | v16_kf_loss_domain_attribution (Toly, 487b49c0) | 9/2 (3e5970f3, `before.txt`) | not measured | **11/0** |
 | v16_kf_loss_same_domain_face (Toly, 6666a2ab) | 5/7 (3e5970f3, `before.txt`) | not measured | **12/0** |
-| v22_r1_deep_book | not measured here | not measured | **1/2** |
-| v22_r1_i457 | not measured here | not measured | **4/1** |
-| v22_r1_multi_claimant | not measured here | not measured | **2/2** |
-| v22_r1_reversal | not measured here | not measured | **21/1** (1 ignored) |
-| v22_r1_settle_order | not measured here | not measured | **4/4** |
+| v22_r1_deep_book | not measured here | 1/2 | **1/2** |
+| v22_r1_i457 | not measured here | 3/2 | **4/1** |
+| v22_r1_multi_claimant | not measured here | 1/3 | **2/2** |
+| v22_r1_reversal | not measured here | 21/1 | **21/1** (1 ignored) |
+| v22_r1_settle_order | not measured here | 1/7 | **4/4** |
 
 (passed/failed. The R1 numbers are identical on 736c0239 and a679c1b9.)
 
@@ -93,8 +93,12 @@ produce. One of them (`rule_a_...`) pins the fork-only S10 provider-principal le
 | v22_r1_settle_order::r1_liened_victim_is_order_independent_and_pinned | counterparty >= pre-R1 worst order | >= pre-R1 worst | below (message only) |
 | v22_r1_settle_order::r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1 | pinned neutral-rate result 330000 5 200x14 | (-553,486, -518,502) | (-581,887, -518,502) |
 
-Not measured (time): whether these 10 already failed at 99b1f870 / the Stage A head (the attribution run was stopped
-to make room for the fix-B run). Not run here: full suite, fuzz, Kani, build-sbf (left to the merge gate).
+Attribution (review-loop round 2, S6): on 99b1f870, before this run's ports, the same five R1 files fail **15** tests
+(`stageB1-99b1f870-r1.txt`): the 10 above plus `i457_resolved_close_alone_repairs_nothing`,
+`r1_multi_claimant_solvent_losers_are_settle_order_independent`, `r1_resolved_close_is_unchanged`,
+`r1_netting_is_independent_of_which_account_is_settled_first`, `r1_effective_equity_is_cadence_and_order_invariant`.
+The i457 close-order payouts and the reversal `rule_a` numbers are identical there, so no R1 failure was introduced by
+6666a2ab / 487b49c0 / a679c1b9; the ports fixed 5. The 10 come from the Stage A netting line (7d2e243d...) replacing R1. Not run here: full suite, fuzz, Kani, build-sbf (left to the merge gate).
 
 ## 5. Outcome
 
