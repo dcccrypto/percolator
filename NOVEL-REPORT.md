@@ -1,7 +1,7 @@
 # NOVEL-REPORT: checked-exit certificates over rustc MIR
 
 Session `e2e-lean-fable-1121`, branch `agent/J-20261121-ENG-E2E-PROOFS-NOVEL`, 2026-11-21,
-04:42–05:55 GMT. A parallel track to the Aristotle work, not an implementation of it.
+04:42–05:50 GMT. A parallel track to the Aristotle work, not an implementation of it.
 
 ## 1. Result in short
 
@@ -230,7 +230,7 @@ A revision bump therefore costs one run of the script, not a re-proof by hand.
 
 | | Before | After | Used by this session |
 |---|---|---|---|
-| Aristotle free credits | 244 (04:41:01Z, shared budget file) | 202 (05:24:44Z, `aristo.sh balance`) | **0**: no job was submitted by this session; the change is not ours |
+| Aristotle free credits | 244 (04:41:01Z, shared budget file) | 202 (05:24:44Z), then 133 (05:49:36Z), both from `aristo.sh balance` | **0**: no job was submitted by this session; the changes are not ours |
 
 Recorded in `/Users/khubair/agent-worker/aristotle-budget.md`. Project `eb31e0d7` was not touched.
 Kani: not run. The six callee contracts T15.header needs must hold for every state; the existing
@@ -284,4 +284,4 @@ python3 proofs/novel/mirflow/audit_regression.py <src> <scratch> nightly-2026-07
 
 Files: `proofs/novel/README.md`. Progress notes with times: `proofs/novel/NOTES.md`.
 Commits on the branch: `a8c79cbd` (method doc), `13da3407`, `89124830`, `055ae9ab`, `e4ce2a80`,
-`ef66b6a7`, and the commit that adds this report. Nothing was pushed anywhere else; no PR, no post.
+`ef66b6a7`, `63a46b76` (this report), and one following commit for its last edits. Nothing was pushed anywhere else; no PR, no post.
