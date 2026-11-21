@@ -1062,6 +1062,18 @@ understate the quantity an ADL'd leg still economically carries, and every consu
 OI aggregation, liquidation sizing, full-close detection) would then size against a position smaller
 than the one that exists. Up is the conservative direction here.
 
+```text
+```
+
+The exact bilateral trade OI after-values are:
+
+```text
+OI_long_after  = OI_eff_long  - old_long_a  - old_long_b  + new_long_a  + new_long_b
+OI_short_after = OI_eff_short - old_short_a - old_short_b + new_short_a + new_short_b
+```
+
+They MUST be used for both gating and writeback.
+
 ### 5.1a Side A index
 
 (Ported from upstream c030aa40, percolator-prog#449.)
@@ -1085,7 +1097,7 @@ current-epoch basis keeps its index, so a haircut side still shows
 `A_side != ADL_ONE` until it resets. The index MUST NOT be obtained by scaling
 its previous value: the rounding of each scaling would accumulate.
 
-For a side with `R = raw_basis_sum_side <= MAX_OI_SIDE_Q_PER_ASSET` and
+For a side with `R = raw_basis_sum_side <= MAX_OI_SIDE_Q` and
 `OI = OI_eff_side > 0` this gives, after every transition and whatever the
 history:
 
@@ -1119,7 +1131,7 @@ basis from `raw_basis_sum_side`. `begin_full_drain_reset` zeroes
 `raw_basis_sum_side` and sets `A_side = ADL_ONE`.
 
 Upstream bounds `R` through a trade side-OI cap; this fork checks
-`MAX_OI_SIDE_Q_PER_ASSET` only in the audit scan, so the bounds above assume it.
+`MAX_OI_SIDE_Q` only in the audit scan, so the bounds above assume it.
 A side whose raw basis exceeds `ADL_ONE * OI_eff_side` is held at `A_side = 1`.
 
 Because `A_side` is re-derived on same-side transitions, a leg's
@@ -1131,18 +1143,6 @@ conservative. Whenever a transition leaves `A_side` higher than it found it
 while the side holds raw basis beyond the leg that changed, `risk_epoch` MUST
 advance in the same transition. The incremental certificate after a single fill
 MUST be computed from the leg's `effective_pos_q` as stored after the fill.
-
-```text
-```
-
-The exact bilateral trade OI after-values are:
-
-```text
-OI_long_after  = OI_eff_long  - old_long_a  - old_long_b  + new_long_a  + new_long_b
-OI_short_after = OI_eff_short - old_short_a - old_short_b + new_short_a + new_short_b
-```
-
-They MUST be used for both gating and writeback.
 
 ### 5.2 Settlement of side effects
 
