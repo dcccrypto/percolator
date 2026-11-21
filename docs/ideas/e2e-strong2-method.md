@@ -1,7 +1,8 @@
 # e2e-strong2: guarded-clause certificates (value facts for the checked-exit method)
 
 Session `e2e-lean-strong-1121b`, branch `agent/J-20261121-ENG-E2E-PROOFS-STRONG2`, written
-2026-11-21 about 15:35 UTC, before any proof work of this session. Local Lean only; no Aristotle
+2026-11-21 about 15:05 UTC, before any proof work of this session (sections 1 to 6; section 7 was
+added at the end and says what changed). Local Lean only; no Aristotle
 job is submitted.
 
 ## 1. What is being attempted
@@ -148,3 +149,23 @@ payload across `?`.
 - Refutation search: either a committed failing-property test or an explicit "none found" with
   what was searched.
 - Every assumption listed in the theorem files and in `RESULT.md`.
+
+## 7. Addendum, written after the work (what was done differently)
+
+- 3.1 to 3.4 were done as planned (`proofs/strong2/lean/ClauseFlow/Core.lean`, `valflow/`).
+  `entails` got two rounds of unit propagation, and comparisons also rewrite existing clauses;
+  both are in the soundness proof.
+- Not planned, added during the work: **rule R9** (variant index of a plain crate enum, used to
+  state "the close returned `Closed`"), and **rule R10** (a read-set frame: which header fields
+  and whether slot contents each runtime check can read, so that a write to an unread region
+  keeps the check). R10 is a second trusted analysis (`valflow/readset.py`); it is what closes the
+  `[frame]` rows.
+- 3.5 gave witnesses, not a proof: see `tests/strong2_t15_progress_only_shape.rs` and
+  `proofs/strong2/T15-WORKLIST.md`.
+- 3.6 (Kani bridge) was not attempted. Reason found when read: under `cfg(kani)` the engine's
+  `validate_shape` also runs the full audit scan (`src/v16.rs:10063`), so a Kani harness cannot
+  evaluate the default-build header predicate through the engine's own function; a harness-side
+  copy of the predicate would be a model, not the engine text.
+- Risk 1 materialised as predicted: the independent audit found two holes in the assumption
+  scans and one latent hole in a pattern (`proofs/strong2/RULES.md`, section 7). None is
+  triggered by the engine text; all are fixed with regression tests.
