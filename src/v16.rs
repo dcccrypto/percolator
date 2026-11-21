@@ -31145,7 +31145,14 @@ mod attach_writer_cross_side_oi_tripwire_tests {
     /// pins that it is a scale at which an A-scaled contribution rounds apart
     /// from the untouched short side. Most scales do not, so do not reduce this
     /// to a round number without re-checking that test.
-    const A_LONG: u128 = 656_160_904_301_049;
+    ///
+    /// #449 (upstream c030aa40): a side's A index is now derived from its
+    /// totals, `floor(ADL_ONE * oi_eff / raw_basis_sum)`, so the fixture's A
+    /// must be one some raw-basis sum produces for `BALANCED_OI`. It is the
+    /// index of `LONG_RAW_BASIS_SUM` (the earlier 656_160_904_301_049 is the
+    /// index of no integer raw-basis sum for this OI) and still trips.
+    const A_LONG: u128 = 656_160_898_624_952;
+    const LONG_RAW_BASIS_SUM: u128 = 94_909_450;
     const BALANCED_OI: u128 = 62_275_870;
     const ATTACH_Q: u128 = 8_513_359;
 
@@ -31167,9 +31174,26 @@ mod attach_writer_cross_side_oi_tripwire_tests {
         asset.oi_eff_short_q = BALANCED_OI;
         asset.loss_weight_sum_long = loss_weight_for_basis(BALANCED_OI, A_LONG).unwrap();
         asset.loss_weight_sum_short = loss_weight_for_basis(BALANCED_OI, ADL_ONE).unwrap();
+        asset.raw_basis_sum_long_q = LONG_RAW_BASIS_SUM;
+        asset.raw_basis_sum_short_q = BALANCED_OI;
         asset.stored_pos_count_long = 1;
         asset.stored_pos_count_short = 1;
         asset
+    }
+
+    /// Re-derive both sides' A index from their totals, as the attach glue
+    /// does after the writer (`sync_side_adl_index`, #449).
+    fn sync_both_sides(asset: &mut AssetStateV16) {
+        *asset = V16Core::kernel_sync_side_adl_index(*asset, SideV16::Long).unwrap();
+        *asset = V16Core::kernel_sync_side_adl_index(*asset, SideV16::Short).unwrap();
+    }
+
+    /// The one-atom cross-side divergence an A-scaled writer would produce on
+    /// this fixture, with the long side's index re-derived so the side stays
+    /// coherent and only the cross-side equality is broken.
+    fn diverge_one_atom(asset: &mut AssetStateV16) {
+        asset.oi_eff_long_q += 1;
+        sync_both_sides(asset);
     }
 
     fn audit_scan(asset: AssetStateV16) -> V16Result<()> {
@@ -31195,6 +31219,7 @@ mod attach_writer_cross_side_oi_tripwire_tests {
         let w_short = loss_weight_for_basis(ATTACH_Q, a_short).unwrap();
         add_open_interest_for_new_position(asset, SideV16::Long, ATTACH_Q, w_long).unwrap();
         add_open_interest_for_new_position(asset, SideV16::Short, ATTACH_Q, w_short).unwrap();
+        sync_both_sides(asset);
     }
 
     /// The fixture must be a state the engine could actually be in, or every
@@ -31218,6 +31243,15 @@ mod attach_writer_cross_side_oi_tripwire_tests {
             telescoped_oi(asset.a_short, asset.loss_weight_sum_short),
             asset.oi_eff_short_q,
             "short side must satisfy oi_eff == floor(a * sum_w / SCALE)"
+        );
+        assert_eq!(
+            V16Core::kernel_side_adl_index(
+                asset.oi_eff_long_q,
+                asset.raw_basis_sum_long_q,
+                ADL_ONE
+            ),
+            Ok(asset.a_long),
+            "long side's A must be the index derived from its totals (#449)"
         );
         audit_scan(asset).expect("asymmetric `a` with balanced OI is a legal Live state");
     }
@@ -31304,7 +31338,7 @@ mod attach_writer_cross_side_oi_tripwire_tests {
     fn audit_scanner_rejects_a_one_atom_cross_side_divergence() {
         let mut asset = asset_with_asymmetric_a();
         attach_one_fill(&mut asset);
-        asset.oi_eff_long_q += 1;
+        diverge_one_atom(&mut asset);
 
         assert!(
             matches!(audit_scan(asset), Err(V16Error::InvalidConfig)),
@@ -31324,7 +31358,7 @@ mod attach_writer_cross_side_oi_tripwire_tests {
         // Same one-atom divergence the negative control rejects for an Active asset.
         let mut asset = asset_with_asymmetric_a();
         attach_one_fill(&mut asset);
-        asset.oi_eff_long_q += 1;
+        diverge_one_atom(&mut asset);
 
         // Active: still rejected (the #457 defense the negative control guards).
         assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
