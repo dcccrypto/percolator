@@ -29459,6 +29459,34 @@ fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     if a_basis == 0 {
         return Err(V16Error::InvalidLeg);
     }
+    // ceil(abs_basis_q * SOCIAL_WEIGHT_SCALE / a_basis). This runs on every active-leg decode
+    // (`validate_active_leg`), so it is hot. The U512 multiply + U256 divide costs ~1.8k CU on
+    // SBF; a validated basis is at most MAX_POSITION_ABS_Q (1e14) and SOCIAL_WEIGHT_SCALE is
+    // 1e15, so the product fits u128 and `mul_div_ceil_u128_or_wide` computes the same quotient
+    // natively (it falls back to the same U256 path when the product does not fit).
+    // An unscaled side (a_basis == SOCIAL_WEIGHT_SCALE, no ADL yet) divides exactly:
+    // ceil(x * S / S) == x for every x, and x always fits u128.
+    if a_basis == SOCIAL_WEIGHT_SCALE {
+        return Ok(abs_basis_q);
+    }
+    V16Core::mul_div_ceil_u128_or_wide(abs_basis_q, SOCIAL_WEIGHT_SCALE, a_basis)
+}
+
+/// Test hooks for `tests/loss_weight_u128_fast_path.rs`: the production loss weight, and the
+/// U512 computation it replaced (kept verbatim as the reference).
+#[doc(hidden)]
+pub fn loss_weight_for_basis_for_test(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
+    loss_weight_for_basis(abs_basis_q, a_basis)
+}
+
+#[doc(hidden)]
+pub fn loss_weight_for_basis_wide_reference_for_test(
+    abs_basis_q: u128,
+    a_basis: u128,
+) -> V16Result<u128> {
+    if a_basis == 0 {
+        return Err(V16Error::InvalidLeg);
+    }
     checked_mul_div_ceil_u256(
         U256::from_u128(abs_basis_q),
         U256::from_u128(SOCIAL_WEIGHT_SCALE),
@@ -29466,6 +29494,11 @@ fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     )
     .and_then(|v| v.try_into_u128())
     .ok_or(V16Error::ArithmeticOverflow)
+}
+
+#[cfg(kani)]
+pub fn kani_loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
+    loss_weight_for_basis(abs_basis_q, a_basis)
 }
 
 #[cfg(any(kani, feature = "fuzz"))]
