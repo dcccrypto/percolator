@@ -6,7 +6,8 @@ Run 1: seven properties (RC1–RC7) were proved on Harmonic's Aristotle about a 
 
 What run 1 does and does not say about the engine (details in [SLICE-DIFF.md](SLICE-DIFF.md) and in run 2):
 
-- RC1 is about engine functions copied byte for byte. RC2–RC7 are about the transcription.
+- Only `wide_math.rs` and the rate/claimable/receipt-payment helpers are the engine's own text, byte for byte; RC1 is about those. The three functions that move the payout (`create_resolved_payout_receipt_if_needed`, the close tail, the top-up) are rewritten over plain structs, with the engine's account views, byte decoding, the receipt-clearing call `clear_fully_diluted_resolved_receipt_if_terminal`, the snapshot initialisation, the validation calls and everything before the close tail removed. RC2–RC7 are about that transcription.
+- Nothing here shows the engine always reaches the close in a state that satisfies the invariant.
 - The transcription left out the engine's `clear_fully_diluted_resolved_receipt_if_terminal`. With that function present (run 2's slice), run 1's invariant is **not** kept by a close, and run 1's RC6 ("the same accounts for any order") is **false**: both are shown by running the engine text (`../ours2/check/`, example in `../ours2/project/aristotle/resolved_close_spec.md`). So RC2's conclusion "`Inv` holds after" and RC6 do not carry over to the engine word for word; RC4, RC5 and RC7 are built on the same `Inv`. Run 2 restates all of them with a list of cleared receipts.
 - RC3 (no `Err`) does not carry over to the engine (the transcription dropped engine checks that can fail).
 
