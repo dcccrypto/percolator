@@ -1,0 +1,87 @@
+21498 |         let mut ledger = account.header.close_progress.try_to_runtime()?;
+242 | impl U256 {
+245 |     pub const MAX: Self = Self([u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
+358 |     pub fn overflowing_add(self, rhs: U256) -> (U256, bool) {
+364 |     pub fn overflowing_sub(self, rhs: U256) -> (U256, bool) {
+372 |     pub fn saturating_add(self, rhs: U256) -> U256 {
+775 | impl I256 {
+776 |     pub const ZERO: Self = Self([0, 0, 0, 0]);
+777 |     pub const ONE: Self = Self([1, 0, 0, 0]);
+778 |     pub const MINUS_ONE: Self = Self([u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
+779 |     pub const MAX: Self = Self([u64::MAX, u64::MAX, u64::MAX, u64::MAX >> 1]);
+788 |     pub fn from_u128(v: u128) -> Self {
+792 |     pub fn try_into_i128(&self) -> Option<i128> {
+811 |     pub fn is_positive(&self) -> bool {
+815 |     pub fn signum(&self) -> i8 {
+844 |     pub fn checked_mul_i256(self, rhs: I256) -> Option<I256> {
+950 |     pub fn saturating_add(self, rhs: I256) -> I256 {
+980 |     pub fn from_raw_u256(v: U256) -> Self {
+985 |     pub fn from_u256_or_overflow(v: U256) -> Option<Self> {
+1366 | pub fn floor_div_signed_conservative(n: I256, d: U256) -> I256 {
+1456 | pub fn ceil_div_positive_checked(n: U256, d: U256) -> U256 {
+1488 | pub fn mul_div_ceil_u256(a: U256, b: U256, d: U256) -> U256 {
+1516 | pub fn saturating_mul_u256_u64(a: U256, b: u64) -> U256 {
+1524 | pub fn fee_debt_u128_checked(fee_credits: i128) -> u128 {
+1541 | pub fn wide_signed_mul_div_floor(abs_basis: U256, k_diff: I256, denominator: U256) -> I256 {
+1603 | pub fn mul_div_floor_u128(a: u128, b: u128, d: u128) -> u128 {
+1610 | pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {
+1727 | pub struct OverI128Magnitude;
+1731 | pub fn wide_mul_div_ceil_u128_or_over_i128max(
+1748 | pub fn saturating_mul_u128_u64(a: u128, b: u64) -> u128 {
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/strong2_t15_progress_only_shape.rs (tgt-strong2/debug/deps/strong2_t15_progress_only_shape-38cb679f8f77f2d5)
+running 8 tests
+test t15_account_control_at_26614_without_reserved_pnl ... build: audit-scan feature = true
+  [before] pnl=100 reserved_pnl=0 leg.b_snap=0 asset.b_long_num=1000000000000000001 loss_weight=1000000 b_stale_state=0
+  [before] validate_shape=Ok(()) validate_with_market=Ok(())
+  [after] pnl=90 reserved_pnl=0 leg.active=true leg.b_snap=10999999999999999 leg.b_stale=true asset.b_long_num=1000000000000000001 b_stale_state=1
+  [after] outcome=Ok(ProgressOnly)
+  [after] validate_shape=Ok(()) validate_with_market=Ok(())
+ok
+test t15_account_refuted_at_26614_reserved_pnl_above_pnl_after_b_chunk ... build: audit-scan feature = true
+  [before] pnl=100 reserved_pnl=100 leg.b_snap=0 asset.b_long_num=1000000000000000001 loss_weight=1000000 b_stale_state=0
+  [before] validate_shape=Ok(()) validate_with_market=Ok(())
+  [after] pnl=90 reserved_pnl=100 leg.active=true leg.b_snap=10999999999999999 leg.b_stale=true asset.b_long_num=1000000000000000001 b_stale_state=1
+  [after] outcome=Err(InvalidLeg)
+  [after] validate_shape=Ok(()) validate_with_market=Err(InvalidLeg)
+  audit-scan build: no deployed-predicate claim is made from this run
+ok
+test t15_header_control_without_fee_stamp_the_call_is_rejected ... build: audit-scan feature = true
+  last_fee_slot(before)=0 resolved_slot=3 shape_before=Err(InvalidConfig) acct_before=Ok(()) outcome=Err(InvalidConfig) shape_after=Err(InvalidConfig)
+ok
+test t15_header_control_without_tight_source_claim_total_shape_holds ... build: audit-scan feature = true
+  shape_before=Ok(()) outcome=Ok(ProgressOnly) shape_after=Ok(())
+ok
+test t15_header_refuted_progress_only_26631_bound_below_source_claim_total ... build: audit-scan feature = true; assets = 2
+  [before] vault=2000000 c_tot=2000000 insurance=0 pnl_pos_tot=100000 pnl_matured_pos_tot=0 pnl_pos_bound_tot=100000 pnl_pos_bound_tot_num=100000000000000000 source_claim_bound_total_num=100000000000000000 negative_pnl_account_count=0 resolved_payout_blocker_count=6
+  [before] account pnl=100000 capital=1000000 reserved_pnl=0 last_fee_slot=5 resolved_slot=5 bitmap_empty=false
+  [before] validate_shape=Err(InvalidConfig) validate_with_market=Ok(())
+  [after] vault=2000000 c_tot=2000000 insurance=0 pnl_pos_tot=70225 pnl_matured_pos_tot=0 pnl_pos_bound_tot=70225 pnl_pos_bound_tot_num=70225000000000000 source_claim_bound_total_num=100000000000000000 negative_pnl_account_count=0 resolved_payout_blocker_count=5
+  [after] account pnl=70225 capital=1000000 reserved_pnl=0 bitmap_empty=false b_stale_state=0 stale_state=0
+  [after] outcome=Err(InvalidConfig)
+  [after] validate_shape=Err(InvalidConfig) validate_with_market=Ok(())
+  audit-scan build: no deployed-predicate claim is made from this run
+ok
+test t15_header_refuted_progress_only_26634_bound_below_source_claim_total ... build: audit-scan feature = true; assets = 1
+  [before] vault=2000000 c_tot=2000000 insurance=0 pnl_pos_tot=100000 pnl_matured_pos_tot=0 pnl_pos_bound_tot=100000 pnl_pos_bound_tot_num=100000000000000000 source_claim_bound_total_num=100000000000000000 negative_pnl_account_count=0 resolved_payout_blocker_count=4
+  [before] account pnl=100000 capital=1000000 reserved_pnl=0 last_fee_slot=3 resolved_slot=3 bitmap_empty=false
+  [before] validate_shape=Err(InvalidConfig) validate_with_market=Ok(())
+  [after] vault=2000000 c_tot=2000000 insurance=0 pnl_pos_tot=70225 pnl_matured_pos_tot=0 pnl_pos_bound_tot=70225 pnl_pos_bound_tot_num=70225000000000000 source_claim_bound_total_num=100000000000000000 negative_pnl_account_count=0 resolved_payout_blocker_count=3
+  [after] account pnl=70225 capital=1000000 reserved_pnl=0 bitmap_empty=false b_stale_state=0 stale_state=0
+  [after] outcome=Err(InvalidConfig)
+  [after] validate_shape=Err(InvalidConfig) validate_with_market=Ok(())
+  audit-scan build: no deployed-predicate claim is made from this run
+ok
+test t15_header_refuted_progress_only_26634_with_matching_slot_claim ... build: audit-scan feature = true; assets = 1
+  slot poke: slot0.source_credit_long.{positive_claim_bound_num,exact_positive_claim_num} = 100000000000000000
+  [before] vault=2000000 c_tot=2000000 insurance=0 pnl_pos_tot=100000 pnl_matured_pos_tot=0 pnl_pos_bound_tot=100000 pnl_pos_bound_tot_num=100000000000000000 source_claim_bound_total_num=100000000000000000 negative_pnl_account_count=0 resolved_payout_blocker_count=4
+  [before] account pnl=100000 capital=1000000 reserved_pnl=0 last_fee_slot=3 resolved_slot=3 bitmap_empty=false
+  [before] validate_shape=Err(InvalidConfig) validate_with_market=Ok(())
+  [after] vault=2000000 c_tot=2000000 insurance=0 pnl_pos_tot=70225 pnl_matured_pos_tot=0 pnl_pos_bound_tot=70225 pnl_pos_bound_tot_num=70225000000000000 source_claim_bound_total_num=100000000000000000 negative_pnl_account_count=0 resolved_payout_blocker_count=3
+  [after] account pnl=70225 capital=1000000 reserved_pnl=0 bitmap_empty=false b_stale_state=0 stale_state=0
+  [after] outcome=Err(InvalidConfig)
+  [after] validate_shape=Err(InvalidConfig) validate_with_market=Ok(())
+  audit-scan build: no deployed-predicate claim is made from this run
+ok
+test t15_random_search ... ignored
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s

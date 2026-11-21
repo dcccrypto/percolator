@@ -1,0 +1,64 @@
+running 8 tests
+test t15_account_control_at_26614_without_reserved_pnl ... build: audit-scan feature = false
+  [before] pnl=100 reserved_pnl=0 leg.b_snap=0 asset.b_long_num=1000000000000000001 loss_weight=1000000 b_stale_state=0
+  [before] validate_shape=Ok(()) validate_with_market=Ok(())
+  [after] pnl=90 reserved_pnl=0 leg.active=true leg.b_snap=10999999999999999 leg.b_stale=true asset.b_long_num=1000000000000000001 b_stale_state=1
+  [after] outcome=Ok(ProgressOnly)
+  [after] validate_shape=Ok(()) validate_with_market=Ok(())
+ok
+test t15_account_refuted_at_26614_reserved_pnl_above_pnl_after_b_chunk ... build: audit-scan feature = false
+  [before] pnl=100 reserved_pnl=100 leg.b_snap=0 asset.b_long_num=1000000000000000001 loss_weight=1000000 b_stale_state=0
+  [before] validate_shape=Ok(()) validate_with_market=Ok(())
+  [after] pnl=90 reserved_pnl=100 leg.active=true leg.b_snap=10999999999999999 leg.b_stale=true asset.b_long_num=1000000000000000001 b_stale_state=1
+  [after] outcome=Ok(ProgressOnly)
+  [after] validate_shape=Ok(()) validate_with_market=Err(InvalidLeg)
+ok
+test t15_header_control_without_fee_stamp_the_call_is_rejected ... build: audit-scan feature = false
+  last_fee_slot(before)=0 resolved_slot=3 shape_before=Ok(()) acct_before=Ok(()) outcome=Err(InvalidConfig) shape_after=Err(InvalidConfig)
+ok
+test t15_header_control_without_tight_source_claim_total_shape_holds ... build: audit-scan feature = false
+  shape_before=Ok(()) outcome=Ok(ProgressOnly) shape_after=Ok(())
+ok
+test t15_header_refuted_progress_only_26631_bound_below_source_claim_total ... build: audit-scan feature = false; assets = 2
+  [before] vault=2000000 c_tot=2000000 insurance=0 pnl_pos_tot=100000 pnl_matured_pos_tot=0 pnl_pos_bound_tot=100000 pnl_pos_bound_tot_num=100000000000000000 source_claim_bound_total_num=100000000000000000 negative_pnl_account_count=0 resolved_payout_blocker_count=6
+  [before] account pnl=100000 capital=1000000 reserved_pnl=0 last_fee_slot=5 resolved_slot=5 bitmap_empty=false
+  [before] validate_shape=Ok(()) validate_with_market=Ok(())
+  [after] vault=2000000 c_tot=2000000 insurance=0 pnl_pos_tot=70225 pnl_matured_pos_tot=0 pnl_pos_bound_tot=70225 pnl_pos_bound_tot_num=70225000000000000 source_claim_bound_total_num=100000000000000000 negative_pnl_account_count=0 resolved_payout_blocker_count=4
+  [after] account pnl=70225 capital=1000000 reserved_pnl=0 bitmap_empty=false b_stale_state=0 stale_state=0
+  [after] outcome=Ok(ProgressOnly)
+  [after] validate_shape=Err(InvalidConfig) validate_with_market=Ok(())
+  return taken: src/v16.rs:26631
+ok
+test t15_header_refuted_progress_only_26634_bound_below_source_claim_total ... build: audit-scan feature = false; assets = 1
+  [before] vault=2000000 c_tot=2000000 insurance=0 pnl_pos_tot=100000 pnl_matured_pos_tot=0 pnl_pos_bound_tot=100000 pnl_pos_bound_tot_num=100000000000000000 source_claim_bound_total_num=100000000000000000 negative_pnl_account_count=0 resolved_payout_blocker_count=4
+  [before] account pnl=100000 capital=1000000 reserved_pnl=0 last_fee_slot=3 resolved_slot=3 bitmap_empty=false
+  [before] validate_shape=Ok(()) validate_with_market=Ok(())
+  [after] vault=2000000 c_tot=2000000 insurance=0 pnl_pos_tot=70225 pnl_matured_pos_tot=0 pnl_pos_bound_tot=70225 pnl_pos_bound_tot_num=70225000000000000 source_claim_bound_total_num=100000000000000000 negative_pnl_account_count=0 resolved_payout_blocker_count=3
+  [after] account pnl=70225 capital=1000000 reserved_pnl=0 bitmap_empty=false b_stale_state=0 stale_state=0
+  [after] outcome=Ok(ProgressOnly)
+  [after] validate_shape=Err(InvalidConfig) validate_with_market=Ok(())
+  return taken: src/v16.rs:26631
+thread 't15_header_refuted_progress_only_26634_bound_below_source_claim_total' (226708354) panicked at tests/strong2_t15_progress_only_shape.rs:284:9:
+single leg detached: expected the 26634 return
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test t15_header_refuted_progress_only_26634_with_matching_slot_claim ... build: audit-scan feature = false; assets = 1
+  slot poke: slot0.source_credit_long.{positive_claim_bound_num,exact_positive_claim_num} = 100000000000000000
+  [before] vault=2000000 c_tot=2000000 insurance=0 pnl_pos_tot=100000 pnl_matured_pos_tot=0 pnl_pos_bound_tot=100000 pnl_pos_bound_tot_num=100000000000000000 source_claim_bound_total_num=100000000000000000 negative_pnl_account_count=0 resolved_payout_blocker_count=4
+  [before] account pnl=100000 capital=1000000 reserved_pnl=0 last_fee_slot=3 resolved_slot=3 bitmap_empty=false
+  [before] validate_shape=Ok(()) validate_with_market=Ok(())
+  [after] vault=2000000 c_tot=2000000 insurance=0 pnl_pos_tot=70225 pnl_matured_pos_tot=0 pnl_pos_bound_tot=70225 pnl_pos_bound_tot_num=70225000000000000 source_claim_bound_total_num=100000000000000000 negative_pnl_account_count=0 resolved_payout_blocker_count=3
+  [after] account pnl=70225 capital=1000000 reserved_pnl=0 bitmap_empty=false b_stale_state=0 stale_state=0
+  [after] outcome=Ok(ProgressOnly)
+  [after] validate_shape=Err(InvalidConfig) validate_with_market=Ok(())
+  return taken: src/v16.rs:26631
+thread 't15_header_refuted_progress_only_26634_with_matching_slot_claim' (226708355) panicked at tests/strong2_t15_progress_only_shape.rs:284:9:
+single leg detached: expected the 26634 return
+FAILED
+test t15_random_search ... ignored
+failures:
+failures:
+    t15_header_refuted_progress_only_26634_bound_below_source_claim_total
+    t15_header_refuted_progress_only_26634_with_matching_slot_claim
+test result: FAILED. 5 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: test failed, to rerun pass `--test strong2_t15_progress_only_shape`

@@ -1,0 +1,25 @@
+--- tests/strong2_t15_progress_only_shape.rs	2026-11-21 15:17:26
++++ tests/strong2_t15_progress_only_shape.rs	2026-11-21 20:17:43
+@@ -100,7 +100,6 @@
+             &mut PortfolioV16ViewMut::new(long),
+             &mut PortfolioV16ViewMut::new(short),
+             TradeRequestV16 { asset_index: asset as usize, size_q: size, exec_price: p, fee_bps: 0 },
+-            true,
+         )
+         .unwrap();
+     }
+@@ -550,13 +549,7 @@
+             "a.liquidation_lock"
+         }
+         6 => {
+-            a.loss_provenance = percolator::V16PodU32::new(match r.below(5) {
+-                0 => 0,
+-                1 => 1,
+-                2 => 2,
+-                3 => 3,
+-                _ => u32::MAX,
+-            });
++            let _ = r.below(5); // 08d4fd09 has no `loss_provenance` field: mutation is a no-op here
+             "a.loss_provenance"
+         }
+         7 => {

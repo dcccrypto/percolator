@@ -1,0 +1,20 @@
+running 1 test
+build: audit-scan feature = false; iterations = 300000; seed = 0x5EED_7151
+counts:
+  00 total: 300000
+  01 skipped: validate_shape Err before: 55617
+  03 call Err: 64599
+  04 call Ok(Closed): 103150
+  05 call Ok(ProgressOnly), account valid before (variant B): 76634
+  10 P_header VIOLATED, account valid before (variant B): 2
+  20 P_account VIOLATED, return classified 26614: 3
+distinct witness classes: 5
+  first@111011: 10 P_header VIOLATED, account valid before (variant B) | ret=26605/26631/26634/26641 | kind=10 | ["TIGHT h.source_claim_bound_total_num=pnl_pos_bound_tot_num", "TIGHT h.source_ins_credit_reserved_total=insurance", "a.last_fee_slot=resolved_slot", "a.pnl=+x(with header junior totals)"] :: pre=0 shape_after=Err(InvalidConfig)
+  first@214191: 10 P_header VIOLATED, account valid before (variant B) | ret=26605/26631/26634/26641 | kind=11 | ["TIGHT h.source_claim_bound_total_num=pnl_pos_bound_tot_num", "a.last_fee_slot=resolved_slot", "a.pnl=+x(with header junior totals)"] :: pre=0 shape_after=Err(InvalidConfig)
+  first@157828: 20 P_account VIOLATED, return classified 26614 | ret=26614? | kind=13 | ["TIGHT a.reserved_pnl=max(pnl,0)", "TIGHT h.ins_budget_remaining_total=insurance", "a.capital", "a.cp.gross", "a.pnl=+x(with header junior totals)", "slot0.asset.b_long_num+="] :: pre=0 acct_after=Err(InvalidLeg) pnl=188989 reserved=188999 lock=0 bitmap_empty=false
+  first@212522: 20 P_account VIOLATED, return classified 26614 | ret=26614? | kind=7 | ["TIGHT a.reserved_pnl=max(pnl,0)", "TIGHT h.ins_budget_remaining_total=insurance", "a.pnl=+x(with header junior totals)", "slot0.asset.b_long_num+="] :: pre=3 acct_after=Err(InvalidLeg) pnl=124177 reserved=124187 lock=0 bitmap_empty=false
+  first@240725: 20 P_account VIOLATED, return classified 26614 | ret=26614? | kind=7 | ["TIGHT a.reserved_pnl=max(pnl,0)", "a.cp.qty_adl", "a.pnl=+x(with header junior totals)", "slot0.asset.b_long_num+=", "slot0.insurance_domain_budget_{long,short}=insurance/2(+header total)"] :: pre=3 acct_after=Err(InvalidLeg) pnl=199103 reserved=199113 lock=0 bitmap_empty=false
+test t15_random_search ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 31.64s
+
