@@ -241,3 +241,17 @@ fn native_sampled_resolved_close_flat_domain() {
         check_resolved_close_flat_with_loss(c, l, o, i, u);
     } } } } }
 }
+
+/// Narrow form of (d'), sized like the suite's
+/// `proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault` (which finishes):
+/// C in 0..=5 and L in 0..=5 symbolic, O = 3, I = 2, U = 1 concrete. Same check function.
+#[cfg(kani)]
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_e2e_resolved_close_flat_account_with_loss_narrow() {
+    let c: u8 = kani::any();
+    let l: u8 = kani::any();
+    kani::assume(c <= 5 && l <= 5);
+    check_resolved_close_flat_with_loss(c as u128, l as u128, 3, 2, 1);
+}
