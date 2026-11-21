@@ -1,0 +1,16 @@
+# Blob ids of src/wide_math.rs and src/v16.rs (git rev-parse <rev>:<path>), observed 2026-11-21T04:24:04Z
+add1d027 wide_math.rs=e57bba6bbb9695ff90cd113ab1838f2a89238bed v16.rs=d874bb4ff157d7ed928be082d0b4d93763063d00
+c030aa40 wide_math.rs=e57bba6bbb9695ff90cd113ab1838f2a89238bed v16.rs=d5df587e3ca1b5d4900d7b206b0bce1d2f6424e5
+d1fa39f6 wide_math.rs=e57bba6bbb9695ff90cd113ab1838f2a89238bed v16.rs=a4674830cfcd5eeaa6cb39696a0620db7c5b0a9b
+08d4fd09 wide_math.rs=e57bba6bbb9695ff90cd113ab1838f2a89238bed v16.rs=a4674830cfcd5eeaa6cb39696a0620db7c5b0a9b
+c38b6b1e wide_math.rs=97c6b16d4079aa5c83a9dd79c528e25db1027886 v16.rs=7d3edfe86be1a80f49793cf551c39687a8766a4d
+
+# Close-path functions in evidence/v16_changed_fns_d1fa39f6_vs_c38b6b1e.txt (tools/changed_fns.py, Toly 08d4fd09 copy)
+- changed: `kernel_recompute_resolved_payout_rate` (line 2688)  in `impl V16Core`
+- changed: `debit` (line 7881)  in `impl TokenValueFlowProofV16`
+- changed: `clear_fully_diluted_resolved_receipt_if_terminal` (line 26140)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `claim_resolved_payout_topup_core_not_atomic` (line 26492)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `close_resolved_account_not_atomic` (line 26580)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `kernel_resolved_receipt_can_still_gain` (line 2153)  in `impl V16Core`
+| K49 | `debit` | changed | no | TokenValueClassV16, TokenValueFlowProofV16, V16Error (own text: TokenValueClassV16, V16Error) | YES |
+(a function of this list not printed above has the same own text in d1fa39f6 and c38b6b1e, or exists in neither)

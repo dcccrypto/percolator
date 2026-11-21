@@ -1,0 +1,17 @@
+Formally verify, against aristotle/resolved_close_kernels_spec.md, six properties of the resolved close and the payout top-up of this crate's engine, src/v16.rs.
+
+The crate is uploaded exactly as committed at engine revision c38b6b1e; no file was edited. Only src/v16.rs, src/wide_math.rs and src/lib.rs matter for this task. Do not verify anything under tests/.
+
+Why this cut. Earlier proofs of whole engine methods that hold the market and a 9,419-byte portfolio account were expensive (the byte-level model of the account, long bodies with many `?` exits, shared borrows that must be handed back on every exit) and few finished. So this task is mostly about pure functions over small Copy records (Part 1), and one entry point whose body is four calls (Part 2). It has a fixed size.
+
+Do the parts in order, and inside a part the properties in order:
+- Part 1: PR1 (`V16Core::kernel_recompute_resolved_payout_rate`), P15 (`resolved_receipt_claimable_against_ledger`), OURS-K1 (`apply_resolved_payout_receipt_payment`), OURS-K2 (`TokenValueFlowProofV16::capital_and_resolved_payout_to_external_out` followed by `validate`). Each has a `.contract` and a `.nopanic` property.
+- Part 2: T14.header and T14.account, about `claim_resolved_payout_topup_not_atomic` at `T = ()`, with its two inner calls treated as opaque.
+
+Record each finished property before starting the next, so that finished results are kept if the task stops early. If a property does not yield after a serious attempt, record it as unresolved with the obstacle in one or two sentences and go on; do not spend the rest of the task on it. Do not attempt any property that is not in the spec file.
+
+F3 (the exact panic condition and result of `wide_mul_div_floor_u128`) is stated in the spec file and is already proved for this exact function text elsewhere: use it as a hypothesis about that callee, say where you used it, and do not re-prove it.
+
+Verify the deployed function bodies: no cfg(kani), default features, this crate's release profile (overflow-checks = true). A parameter name inside a conclusion denotes the value the caller passed. Where a property is false, report it as refuted with a concrete counterexample; do not weaken a property silently, and tell me if you had to add a hypothesis. List every library function whose documented behaviour a proof assumes instead of covering by proof.
+
+In the summary, list for each property under its label: proved, refuted (with the input) or unresolved (with the obstacle); the hypotheses it used (F3, H_rate, anything added); whether the body has a loop and the bound used; and for Part 2, what made it expensive if it was.

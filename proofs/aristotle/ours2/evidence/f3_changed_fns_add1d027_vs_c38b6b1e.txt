@@ -1,0 +1,16 @@
+functions: old 176, new 177; types: old 6, new 6
+
+## Functions: 2 changed, 1 new, 0 removed
+- changed: `floor_div_signed_conservative_i128` (line 1426)  in ``
+- changed: `wide_signed_mul_div_floor_from_k_pair` (line 1636)  in ``
+- new: `wide_signed_mul_div_floor_with_carry_from_k_pair` (line 1651)  in ``
+
+## Types: 0 changed, 0 new, 0 removed
+types that are or contain a changed type: []
+
+## Kernels of the list
+| Label | Function | Own text | Reaches a changed/new function (by name) | Names a changed type (own text or a reached function) | New proof needed |
+|---|---|---|---|---|---|
+| F3 | `wide_mul_div_floor_u128` | same | no | no | no |
+
+kernels that need a new proof: 0: 

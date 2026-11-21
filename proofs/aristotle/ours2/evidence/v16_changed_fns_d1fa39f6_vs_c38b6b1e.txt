@@ -1,0 +1,882 @@
+functions: old 772, new 1113; types: old 100, new 106
+
+## Functions: 248 changed, 427 new, 86 removed
+- changed: `apply_backing_provider_earnings_withdraw` (line 120)  in ``
+- changed: `liquidation_risk_notional_ceil` (line 745)  in ``
+- changed: `liquidation_projected_healthy_after_close` (line 809)  in ``
+- changed: `liquidation_partial_close_is_healthy` (line 858)  in ``
+- changed: `liquidation_engine_close_request_q` (line 931)  in ``
+- changed: `add_open_interest_for_new_position` (line 1102)  in ``
+- changed: `mul_div_ceil_u128_or_wide` (line 1168)  in `impl V16Core`
+- changed: `terminal_claim_free_overlap_recredit` (line 1190)  in `impl V16Core`
+- changed: `kernel_terminal_slab_asset_step` (line 1217)  in `impl V16Core`
+- changed: `kernel_terminal_slab_wait_continuation` (line 1243)  in `impl V16Core`
+- changed: `kernel_mark_kf_stale_cohorts` (line 1264)  in `impl V16Core`
+- changed: `kernel_settle_kf_stale_cohort` (line 1289)  in `impl V16Core`
+- changed: `kernel_reduce_position_delta` (line 1445)  in `impl V16Core`
+- changed: `kernel_resize_leg_same_side` (line 1466)  in `impl V16Core`
+- changed: `kernel_initial_margin_gate` (line 1519)  in `impl V16Core`
+- changed: `kernel_locked_margin_gate` (line 1539)  in `impl V16Core`
+- changed: `kernel_accumulate_batch_trade` (line 1569)  in `impl V16Core`
+- changed: `kernel_principal_cure_close_ledger` (line 1749)  in `impl V16Core`
+- changed: `kernel_attach_leg` (line 1788)  in `impl V16Core`
+- changed: `kernel_retain_leg_as_pending_obligation` (line 2049)  in `impl V16Core`
+- changed: `kernel_recovery_pending_obligation_release_allowed` (line 2091)  in `impl V16Core`
+- changed: `kernel_settle_principal` (line 2126)  in `impl V16Core`
+- changed: `kernel_advance_leg_b_snap` (line 2154)  in `impl V16Core`
+- changed: `kernel_clear_leg` (line 2174)  in `impl V16Core`
+- changed: `kernel_normalize_social_loss_carry` (line 2280)  in `impl V16Core`
+- changed: `kernel_begin_full_drain_reset` (line 2306)  in `impl V16Core`
+- changed: `kernel_classify_position_delta` (line 2377)  in `impl V16Core`
+- changed: `kernel_adl_scaled_accrual_index_deltas` (line 2390)  in `impl V16Core`
+- changed: `kernel_raw_basis_for_adl_effective_quantity` (line 2595)  in `impl V16Core`
+- changed: `kernel_released_pnl_conversion_partition` (line 2643)  in `impl V16Core`
+- changed: `kernel_retain_terminal_source_haircut` (line 2667)  in `impl V16Core`
+- changed: `kernel_recompute_resolved_payout_rate` (line 2688)  in `impl V16Core`
+- changed: `kernel_credit_post_snapshot_residual` (line 2712)  in `impl V16Core`
+- changed: `kernel_open_close_snapshot_is_stale` (line 2733)  in `impl V16Core`
+- changed: `kernel_retirement_backing_normalization` (line 2745)  in `impl V16Core`
+- changed: `prepare_counterparty_backing_expiry_delta` (line 2763)  in `impl V16Core`
+- changed: `kernel_advance_resolved_slot` (line 2804)  in `impl V16Core`
+- changed: `kernel_lapsed_source_backing_scan_step` (line 2822)  in `impl V16Core`
+- changed: `kernel_flat_source_lien_normalization` (line 2845)  in `impl V16Core`
+- changed: `kernel_live_account_refresh_required` (line 2892)  in `impl V16Core`
+- changed: `kernel_live_flat_source_lien_normalization_required` (line 2906)  in `impl V16Core`
+- changed: `kernel_forfeit_residual_step` (line 2920)  in `impl V16Core`
+- changed: `first_actionable_slot` (line 3009)  in `impl V16Core`
+- changed: `kernel_auto_crank_leg_flags` (line 3092)  in `impl V16Core`
+- changed: `kernel_settle_resolved_pnl_after_booking` (line 3149)  in `impl V16Core`
+- changed: `select_auto_crank_plan` (line 3182)  in `impl V16Core`
+- changed: `actionable_summary_from_signals` (line 3216)  in `impl V16Core`
+- changed: `kernel_cert_is_current` (line 3241)  in `impl V16Core`
+- changed: `source_lien_fee_after_backing_release` (line 3429)  in `impl V16Core`
+- changed: `available_backing_num_for_source_credit_state` (line 3506)  in `impl V16Core`
+- changed: `expected_source_credit_rate_num_for_state` (line 3524)  in `impl V16Core`
+- changed: `prepare_source_positive_claim_burn_delta` (line 3695)  in `impl V16Core`
+- changed: `prepare_source_positive_claim_bound_delta` (line 3711) [cfg(any(kani, feature = "fuzz"))]  in `impl V16Core`
+- changed: `prepare_counterparty_lien_create_delta` (line 3730)  in `impl V16Core`
+- changed: `prepare_counterparty_backing_add_delta` (line 3757)  in `impl V16Core`
+- changed: `prepare_counterparty_backing_withdraw_delta` (line 3807)  in `impl V16Core`
+- changed: `prepare_counterparty_lien_release_delta` (line 3840)  in `impl V16Core`
+- changed: `prepare_counterparty_lien_terminal_release_delta` (line 3871)  in `impl V16Core`
+- changed: `prepare_counterparty_lien_consume_delta` (line 3928)  in `impl V16Core`
+- changed: `prepare_counterparty_lien_impair_delta` (line 3967) [cfg(any(kani, feature = "fuzz"))]  in `impl V16Core`
+- changed: `prepare_counterparty_impaired_lien_retirement_delta` (line 4002)  in `impl V16Core`
+- changed: `prepare_insurance_lien_create_delta` (line 4070)  in `impl V16Core`
+- changed: `prepare_insurance_lien_release_delta` (line 4104)  in `impl V16Core`
+- changed: `prepare_insurance_lien_terminal_release_delta` (line 4123)  in `impl V16Core`
+- changed: `prepare_insurance_lien_impair_delta` (line 4159) [cfg(any(kani, feature = "fuzz"))]  in `impl V16Core`
+- changed: `health_requirements_from_base_and_target_lag` (line 4395)  in `impl V16Core`
+- changed: `auto_crank_plan_requires_caller_observation` (line 4535)  in ``
+- changed: `public_user_fund_with_market_slots` (line 5279)  in `impl V16Config`
+- changed: `validate_exact_solvency_envelope` (line 5540)  in `impl V16Config`
+- changed: `validate_public_user_fund_shape` (line 5746)  in `impl V16Config`
+- changed: `default` (line 5958)  in `impl Default for AssetStateV16`
+- changed: `new` (line 6286)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `compact_source_domains` (line 6428)  in `impl<'a> PortfolioV16ViewMut<'a>`
+- changed: `validate_with_market` (line 6475)  in `impl<'a> PortfolioV16View<'a>`
+- changed: `is_empty` (line 6933)  in `impl PortfolioLegV16`
+- changed: `is_finalized_inert` (line 7047)  in `impl CloseProgressLedgerV16`
+- changed: `plan_delta` (line 7476)  in `impl PositionSlotMapV16`
+- changed: `debit` (line 7881)  in `impl TokenValueFlowProofV16`
+- changed: `from_runtime` (line 8570)  in `impl V16ConfigAccount`
+- changed: `decode_runtime` (line 8638)  in `impl V16ConfigAccount`
+- changed: `from_runtime` (line 8904)  in `impl AssetStateV16Account`
+- changed: `try_to_runtime` (line 8963)  in `impl AssetStateV16Account`
+- changed: `is_zero_fill_or_canonical_disabled_slot` (line 9227) [cfg(any(test, kani, feature = "audit-scan"))]  in `impl EngineAssetSlotV16Account`
+- changed: `empty_for_market` (line 9267)  in `impl EngineAssetSlotV16Account`
+- changed: `asset_account_is_empty_for_activation` (line 9339) [cfg(any(test, kani, feature = "audit-scan"))]  in `impl EngineAssetSlotV16Account`
+- changed: `asset_state_is_empty_for_activation` (line 9397)  in `impl EngineAssetSlotV16Account`
+- changed: `new_dynamic` (line 9577)  in `impl MarketGroupV16HeaderAccount`
+- changed: `activate_empty_market_slot_not_atomic` (line 9808)  in `impl MarketGroupV16HeaderAccount`
+- changed: `validate_shape` (line 9996)  in `impl<'a, T> MarketGroupV16View<'a, T>`
+- changed: `compute_aggregate_totals_and_validate_slots` (line 10142) [cfg(any(test, kani, feature = "audit-scan"))]  in `impl<'a, T> MarketGroupV16View<'a, T>`
+- changed: `validate_asset_shape_for_view` (line 10252) [cfg(any(test, kani, feature = "audit-scan"))]  in `impl<'a, T> MarketGroupV16View<'a, T>`
+- changed: `validate_account_scalar_preflight` (line 10461)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `apply_total_delta` (line 10502)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `update_source_credit_aggregate_totals` (line 10530)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `set_source_credit_for_domain` (line 10696)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `backing_bucket_for_domain` (line 10716)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `backing_bucket_raw_status_expiry_for_domain` (line 10732)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `set_backing_bucket_for_domain` (line 10742)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `asset_has_unsettled_kf_position` (line 10787)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `fresh_counterparty_backing_expiry_slot` (line 10959)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `add_fresh_counterparty_backing_not_atomic` (line 11003) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `deposit_fresh_counterparty_backing_not_atomic` (line 11018)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `withdraw_fresh_counterparty_backing_not_atomic` (line 11058)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `retire_terminal_unbudgeted_insurance_delta` (line 11134)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `retire_terminal_unbudgeted_insurance_core_not_atomic` (line 11151)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `retire_terminal_unbudgeted_insurance_not_atomic` (line 11197)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `require_terminal_claim_free_state` (line 11310)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `terminal_claim_free_recredit_for_slot` (line 11331)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `recredit_terminal_claim_free_residual_for_asset_core_not_atomic` (line 11410)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `advance_terminal_slab_not_atomic` (line 11479)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `expire_source_backing_bucket_not_atomic` (line 11595)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `first_lapsed_source_backing_for_account_at_slot` (line 11643)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `first_lapsed_source_backing_for_asset_at_slot` (line 11685)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `release_source_credit_lien_from_counterparty_not_atomic` (line 11772)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `consume_source_credit_lien_from_counterparty_core_not_atomic` (line 11881) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `impair_source_credit_lien_from_counterparty_core_not_atomic` (line 11923) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `release_source_credit_lien_from_insurance_not_atomic` (line 12098)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `credit_backing_provider_earnings_delta` (line 12256)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `charge_account_backing_fee_not_atomic` (line 12335)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `account_has_normalizable_source_credit_lien` (line 12465)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `release_account_source_credit_lien_for_domain_not_atomic` (line 12613)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `burn_account_source_lien_face_not_atomic` (line 12750)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `burn_account_source_claim_bound_num` (line 12889)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `burn_account_source_claim_at_slot_up_to` (line 12930)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `burn_account_source_claim_bound_num_domain_first` (line 13012)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `account_source_realizable_support` (line 13053)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `account_unliened_source_realizable_support` (line 13188) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `valid_source_lien_effective_reserved_sum` (line 13276)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `set_domain_insurance_spent_delta` (line 13378)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `set_domain_insurance_budget_delta` (line 13477)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `withdraw_domain_insurance_delta` (line 13577)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `withdraw_domain_insurance_not_atomic` (line 13627)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `credit_account_from_insurance_delta` (line 13764)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `credit_account_from_insurance_not_atomic` (line 13812)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `domain_insurance_withdraw_capacity` (line 13981)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `consume_domain_insurance_for_negative_pnl` (line 13989)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `consume_validated_account_source_credit_not_atomic` (line 14300)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `account_haircut_equity` (line 14944)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `set_account_pnl_after_source_claim_burn` (line 15247)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `set_account_pnl_after_domain_first_source_claim_burn` (line 15257)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `add_account_source_positive_pnl_not_atomic` (line 15289)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `sync_unattributed_loss_lock` (line 15318)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `set_account_pnl_inner` (line 15341)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `apply_haircut_bounded_close_loss_to_pnl` (line 15494)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `apply_signed_kf_delta_to_pnl` (line 15737)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `reserve_new_capital_backed_loss_for_source_domain_not_atomic` (line 16045)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `resolved_loss_backing_capacity_num` (line 16131)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `leg_kf_delta_components_for_settlement_from_asset` (line 16473)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `leg_kf_delta_for_settlement_from_asset` (line 16539) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `prepare_account_kf_settlement_entry` (line 16563)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `apply_account_kf_settlement_entry` (line 16618)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `reconcile_account_impaired_counterparty_liens_not_atomic` (line 16822)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `reconcile_account_impaired_counterparty_lien_at_slot_not_atomic` (line 16856)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `settle_account_kf_effects_not_atomic` (line 16902)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `compute_account_health_cert_with_price_override` (line 16975)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `full_account_refresh_not_atomic` (line 17048)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `refresh_account_and_certify_not_atomic` (line 17069)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `collect_account_backing_utilization_fee_for_domain_not_atomic` (line 17406)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `settle_account_b_chunk` (line 17583)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `settle_account_side_effects_not_atomic` (line 17633)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `certify_account_after_local_settlement_with_price_override` (line 17665)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `group_has_position_or_loss_state_for_oracle_reset` (line 17733)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `reset_empty_asset_oracle_anchor_not_atomic` (line 17834)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `accrue_asset_to_not_atomic` (line 17903)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `accrue_asset_path_to_not_atomic` (line 18270)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `build_actionable_summary` (line 18703)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `build_actionable_summary_and_selected_assets` (line 18724)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `auto_crank_selected_assets` (line 18904)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `permissionless_auto_crank_not_atomic` (line 19068)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `permissionless_crank_not_atomic` (line 19414)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `refresh_recovery_account_from_committed_state_not_atomic` (line 19587)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `require_asset_risk_change_allowed` (line 19861)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `asset_restart_next_counters` (line 19955)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `require_empty_asset_lifecycle_state_with_policy` (line 20066)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `ensure_favorable_action_current_certificate` (line 20268)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `ensure_favorable_action_allowed` (line 20298)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `h_lock_lane` (line 20471)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `validate_trade_request` (line 20828)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `trade_signed_size_deltas` (line 20847)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `validate_trade_position_preflight` (line 20864)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `attach_leg_at_slot` (line 20950)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `leg_is_prior_reset_obligation` (line 20996)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `retain_leg_as_pending_obligation` (line 21027)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `clear_leg_at_slot_inner` (line 21093)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `apply_position_delta_with_lookup_inner` (line 21202)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `resize_leg_same_side_at_slot` (line 21325)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `begin_close_progress_ledger` (line 21380)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `advance_close_progress_ledger` (line 21481)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `clamp_close_residual_to_account_loss` (line 21585)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `bankruptcy_residual_single_step_capacity` (line 21617)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `book_bankruptcy_residual_chunk_internal` (line 21692)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `book_bankruptcy_residual_chunk_for_account_core` (line 21879)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `advance_pending_close_residual_not_atomic` (line 21970)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `reduce_matching_open_interest_for_unilateral_close` (line 22157)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `liquidate_account_not_atomic` (line 22236)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `rebalance_reduce_position_not_atomic` (line 22795)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `settle_account_for_position_action_and_refresh_not_atomic` (line 22998)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `recertify_account_after_source_lien_change` (line 23199)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `recertify_account_after_trade_delta` (line 23231)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `apply_trade_after_refresh_not_atomic` (line 23494)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `force_close_recovery_pair_not_atomic` (line 23696)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `execute_trade_with_fee_loss_stale_scoped_not_atomic` (line 23750)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `execute_batch_with_fee_loss_stale_scoped_not_atomic` (line 23770)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `execute_batch_with_fee_after_tail_validation_not_atomic` (line 24113)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `set_account_pnl_after_principal_settlement` (line 24237)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `clear_resolved_unattributed_negative_pnl` (line 24290)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `settle_resolved_bankruptcy_negative_pnl` (line 24306)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `settle_negative_pnl_from_principal_core_not_atomic` (line 24601)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `charge_account_fee_current_not_atomic` (line 24960)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `charge_account_fee_after_loss_settlement` (line 25015)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `charge_account_fee_not_atomic` (line 25036)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `preflight_convert_released_pnl_to_capital` (line 25281)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `apply_released_pnl_conversion_with_consumption_core_not_atomic` (line 25372)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `convert_released_pnl_to_capital_not_atomic` (line 25473)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `release_account_source_credit_liens_if_unneeded_not_atomic` (line 25622)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `release_account_source_credit_liens_if_unneeded_core_not_atomic` (line 25632)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `withdraw_not_atomic` (line 25968)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `resolve_market_not_atomic` (line 26093)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `advance_resolved_slot_not_atomic` (line 26116)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `clear_fully_diluted_resolved_receipt_if_terminal` (line 26140)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `realize_one_source_domain_for_resolved_close_not_atomic` (line 26180)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `source_domain_terminal_for_haircut_demote` (line 26299)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `prepare_one_source_domain_for_resolved_close_not_atomic` (line 26373)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `claim_resolved_payout_topup_core_not_atomic` (line 26492)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `close_resolved_account_not_atomic` (line 26580)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `detach_solvent_active_legs_for_resolved_close` (line 26705)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `deposit_not_atomic` (line 26800)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `clear_terminal_price_funding_history` (line 26930)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `expire_lapsed_source_backing_for_asset_not_atomic` (line 26969)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `restart_empty_asset_preserving_insurance_budget_not_atomic` (line 26995)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `normalize_terminal_empty_asset_history_not_atomic` (line 27058)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `leg_is_dead_for_forfeit` (line 27221)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `settle_forfeited_leg_kf_effects` (line 27256)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `forfeit_recovery_leg_not_atomic` (line 27523)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- changed: `from_runtime` (line 27857)  in `impl PortfolioLegV16Account`
+- changed: `try_to_runtime` (line 27884)  in `impl PortfolioLegV16Account`
+- changed: `init_empty_in_place` (line 28236)  in `impl PortfolioAccountV16Account`
+- changed: `position_delta_increases_risk` (line 28392) [cfg(kani)]  in ``
+- changed: `trade_account_requires_initial_margin` (line 28406)  in ``
+- changed: `trade_preflight_risk_gate` (line 28555)  in ``
+- changed: `asset_risk_increase_gate` (line 28612)  in ``
+- changed: `liquidation_fee_for_close` (line 29114)  in ``
+- changed: `kani_trade_fee_atoms_per_side` (line 29188) [cfg(any(kani, feature = "fuzz"))]  in ``
+- changed: `encode_recovery_reason` (line 29333)  in ``
+- changed: `decode_recovery_reason` (line 29347)  in ``
+- changed: `validate_active_leg` (line 29438)  in ``
+- changed: `leg_snapshots_bound_to_asset_side` (line 29472)  in ``
+- changed: `scaled_adl_delta_fast` (line 29527) [cfg(any(kani, feature = "fuzz"))]  in ``
+- new: `liquidation_trigger_deficit` (line 141)  in ``
+- new: `liquidation_trigger_gate` (line 152)  in ``
+- new: `fee_charge_capital_to_insurance` (line 166)  in ``
+- new: `kani_fee_charge_capital_to_insurance` (line 193) [cfg(kani)]  in ``
+- new: `kani_liquidation_trigger_deficit` (line 204) [cfg(kani)]  in ``
+- new: `kani_liquidation_trigger_gate` (line 209) [cfg(kani)]  in ``
+- new: `kani_apply_backing_utilization_fee_charge` (line 235) [cfg(kani)]  in ``
+- new: `kani_apply_backing_provider_earnings_withdraw` (line 252) [cfg(kani)]  in ``
+- new: `kani_health_cert_after_capital_debit` (line 261) [cfg(kani)]  in ``
+- new: `kani_active_bitmap_set` (line 383) [cfg(any(kani, test, feature = "fork-facade"))]  in ``
+- new: `x1_diff_stats` (line 420) [cfg(feature = "x1-diff")]  in ``
+- new: `flat_locked_deficit_is_writable_off` (line 462)  in ``
+- new: `kani_flat_locked_deficit_is_writable_off` (line 474) [cfg(kani)]  in ``
+- new: `decode_loss_provenance` (line 515)  in ``
+- new: `validate_loss_provenance_for_market` (line 530)  in ``
+- new: `effective_loss_provenance` (line 539)  in ``
+- new: `encode_loss_provenance` (line 548)  in ``
+- new: `loss_provenance_after_pnl` (line 587)  in ``
+- new: `kani_loss_provenance_after_pnl` (line 611) [cfg(kani)]  in ``
+- new: `liquidation_residual_charge` (line 647)  in ``
+- new: `flat_deficit_route` (line 680)  in ``
+- new: `kani_flat_deficit_route` (line 688) [cfg(kani)]  in ``
+- new: `kani_liquidation_residual_charge` (line 693) [cfg(kani)]  in ``
+- new: `kani_liquidation_close_would_leave_uncovered_loss_with_open_risk` (line 710) [cfg(kani)]  in ``
+- new: `kani_unattributed_loss_lock_after_pnl` (line 732) [cfg(kani)]  in ``
+- new: `kani_liquidation_projected_health_deficit_from_parts` (line 1025) [cfg(kani)]  in ``
+- new: `kani_liquidation_projected_healthy_after_close` (line 1042) [cfg(kani)]  in ``
+- new: `kani_liquidation_engine_close_request_q` (line 1069) [cfg(kani)]  in ``
+- new: `kani_liquidation_partial_search_hi` (line 1094) [cfg(kani)]  in ``
+- new: `kani_add_open_interest_for_new_position` (line 1142) [cfg(kani)]  in ``
+- new: `kernel_kf_cohort_moves` (line 1258)  in `impl V16Core`
+- new: `kernel_track_kf_side_drift` (line 1316)  in `impl V16Core`
+- new: `kernel_settle_kf_laggard` (line 1343)  in `impl V16Core`
+- new: `kernel_kf_hidden_loss_bound` (line 1371)  in `impl V16Core`
+- new: `validate_kf_drift_shape` (line 1408)  in `impl V16Core`
+- new: `kernel_settle_close_ledger_principal` (line 1691)  in `impl V16Core`
+- new: `kernel_band_attach` (line 1873)  in `impl V16Core`
+- new: `kernel_band_detach` (line 1908)  in `impl V16Core`
+- new: `kernel_band_certify_leg` (line 1956)  in `impl V16Core`
+- new: `kernel_band_reanchor_ready` (line 2003)  in `impl V16Core`
+- new: `kernel_band_reanchor` (line 2021)  in `impl V16Core`
+- new: `kernel_funding_index_deltas` (line 2426)  in `impl V16Core`
+- new: `funding_scaled_magnitude` (line 2453)  in `impl V16Core`
+- new: `effective_abs_quantity_for_detach` (line 2572)  in `impl V16Core`
+- new: `kernel_auto_crank_liquidation_slot` (line 3037)  in `impl V16Core`
+- new: `source_credit_state_in_flight_support_for_claim_num` (line 4210)  in `impl V16Core`
+- new: `source_credit_state_realizable_support_for_claim_num_at_rate` (line 4232)  in `impl V16Core`
+- new: `source_credit_netting_rate` (line 4265)  in `impl V16Core`
+- new: `source_credit_domain_has_locked_claims` (line 4302)  in `impl V16Core`
+- new: `source_credit_protective_rate` (line 4312)  in `impl V16Core`
+- new: `source_credit_state_realizable_support_for_face` (line 4335)  in `impl V16Core`
+- new: `kani_validate_positive_pnl_source_attribution` (line 4492) [cfg(kani)]  in ``
+- new: `kani_expected_source_credit_rate_num_for_state` (line 4500) [cfg(kani)]  in ``
+- new: `kani_available_backing_num_for_source_credit_state` (line 4507) [cfg(kani)]  in ``
+- new: `kani_b_settlement_pending` (line 4550) [cfg(kani)]  in ``
+- new: `kani_auto_crank_leg_flags` (line 4560) [cfg(kani)]  in ``
+- new: `kani_should_clear_prior_reset_obligation` (line 4583) [cfg(kani)]  in ``
+- new: `kani_auto_crank_refresh_asset` (line 4596) [cfg(kani)]  in ``
+- new: `kani_refresh_detached_selected_leg` (line 4604) [cfg(kani)]  in ``
+- new: `kani_settle_resolved_pnl_after_booking` (line 4612) [cfg(kani)]  in ``
+- new: `kani_commit_declared_liquidation_recovery` (line 4621) [cfg(kani)]  in ``
+- new: `kani_auto_crank_lifecycle_dispatchable` (line 4630) [cfg(kani)]  in ``
+- new: `kani_first_actionable_slot` (line 4635) [cfg(kani)]  in ``
+- new: `kani_auto_crank_liquidation_slot` (line 4640) [cfg(kani)]  in ``
+- new: `kani_select_auto_crank_plan` (line 4649) [cfg(kani)]  in ``
+- new: `kani_cert_is_current` (line 4666) [cfg(kani)]  in ``
+- new: `kani_kernel_advance_close_ledger` (line 4685) [cfg(kani)]  in ``
+- new: `kani_kernel_settle_close_ledger_principal` (line 4707) [cfg(kani)]  in ``
+- new: `kani_kernel_principal_cure_close_ledger` (line 4717) [cfg(kani)]  in ``
+- new: `kani_kernel_advance_leg_b_snap` (line 4725) [cfg(kani)]  in ``
+- new: `kani_kernel_settle_principal` (line 4735) [cfg(kani)]  in ``
+- new: `kani_kernel_initial_margin_gate` (line 4744) [cfg(kani)]  in ``
+- new: `kani_kernel_locked_margin_gate` (line 4749) [cfg(kani)]  in ``
+- new: `kani_kernel_accumulate_batch_trade` (line 4760) [cfg(kani)]  in ``
+- new: `kani_source_claim_domain_first_burn_partition` (line 4793) [cfg(kani)]  in ``
+- new: `kani_mul_div_floor_u128_or_wide` (line 4801) [cfg(any(kani, feature = "fuzz"))]  in ``
+- new: `kani_mul_div_ceil_u128_or_wide` (line 4806) [cfg(any(kani, feature = "fuzz"))]  in ``
+- new: `kani_mul_div_floor_u128_wide_reference` (line 4811) [cfg(any(kani, feature = "fuzz"))]  in ``
+- new: `kani_mul_div_ceil_u128_wide_reference` (line 4827) [cfg(any(kani, feature = "fuzz"))]  in ``
+- new: `kani_prepare_source_positive_claim_burn_delta` (line 4845) [cfg(any(kani, feature = "fuzz"))]  in ``
+- new: `kani_prepare_source_credit_domain_recompute_for_epoch` (line 4853) [cfg(any(kani, feature = "fuzz"))]  in ``
+- new: `kani_prepare_source_credit_domain_recompute_for_epoch_steps` (line 4861) [cfg(any(kani, feature = "fuzz"))]  in ``
+- new: `funding_div_rem` (line 4873)  in ``
+- new: `kani_funding_div_rem` (line 4878) [cfg(kani)]  in ``
+- new: `kani_track_kf_side_drift` (line 4883) [cfg(kani)]  in ``
+- new: `kani_settle_kf_laggard` (line 4895) [cfg(kani)]  in ``
+- new: `kani_loss_stale_trade_scope_allowed` (line 4905) [cfg(kani)]  in ``
+- new: `kani_prepare_asset_recovery_transition` (line 4920) [cfg(kani)]  in ``
+- new: `kani_mark_kf_stale_cohorts` (line 4929) [cfg(kani)]  in ``
+- new: `kani_settle_kf_stale_cohort` (line 4939) [cfg(kani)]  in ``
+- new: `kani_source_credit_state_realizable_support_for_face` (line 4948) [cfg(kani)]  in ``
+- new: `kani_source_credit_state_in_flight_support_for_claim_num` (line 4957) [cfg(kani)]  in ``
+- new: `kani_source_credit_state_realizable_support_for_claim_num` (line 4966) [cfg(any(kani, feature = "fuzz"))]  in ``
+- new: `kani_backing_utilization_rate_e9_for_source_state` (line 4974) [cfg(kani)]  in ``
+- new: `kani_backing_utilization_fee_quote_atoms_for_lien` (line 4982) [cfg(kani)]  in ``
+- new: `kani_target_effective_lag_adverse_delta` (line 4999) [cfg(kani)]  in ``
+- new: `kani_health_requirements_from_base_and_target_lag` (line 5008) [cfg(kani)]  in ``
+- new: `band_enabled` (line 5333)  in `impl V16Config`
+- new: `validate_band_safety_law` (line 5569)  in `impl V16Config`
+- new: `validate_exact_solvency_envelope_with` (line 5582)  in `impl V16Config`
+- new: `kani_validate_public_user_fund_shape` (line 5857) [cfg(kani)]  in `impl V16Config`
+- new: `kani_solvency_envelope_holds_for_notional` (line 5862) [cfg(kani)]  in `impl V16Config`
+- new: `adjust_slot_provider_principal` (line 6263)  in ``
+- new: `kani_source_domain_slot` (line 6337) [cfg(kani)]  in `impl<'a> PortfolioV16View<'a>`
+- new: `kani_source_domain` (line 6342) [cfg(kani)]  in `impl<'a> PortfolioV16View<'a>`
+- new: `kani_source_domain_slot_or_insert` (line 6413) [cfg(kani)]  in `impl<'a> PortfolioV16ViewMut<'a>`
+- new: `kani_validate_source_credit_shape_with_market` (line 6706) [cfg(kani)]  in `impl<'a> PortfolioV16View<'a>`
+- new: `kani_active_leg_slot_for_asset` (line 6815) [cfg(kani)]  in `impl<'a> PortfolioV16View<'a>`
+- new: `close_slot_available` (line 7060)  in `impl CloseProgressLedgerV16`
+- new: `kani_apply_resolved_payout_receipt_payment` (line 7209) [cfg(kani)]  in ``
+- new: `canonical_band_accrual_price_step_v16` (line 7246)  in ``
+- new: `band_rent_error_to_v16` (line 7279)  in ``
+- new: `kani_account_kf_settlement_plan_key` (line 8217) [cfg(kani)]  in ``
+- new: `kani_decode_account_kf_settlement_plan_key` (line 8226) [cfg(kani)]  in ``
+- new: `kani_insert_account_kf_settlement_plan_entry` (line 8231) [cfg(kani)]  in ``
+- new: `from_runtime` (line 9118)  in `impl KfDriftSideV16Account`
+- new: `to_runtime` (line 9129)  in `impl KfDriftSideV16Account`
+- new: `band_initialize_asset` (line 9146)  in ``
+- new: `kani_dynamic_asset_slot_stride` (line 9523) [cfg(kani)]  in `impl MarketGroupV16HeaderAccount`
+- new: `apply_fee_policy_update_not_atomic` (line 9679) [cfg(feature = "fork-facade")]  in `impl MarketGroupV16HeaderAccount`
+- new: `kani_apply_fee_policy_update_not_atomic` (line 9709) [cfg(all(kani, feature = "fork-facade"))]  in `impl MarketGroupV16HeaderAccount`
+- new: `kani_validate_dynamic_market_slots_len` (line 9766) [cfg(kani)]  in `impl MarketGroupV16HeaderAccount`
+- new: `kani_validate_dynamic_market_slot_shape_at` (line 9800) [cfg(kani)]  in `impl MarketGroupV16HeaderAccount`
+- new: `kani_validate_header_aggregate_totals` (line 10116) [cfg(kani)]  in `impl<'a, T> MarketGroupV16View<'a, T>`
+- new: `kani_residual` (line 10614) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_domain_asset_side` (line 10640) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_insurance_domain_index` (line 10657) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_backing_bucket_for_domain` (line 10726) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `provider_principal_for_domain` (line 10775)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `adjust_provider_principal_for_domain` (line 10794)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `provider_fresh_num` (line 10808)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `provider_fresh_by_rule` (line 10813)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_validate_source_domain_ledger_current` (line 10856) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_credit_backing_provider_earnings_delta` (line 12281) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_burn_impaired_account_source_claim_fields` (line 12707) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `source_domain_realizable_support_for_face` (line 13038)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `account_source_support_inner` (line 13064)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `source_lien_valid_support_num` (line 13241)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `recorded_source_lien_effective_reserved_sum` (line 13302)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_set_domain_insurance_spent_delta` (line 13395) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_set_domain_insurance_budget_delta` (line 13494) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_withdraw_domain_insurance_delta` (line 13606) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `withdraw_insurance_surplus_delta` (line 13675)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_withdraw_insurance_surplus_delta` (line 13698) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `withdraw_insurance_surplus_not_atomic` (line 13724)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_credit_account_from_insurance_delta` (line 13789) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `rent_unrouted_total` (line 13848)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `rent_route_delta` (line 13875)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_rent_route_delta` (line 13901) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `route_rent_to_account_not_atomic` (line 13914)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_consume_domain_insurance_for_negative_pnl` (line 14039) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_clear_leg` (line 14114) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_preflight_liquidation_residual_durability` (line 14123) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `consume_validated_account_source_credit_for_loss_not_atomic` (line 14319)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_apply_counterparty_source_credit_lien_delta` (line 14625) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_prepare_counterparty_lien_create_delta` (line 14643) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_prepare_counterparty_lien_consume_delta` (line 14653) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_prepare_counterparty_lien_terminal_release_delta` (line 14662) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_prepare_counterparty_backing_add_delta` (line 14671) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_prepare_counterparty_backing_withdraw_delta` (line 14688) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_live_account_refresh_required` (line 14698) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_live_flat_source_lien_normalization_required` (line 14715) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_flat_source_lien_normalization` (line 14734) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_source_credit_lien_amounts_for_effective` (line 14769) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_counterparty_cure_atoms_from_scaled_backing` (line 14777) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_prepare_insurance_lien_consume_delta` (line 14783) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_prepare_insurance_lien_terminal_release_delta` (line 14805) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_create_initial_margin_source_lien_if_needed` (line 14922) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `account_liquidation_equity` (line 14957)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `account_liquidation_deficit` (line 14962)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `account_equity_inner` (line 14971)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_transfer_account_residual_reward_credit` (line 15191) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_settle_account_b_chunk` (line 15200) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_set_account_pnl` (line 15210) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `set_account_pnl_for_loss` (line 15228)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `account_unliened_source_face_atoms` (line 15510)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kf_pending_credit_num` (line 15543)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `clamp_kf_pending_credit_to_claims` (line 15555)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `add_kf_pending_credit` (line 15577)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `loss_domain_books_now` (line 15601)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `apply_haircut_bounded_close_loss_to_pnl_in_loss_domain` (line 15612)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_apply_signed_kf_delta_to_pnl` (line 15854) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_account_unliened_source_realizable_support` (line 15865) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_account_source_realizable_support` (line 15880) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `rebalance_unclaimed_backing_across_asset_domains_not_atomic` (line 15934)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `s10_provider_fresh_for_test` (line 16024)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `s10_provider_fresh_by_rule_for_test` (line 16030)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `rebalance_unclaimed_backing_for_test_not_atomic` (line 16037)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `loss_domain_accepts_realized_backing` (line 16169)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `book_realized_loss_backing_for_domain_not_atomic` (line 16188)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `domain_creditor_claims_final` (line 16327)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_reserve_new_capital_backed_loss_for_source_domain_not_atomic` (line 16346) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `leg_kf_and_rent_are_current` (line 16427)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `leg_kf_delta_components_for_settlement_from_targets` (line 16484)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_leg_kf_delta_for_settlement` (line 16556) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `settle_leg_rent_not_atomic` (line 16740)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `charge_account_rent_current_not_atomic` (line 16771)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `full_account_refresh_with_s10_budget_not_atomic` (line 17057)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `band_observe_cert_not_atomic` (line 17302)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_collect_account_backing_utilization_fee_for_domain_not_atomic` (line 17488) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `oracle_reset_blocked_for_asset` (line 17763)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `band_prepare_accrual` (line 17933)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `band_finish_accrual` (line 17993)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `accrue_asset_to_with_rent_not_atomic` (line 18031)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `band_step_context` (line 18293)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `band_path_preview` (line 18313)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `band_accrual_preview` (line 18339)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `accrue_asset_path_with_rent_to_not_atomic` (line 18358)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `account_has_band_uncertified_leg` (line 18655)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `band_pin_expired_at` (line 18679)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `permissionless_auto_crank_s10_not_atomic` (line 19078)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `permissionless_auto_crank_s10_with_counterparty_not_atomic` (line 19094)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `permissionless_auto_crank_inner_not_atomic` (line 19110)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `permissionless_crank_s10_not_atomic` (line 19426)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `permissionless_crank_inner_not_atomic` (line 19435)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `s10_retry_for_unpositioned_asset` (line 19568)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `require_band_trade_shape` (line 19690)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `band_sides_before` (line 19743)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `band_leg_side_and_notional` (line 19767)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `band_side_is_full` (line 19788)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `band_leg_is_dust` (line 19806)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_require_position_change_adl_safe` (line 19891) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_require_asset_risk_change_allowed` (line 19902) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_asset_restart_next_counters` (line 20012) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_restarted_asset_slot_preserving_insurance_budget` (line 20027) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_canonical_retired_asset_slot` (line 20042) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_convert_source_claim_exposure_guard` (line 20350) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_position_change_touches_pending_domain_loss_barrier` (line 20427) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_h_lock_lane` (line 20522) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_h_lock_lane_with_threshold` (line 20537) [cfg(all(kani, feature = "fork-facade"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `track_kf_drift` (line 20560)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `settle_kf_laggard` (line 20592)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kf_hidden_loss_bound_for` (line 20622)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `asset_hidden_kf_loss_bound` (line 20640)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `domain_hidden_kf_loss_reservation` (line 20650)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `asset_hidden_kf_loss_is_insurance_covered` (line 20694)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `asset_loss_stale_blocks_risk_increase` (line 20737)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `fuzz_asset_hidden_kf_loss_bound` (line 20743) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `fuzz_asset_hidden_kf_loss_is_insurance_covered` (line 20752) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_can_ignore_unrelated_loss_stale_for_trade` (line 20795) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `trade_request_abs_size_q` (line 20842)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_trade_signed_size_deltas` (line 20860) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_ensure_close_progress_not_expired` (line 21447) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `credit_close_progress_principal_settlement` (line 21545)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_bankruptcy_residual_single_step_capacity` (line 21679) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `apply_bankruptcy_residual_chunk_to_loss_side` (line 21774)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_book_bankruptcy_residual_chunk_for_account_core` (line 21836) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_book_bankruptcy_residual_chunk_internal` (line 21855) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_apply_bankruptcy_residual_chunk_to_loss_side` (line 21865) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `liquidate_account_against_counterparty_not_atomic` (line 22268)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `counterparty_eligible_for_matched_close` (line 22284)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `try_reduce_position_matched` (line 22339)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `liquidate_account_inner_not_atomic` (line 22387)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `adl_wind_down_eligible` (line 22854)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `wind_down_adl_position_not_atomic` (line 22907)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_ensure_initial_margin` (line 23025) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_kernel_settle_positive_face_after_support` (line 23030) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_kernel_released_pnl_conversion_partition` (line 23043) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_kernel_retain_terminal_source_haircut` (line 23058) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_kernel_credit_post_snapshot_residual` (line 23073) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_retirement_backing_normalization` (line 23082) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_recredit_terminal_claim_free_overlap_for_source_domain_not_atomic` (line 23087) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_retire_terminal_unbudgeted_insurance_delta` (line 23099) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_prepare_counterparty_backing_expiry_delta` (line 23116) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_advance_resolved_slot` (line 23125) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_lapsed_source_backing_scan_step` (line 23134) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_create_resolved_payout_receipt_if_needed` (line 23155) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_ensure_no_positive_credit_initial_margin` (line 23188) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_trade_account_requires_initial_margin` (line 23195) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `charge_trade_fee_taker_only_not_atomic` (line 23349)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_charge_trade_fee_taker_only_not_atomic` (line 23419) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_accumulate_batch_trade_apply` (line 23616) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `execute_batch_band_maker_exempt_not_atomic` (line 23807)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `execute_trade_band_maker_exempt_not_atomic` (line 23825)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `execute_batch_band_scoped_not_atomic` (line 23846)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `fork_execute_trade_with_admit_threshold_not_atomic` (line 23913) [cfg(feature = "fork-facade")]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `fork_execute_batch_with_admit_threshold_not_atomic` (line 23938) [cfg(feature = "fork-facade")]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `fork_execute_batch_after_tail_validation_with_threshold_not_atomic` (line 23996) [cfg(feature = "fork-facade")]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `charge_recorded_domain_up_to_capacity` (line 24389)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `resolve_flat_unattributed_deficit_locally` (line 24533)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `group_has_unabsorbed_bankruptcy_loss` (line 24742)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `bankruptcy_hlock_claim_term_clear` (line 24796)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_bankruptcy_hlock_claim_term_clear` (line 24833) [cfg(any(test, kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `try_clear_bankruptcy_hlock_if_healthy` (line 24837)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `try_clear_bankruptcy_hlock_not_atomic` (line 24855)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `bankruptcy_hlock_asset_is_sole_ever_activated` (line 24879)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `mark_bankruptcy_hlock_event` (line 24900)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `mark_bankruptcy_hlock_unattributed` (line 24914)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `mark_bankruptcy_hlock_for_account` (line 24923)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_charge_account_fee_current_not_atomic` (line 24990) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_settle_negative_pnl_from_principal_core_not_atomic` (line 25004) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `x1_diff_charge` (line 25051) [cfg(feature = "x1-diff")]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `charge_account_fee_after_full_refresh_not_atomic` (line 25095)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_resolved_receipt_claimable_against_ledger` (line 25274) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `released_pnl_insurance_repay_capacity` (line 25507)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `repay_insurance_from_released_pnl_not_atomic` (line 25551)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `apply_stress_envelope_progress` (line 26045)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `clear_stress_envelope_v16` (line 26086)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `resolved_payout_rate_is_terminal` (line 26129)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_realize_one_source_domain_for_resolved_close_not_atomic` (line 26362) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_claim_resolved_payout_topup_core_not_atomic` (line 26528) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_leg_is_dead_for_forfeit` (line 27248) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_kernel_unilateral_close_capacity` (line 27390) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_kernel_reduce_position_delta` (line 27403) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_leg_has_exhausted_effective_oi` (line 27412) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_kernel_begin_full_drain_reset` (line 27417) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_kernel_normalize_social_loss_carry` (line 27425) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_account_b_settlement_chunk_from_leg` (line 27434) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_prepare_counterparty_impaired_lien_retirement_delta` (line 27444) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_prepare_account_counterparty_lien_impairment` (line 27453) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_source_lien_face_burn_plan` (line 27460) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_source_lien_face_burn_partition` (line 27477) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_source_lien_backing_release_for_face_burn` (line 27490) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_kernel_clear_leg` (line 27503) [cfg(any(kani, feature = "fuzz"))]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `kani_clear_terminal_spent_domain_budget_pair` (line 27512) [cfg(kani)]  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- new: `is_empty_encoding` (line 27810)  in `impl PortfolioLegV16Account`
+- new: `is_empty_encoding_by_field` (line 27831) [cfg(any(kani, test))]  in `impl PortfolioLegV16Account`
+- new: `kani_is_sparse_tail_default` (line 28175) [cfg(kani)]  in `impl PortfolioSourceDomainV16Account`
+- new: `kani_risk_notional_ceil` (line 28364) [cfg(kani)]  in ``
+- new: `position_change_increases_risk` (line 28385)  in ``
+- new: `long_to_short_equal_size_is_risk_increasing` (line 28417)  in `#[cfg(test)] mod position_change_risk_classifier_126_tests`
+- new: `short_to_long_equal_size_is_risk_increasing` (line 28421)  in `#[cfg(test)] mod position_change_risk_classifier_126_tests`
+- new: `flip_with_smaller_abs_is_risk_increasing` (line 28425)  in `#[cfg(test)] mod position_change_risk_classifier_126_tests`
+- new: `flip_with_larger_abs_is_risk_increasing` (line 28431)  in `#[cfg(test)] mod position_change_risk_classifier_126_tests`
+- new: `open_from_flat_is_risk_increasing` (line 28435)  in `#[cfg(test)] mod position_change_risk_classifier_126_tests`
+- new: `same_side_increase_is_risk_increasing` (line 28440)  in `#[cfg(test)] mod position_change_risk_classifier_126_tests`
+- new: `same_side_reduction_is_not_risk_increasing` (line 28445)  in `#[cfg(test)] mod position_change_risk_classifier_126_tests`
+- new: `close_to_flat_and_flat_to_flat_are_not_risk_increasing` (line 28450)  in `#[cfg(test)] mod position_change_risk_classifier_126_tests`
+- new: `unchanged_position_is_not_risk_increasing` (line 28456)  in `#[cfg(test)] mod position_change_risk_classifier_126_tests`
+- new: `initial_margin_gate_keeps_flips_and_exempts_only_strict_same_side_reductions` (line 28461)  in `#[cfg(test)] mod position_change_risk_classifier_126_tests`
+- new: `bankruptcy_hlock_is_active` (line 28501)  in ``
+- new: `bankruptcy_hlock_is_unattributed` (line 28506)  in ``
+- new: `bankruptcy_hlock_domain_mask` (line 28512)  in ``
+- new: `bankruptcy_hlock_mark_unattributed` (line 28522)  in ``
+- new: `bankruptcy_hlock_mark_domain` (line 28530)  in ``
+- new: `validate_bankruptcy_hlock_wire` (line 28539)  in ``
+- new: `kernel_trade_preexisting_oi_reduction_gate` (line 28576)  in ``
+- new: `kani_position_delta_increases_risk` (line 28629) [cfg(kani)]  in ``
+- new: `kani_position_change_requires_unit_adl` (line 28634) [cfg(kani)]  in ``
+- new: `kani_source_lien_fee_after_backing_release` (line 28640) [cfg(kani)]  in ``
+- new: `kani_adl_effective_quantity_ceil` (line 28649) [cfg(any(kani, feature = "fuzz"))]  in ``
+- new: `kani_raw_basis_for_adl_effective_quantity` (line 28658) [cfg(any(kani, feature = "fuzz"))]  in ``
+- new: `kani_funding_index_deltas` (line 28667) [cfg(any(kani, feature = "fuzz"))]  in ``
+- new: `kani_adl_scaled_accrual_index_deltas` (line 28676) [cfg(kani)]  in ``
+- new: `kani_trade_preflight_risk_gate` (line 28691) [cfg(kani)]  in ``
+- new: `kani_terminal_claim_free_overlap_recredit` (line 28706) [cfg(kani)]  in ``
+- new: `kani_terminal_slab_asset_step` (line 28719) [cfg(kani)]  in ``
+- new: `kani_terminal_slab_wait_continuation` (line 28744) [cfg(kani)]  in ``
+- new: `kani_eq_v16_config_account` (line 28756) [cfg(kani)]  in ``
+- new: `kani_eq_v16_optional_recovery_reason_account` (line 28802) [cfg(kani)]  in ``
+- new: `kani_eq_resolved_payout_ledger_v16_account` (line 28810) [cfg(kani)]  in ``
+- new: `kani_eq_market_group_v16_header_account` (line 28826) [cfg(kani)]  in ``
+- new: `kani_eq_asset_state_v16_account` (line 28888) [cfg(kani)]  in ``
+- new: `kani_eq_source_credit_state_v16_account` (line 28935) [cfg(kani)]  in ``
+- new: `kani_eq_backing_bucket_v16_account` (line 28954) [cfg(kani)]  in ``
+- new: `kani_eq_insurance_credit_reservation_v16_account` (line 28969) [cfg(kani)]  in ``
+- new: `kani_eq_engine_asset_slot_v16_account` (line 28981) [cfg(kani)]  in ``
+- new: `kani_trade_preexisting_oi_reduction_gate` (line 29011) [cfg(kani)]  in ``
+- new: `kani_trade_notional_floor` (line 29053) [cfg(kani)]  in ``
+- new: `kani_trade_fee_notional_ceil` (line 29077) [cfg(kani)]  in ``
+- new: `kani_checked_fee_bps` (line 29103) [cfg(kani)]  in ``
+- new: `kani_liquidation_fee_for_close` (line 29151) [cfg(kani)]  in ``
+- new: `kani_liquidation_fee_from_raw_fee` (line 29168) [cfg(kani)]  in ``
+- new: `kani_adjust_u128` (line 29222) [cfg(kani)]  in ``
+- new: `kf_adverse_travel` (line 29385)  in ``
+- new: `kani_pending_domain_loss_barrier_blocks_position_change` (line 29505) [cfg(kani)]  in ``
+- new: `scaled_adl_delta_with_carry_fast` (line 29536)  in ``
+- new: `reference` (line 29586)  in `#[cfg(test)] mod empty_leg_image_tests`
+- new: `empty_image_is_the_encoding_of_empty` (line 29620)  in `#[cfg(test)] mod empty_leg_image_tests`
+- new: `field_compare_matches_byte_compare_on_every_single_byte_change` (line 29631)  in `#[cfg(test)] mod empty_leg_image_tests`
+- new: `single_byte_corruptions_of_an_empty_leg_decode_like_the_reference` (line 29652)  in `#[cfg(test)] mod empty_leg_image_tests`
+- new: `next` (line 29674)  in `#[cfg(test)] mod scaled_adl_carry_fast_tests`
+- new: `fast_path_with_carry_matches_the_wide_path` (line 29683)  in `#[cfg(test)] mod scaled_adl_carry_fast_tests`
+- new: `kani_scaled_adl_delta_fast` (line 29729) [cfg(kani)]  in ``
+- new: `lp_vault_nav_atoms` (line 29775)  in `#[cfg(feature = "fork-facade")] pub mod lp_vault`
+- new: `lp_shares_for_deposit` (line 29849)  in `#[cfg(feature = "fork-facade")] pub mod lp_vault`
+- new: `lp_atoms_for_redemption` (line 29873)  in `#[cfg(feature = "fork-facade")] pub mod lp_vault`
+- new: `lp_fee_split` (line 29895)  in `#[cfg(feature = "fork-facade")] pub mod lp_vault`
+- new: `lp_redemption_cooldown_elapsed` (line 29910)  in `#[cfg(feature = "fork-facade")] pub mod lp_vault`
+- new: `account_equity_maint_raw` (line 29947)  in `#[cfg(feature = "fork-facade")] pub mod fork_facade`
+- new: `account_equity_net` (line 29957)  in `#[cfg(feature = "fork-facade")] pub mod fork_facade`
+- new: `account_equity_init_raw` (line 29967)  in `#[cfg(feature = "fork-facade")] pub mod fork_facade`
+- new: `account_equity_init_net` (line 29982)  in `#[cfg(feature = "fork-facade")] pub mod fork_facade`
+- new: `account_equity_withdraw_raw` (line 29988)  in `#[cfg(feature = "fork-facade")] pub mod fork_facade`
+- new: `account_equity_trade_open_raw` (line 30000)  in `#[cfg(feature = "fork-facade")] pub mod fork_facade`
+- new: `is_above_initial_margin` (line 30023)  in `#[cfg(feature = "fork-facade")] pub mod fork_facade`
+- new: `one_asset_market_fixture` (line 30053)  in `#[cfg(test)] mod e6_finalized_close_inert_tests`
+- new: `empty_account_fixture` (line 30069)  in `#[cfg(test)] mod e6_finalized_close_inert_tests`
+- new: `finalized_inert_ledger` (line 30083)  in `#[cfg(test)] mod e6_finalized_close_inert_tests`
+- new: `finalized_inert_close_allows_next_close_to_begin` (line 30114)  in `#[cfg(test)] mod e6_finalized_close_inert_tests`
+- new: `one_asset_market_fixture` (line 30152)  in `#[cfg(test)] mod bankruptcy_hlock_clear_predicate_tests`
+- new: `empty_account_fixture` (line 30168)  in `#[cfg(test)] mod bankruptcy_hlock_clear_predicate_tests`
+- new: `hlock_held_while_asset_close_ledger_has_residual` (line 30185)  in `#[cfg(test)] mod bankruptcy_hlock_clear_predicate_tests`
+- new: `an_unallocatable_write_off_atom_does_not_latch_the_hlock` (line 30240)  in `#[cfg(test)] mod bankruptcy_hlock_clear_predicate_tests`
+- new: `a_drain_only_side_never_holds_the_hlock` (line 30301)  in `#[cfg(test)] mod bankruptcy_hlock_clear_predicate_tests`
+- new: `a_reset_pending_side_never_holds_the_hlock` (line 30325)  in `#[cfg(test)] mod bankruptcy_hlock_clear_predicate_tests`
+- new: `hlock_clears_with_open_position_and_no_unabsorbed_loss` (line 30343)  in `#[cfg(test)] mod bankruptcy_hlock_clear_predicate_tests`
+- new: `two_asset_market_fixture` (line 30381)  in `#[cfg(test)] mod close_drift_scope_tests`
+- new: `account_with_leg_on_asset_zero` (line 30399)  in `#[cfg(test)] mod close_drift_scope_tests`
+- new: `open_ledger_on_asset_zero` (line 30438)  in `#[cfg(test)] mod close_drift_scope_tests`
+- new: `unrelated_asset_accrual_does_not_stale_an_open_close` (line 30462)  in `#[cfg(test)] mod close_drift_scope_tests`
+- new: `originating_asset_accrual_stales_an_open_close` (line 30491)  in `#[cfg(test)] mod close_drift_scope_tests`
+- new: `detached_originating_leg_never_stales_an_open_close` (line 30512)  in `#[cfg(test)] mod close_drift_scope_tests`
+- new: `margin_requirement_partition_regression` (line 30545)  in `#[cfg(test)] mod margin_rounding_tests`
+- new: `margin_requirement_is_exact_ceiled_with_min` (line 30559)  in `#[cfg(test)] mod margin_rounding_tests`
+- new: `margin_requirement_is_conservative_under_partition` (line 30575)  in `#[cfg(test)] mod margin_rounding_tests`
+- new: `asset_with_asymmetric_a` (line 30641)  in `/// GH#164 tripwire: the ATTACH writer's `oi_eff` contribution must no`
+- new: `audit_scan` (line 30660)  in `/// GH#164 tripwire: the ATTACH writer's `oi_eff` contribution must no`
+- new: `telescoped_oi` (line 30671)  in `/// GH#164 tripwire: the ATTACH writer's `oi_eff` contribution must no`
+- new: `attach_one_fill` (line 30677)  in `/// GH#164 tripwire: the ATTACH writer's `oi_eff` contribution must no`
+- new: `fixture_is_reachable_and_audit_clean` (line 30690)  in `/// GH#164 tripwire: the ATTACH writer's `oi_eff` contribution must no`
+- new: `the_fixture_is_one_where_an_a_scaled_writer_would_diverge` (line 30719)  in `/// GH#164 tripwire: the ATTACH writer's `oi_eff` contribution must no`
+- new: `attach_contribution_is_independent_of_the_side_a_scale` (line 30752)  in `/// GH#164 tripwire: the ATTACH writer's `oi_eff` contribution must no`
+- new: `attach_onto_asymmetric_a_preserves_cross_side_oi_equality` (line 30772)  in `/// GH#164 tripwire: the ATTACH writer's `oi_eff` contribution must no`
+- new: `audit_scanner_rejects_a_one_atom_cross_side_divergence` (line 30789)  in `/// GH#164 tripwire: the ATTACH writer's `oi_eff` contribution must no`
+- new: `recovery_lifecycle_exempts_the_cross_side_oi_symmetry_requirement` (line 30808)  in `/// GH#164 tripwire: the ATTACH writer's `oi_eff` contribution must no`
+- new: `domain` (line 30839)  in `#[cfg(test)] mod r1_netting_rate_tests`
+- new: `rate` (line 30848)  in `#[cfg(test)] mod r1_netting_rate_tests`
+- new: `exact_values_pin_booked_extra_and_pending` (line 30861)  in `#[cfg(test)] mod r1_netting_rate_tests`
+- new: `booked_amount_is_not_scaled` (line 30883)  in `#[cfg(test)] mod r1_netting_rate_tests`
+- new: `never_below_stored_never_above_one_and_monotone` (line 30893)  in `#[cfg(test)] mod r1_netting_rate_tests`
+- new: `domain_lock_covers_every_lien_class` (line 30911)  in `#[cfg(test)] mod r1_netting_rate_tests`
+- new: `protective_rate_is_the_loser_first_rate` (line 30928)  in `#[cfg(test)] mod r1_netting_rate_tests`
+- new: `empty_domain_keeps_the_stored_rate` (line 30942)  in `#[cfg(test)] mod r1_netting_rate_tests`
+- new: `repay_pnl_postconditions_hold` (line 30953)  in ``
+- new: `rent_only_move_does_not_mark_the_cohort_and_kf_still_do` (line 30978)  in `#[cfg(test)] mod rent_not_kf_cohort_tests`
+- new: `leg_guard_requires_both_the_kf_epoch_and_the_rent_snapshot` (line 31013)  in `#[cfg(test)] mod rent_not_kf_cohort_tests`
+- removed: `source_domain_capacity_after_admission` (line 43)  in ``
+- removed: `kf_cohort_frame_eq` (line 1095) [cfg(all(kani, feature = "contracts"))]  in `impl V16Core`
+- removed: `kernel_provider_protection_num` (line 1285)  in `impl V16Core`
+- removed: `kernel_provider_protection_floor_observe` (line 1301)  in `impl V16Core`
+- removed: `kernel_provider_protection_floor_shift` (line 1314)  in `impl V16Core`
+- removed: `unliened_claim_bound_num_for_source_credit_state` (line 1335)  in `impl V16Core`
+- removed: `kernel_consume_insurance_layer` (line 1963)  in `impl V16Core`
+- removed: `kernel_resolved_payout_step` (line 1999)  in `impl V16Core`
+- removed: `kernel_resolved_junior_backing_need_num` (line 2135)  in `impl V16Core`
+- removed: `kernel_resolved_receipt_can_still_gain` (line 2153)  in `impl V16Core`
+- removed: `kernel_side_adl_index` (line 2376)  in `impl V16Core`
+- removed: `kernel_sync_side_adl_index` (line 2403)  in `impl V16Core`
+- removed: `kernel_raw_basis_after_adl_reduction` (line 2485)  in `impl V16Core`
+- removed: `kernel_trade_side_oi_cap_gate` (line 2555)  in `impl V16Core`
+- removed: `kernel_trade_preexisting_oi_reduction_gate` (line 2573)  in `impl V16Core`
+- removed: `build_trade_request_guard_summary` (line 2902)  in `impl V16Core`
+- removed: `kernel_social_loss_chunk_cap` (line 3017)  in `impl V16Core`
+- removed: `apply_bankruptcy_residual_chunk_to_loss_side` (line 3067)  in `impl V16Core`
+- removed: `kernel_bresidual_step` (line 3148)  in `impl V16Core`
+- removed: `kernel_live_liquidation_required` (line 4203)  in `impl V16Core`
+- removed: `all_pass` (line 6992)  in `impl TradeRequestGuardSummaryV16`
+- removed: `provider_protection_and_floor_num` (line 8708)  in `impl EngineAssetSlotV16Account`
+- removed: `side_adl_totals_are_coherent` (line 9643) [cfg(any(test, kani, feature = "audit-scan"))]  in `impl<'a, T> MarketGroupV16View<'a, T>`
+- removed: `stored_source_credit_rate_num` (line 9999)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `observe_provider_protection_before_change` (line 10076)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `provider_protection_is_observed` (line 10121)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `remember_provider_protection_observed` (line 10137)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `shift_provider_protection_floor_num` (line 10164)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `provider_protection_num` (line 10189)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `provider_protection_floor_num` (line 10201)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `release_provider_principal_after` (line 10212)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `adjust_provider_principal_num` (line 10226)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `provider_principal_num` (line 10271)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `stranded_loser_backing_owed_to_twin_num` (line 10286)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `loser_paid_backing_num` (line 10317)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `stranded_loser_backing_may_move` (line 10339)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `add_loser_paid_counterparty_backing_unchecked` (line 10384)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `add_loser_paid_counterparty_backing_payments_unchecked` (line 10398)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `backing_freshness_horizon_slots` (line 10410)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `effective_backing_expiry_slot` (line 10426)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `recompute_source_credit_domain_after_mutations` (line 10526)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `add_fresh_counterparty_backing_steps_unchecked` (line 10676)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `resolved_junior_payout_pool` (line 10872)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `resolved_counterparty_backing_surplus` (line 10904)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `withdraw_resolved_counterparty_backing_surplus_not_atomic` (line 10929)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `first_lapsed_roster_source_backing_for_account_at_slot` (line 11008)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `first_lapsed_latent_source_backing_for_account_at_slot` (line 11060)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `release_or_retire_counterparty_lien_backing_not_atomic` (line 11278)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `kf_loss_lien_backing_to_consume_num` (line 12363)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `source_domain_prospective_support_for_face` (line 12586)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `source_lien_effective_reserved_supporting` (line 12733)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `set_account_pnl_after_kf_loss_claim_burn` (line 14549)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `settle_kf_loss_before_support_not_atomic` (line 14796)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `slot_unliened_claim_num` (line 14965)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `net_slot_face_at_par_not_atomic` (line 14993)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `cancel_loss_domain_face_at_par_not_atomic` (line 15159)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `twin_loser_paid_share_num` (line 15191)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `loss_bucket_accepts_fresh` (line 15216)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `pay_kf_loss_from_free_capital_not_atomic` (line 15240)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `book_kf_loss_support_for_source_domain_not_atomic` (line 15602)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `book_realized_kf_loss_for_source_domain_not_atomic` (line 15629)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `leg_kf_epoch_is_current` (line 15845)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `place_stranded_loser_backing_after_leg_resolved_not_atomic` (line 16111)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `settle_stranded_loser_backing_resolved_not_atomic` (line 16177)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `settle_resolved_account_side_effects_after_kf_not_atomic` (line 17014)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `settle_account_side_effects_after_kf_not_atomic` (line 17026)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `highest_risk_liquidatable_asset` (line 17992)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `effective_abs_q_for_raw_basis` (line 18500)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `ensure_source_domain_capacity_for_new_exposure` (line 19365)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `remaining_effective_oi_for_leg` (line 19492)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `clear_forfeited_leg` (line 19505)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `sync_side_adl_index` (line 20275)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `resolved_receipt_can_still_gain` (line 22431)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `source_claim_whole_atom_conversion` (line 22611)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `source_claim_converts_to_zero_unpledged` (line 22634)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `source_claim_share_is_partly_pledged` (line 22662)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `settle_resolved_account_kf_not_atomic` (line 23167)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `resolved_unsettled_legs_with_a_possible_loss` (line 23271)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `resolved_residual_can_still_be_booked` (line 23310)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `resolved_side_can_still_be_charged` (line 23348)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `resolved_legs_only_wait_for_the_other_side` (line 23370)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `canonicalize_spent_backing_history_not_atomic` (line 23703)  in `impl<'a, T> MarketGroupV16ViewMut<'a, T>`
+- removed: `social_loss_book_split` (line 25183)  in ``
+- removed: `f_snap_after_settlement` (line 25245)  in ``
+- removed: `f_snap_residual_is_sub_atom` (line 25300)  in ``
+- removed: `leg_f_snap_is_settled` (line 25325)  in ``
+
+## Types: 28 changed, 12 new, 6 removed
+- changed: `V16Error`
+- changed: `SideV16`
+- changed: `SideModeV16`
+- changed: `AssetLifecycleV16`
+- changed: `BackingBucketStatusV16`
+- changed: `ActionableSummaryV16`
+- changed: `AutoCrankWorkV16`
+- changed: `PermissionlessRecoveryReasonV16`
+- changed: `V16Config`
+- changed: `AssetStateV16`
+- changed: `SourceCreditStateV16`
+- changed: `BackingBucketV16`
+- changed: `InsuranceCreditReservationV16`
+- changed: `MarketGroupV16ViewMut`
+- changed: `PortfolioLegV16`
+- changed: `PositionRouteV16`
+- changed: `TokenValueClassV16`
+- changed: `TokenValueFlowProofV16`
+- changed: `SupportLossApplicationV16`
+- changed: `AccountKfSettlementPreparedV16`
+- changed: `FlatSourceLienNormalizationV16`
+- changed: `V16ConfigAccount`
+- changed: `AssetStateV16Account`
+- changed: `EngineAssetSlotV16Account`
+- changed: `MarketGroupV16HeaderAccount`
+- changed: `PortfolioLegV16Account`
+- changed: `PortfolioAccountV16Account`
+- changed: `TerminalSlabOutcomeV16`
+- new: `LossProvenanceV16`
+- new: `LiquidationResidualChargeV16`
+- new: `FlatDeficitRouteV16`
+- new: `BandStepContextV16`
+- new: `BandAccrualGateV16`
+- new: `KfLossNettingV16`
+- new: `AdlWindDownBoundV16`
+- new: `AdlWindDownRequestV16`
+- new: `AdlWindDownOutcomeV16`
+- new: `KfDriftSideV16`
+- new: `KfDriftSideV16Account`
+- new: `FeePolicyUpdateV16`
+- removed: `KfLossLienPaymentV16`
+- removed: `ParNettingBatchV16`
+- removed: `KfLossDomainCreditV16`
+- removed: `TradeRequestGuardSummaryV16`
+- removed: `ResolvedSourceRealizationV16`
+- removed: `BResidualStepV16`
+types that are or contain a changed type: ['AccountKfSettlementPreparedV16', 'ActionableSummaryV16', 'AdlWindDownBoundV16', 'AdlWindDownOutcomeV16', 'AdlWindDownRequestV16', 'AssetLifecycleV16', 'AssetStateV16', 'AssetStateV16Account', 'AutoCrankOutcomeV16', 'AutoCrankPlanV16', 'AutoCrankResultV16', 'AutoCrankWorkV16', 'BackingBucketStatusV16', 'BackingBucketV16', 'BandAccrualGateV16', 'BandStepContextV16', 'CloseProgressLedgerV16', 'EngineAssetSlotV16Account', 'FeePolicyUpdateV16', 'FlatDeficitRouteV16', 'FlatSourceLienNormalizationV16', 'InsuranceCreditReservationV16', 'KfDriftSideV16', 'KfDriftSideV16Account', 'KfLossNettingV16', 'LiquidationResidualChargeV16', 'LossProvenanceV16', 'Market', 'MarketGroupV16HeaderAccount', 'MarketGroupV16View', 'MarketGroupV16ViewMut', 'PermissionlessCrankActionV16', 'PermissionlessCrankRequestV16', 'PermissionlessProgressOutcomeV16', 'PermissionlessRecoveryReasonV16', 'PortfolioAccountV16Account', 'PortfolioLegV16', 'PortfolioLegV16Account', 'PortfolioV16View', 'PortfolioV16ViewMut', 'PositionRouteV16', 'SideModeV16', 'SideV16', 'SourceCreditStateV16', 'SupportLossApplicationV16', 'TerminalSlabOutcomeV16', 'TokenValueClassV16', 'TokenValueFlowProofV16', 'V16Config', 'V16ConfigAccount', 'V16Error']
+
+## Kernels of the list
+| Label | Function | Own text | Reaches a changed/new function (by name) | Names a changed type (own text or a reached function) | New proof needed |
+|---|---|---|---|---|---|
+| K01 | `apply_backing_provider_earnings_withdraw` | changed | no | V16Error | YES |
+| K02 | `kernel_mark_kf_stale_cohorts` | changed | no | AssetStateV16, V16Error | YES |
+| K03 | `kernel_settle_kf_stale_cohort` | changed | no | AssetStateV16, SideV16, V16Error | YES |
+| K04 | `available_backing_num_for_source_credit_state` | changed | no | SourceCreditStateV16, V16Error | YES |
+| K05 | `prepare_source_positive_claim_burn_delta` | changed | no | SourceCreditStateV16, V16Error | YES |
+| K06 | `prepare_source_positive_claim_bound_delta` | changed | no | SourceCreditStateV16, V16Error | YES |
+| K07 | `kernel_resize_leg_same_side` | changed | no | AssetStateV16, MarketGroupV16ViewMut, PortfolioLegV16, SideV16, V16Error (own text: AssetStateV16, MarketGroupV16ViewMut, PortfolioLegV16, SideV16) | YES |
+| K08 | `kernel_initial_margin_gate` | changed | no | V16Error | YES |
+| K09 | `kernel_locked_margin_gate` | changed | no | V16Error | YES |
+| K10 | `kernel_accumulate_batch_trade` | changed | no | V16Error | YES |
+| K11 | `kernel_settle_principal` | changed | no | V16Error | YES |
+| K12 | `kernel_consume_insurance_layer` | REMOVED | | | n/a |
+| K13 | `kernel_resolved_payout_step` | REMOVED | | | n/a |
+| K14 | `kernel_released_pnl_conversion_partition` | changed | no | V16Error | YES |
+| K15 | `kernel_retain_terminal_source_haircut` | changed | no | V16Error | YES |
+| K16 | `kernel_classify_position_delta` | changed | no | PositionRouteV16 | YES |
+| K17 | `kernel_trade_side_oi_cap_gate` | REMOVED | | | n/a |
+| K18 | `kernel_reduce_position_delta` | changed | no | SideV16, V16Error | YES |
+| K19 | `first_actionable_slot` | changed | no | no | YES |
+| K20 | `select_auto_crank_plan` | changed | no | ActionableSummaryV16, AutoCrankPlanV16, PermissionlessRecoveryReasonV16 | YES |
+| K21 | `build_trade_request_guard_summary` | REMOVED | | | n/a |
+| K22 | `kernel_cert_is_current` | changed | no | no | YES |
+| K23 | `actionable_summary_from_signals` | changed | no | ActionableSummaryV16 | YES |
+| K24 | `kernel_open_close_snapshot_is_stale` | changed | no | no | YES |
+| K25 | `kernel_social_loss_chunk_cap` | REMOVED | | | n/a |
+| K26 | `apply_bankruptcy_residual_chunk_to_loss_side` | new | no | AssetStateV16, SideV16, V16Error | YES |
+| K27 | `kernel_bresidual_step` | REMOVED | | | n/a |
+| K28 | `kernel_forfeit_residual_step` | changed | no | no | YES |
+| K29 | `kernel_settle_resolved_pnl_after_booking` | changed | no | V16Error | YES |
+| K30 | `kernel_advance_leg_b_snap` | changed | no | PortfolioLegV16, V16Error | YES |
+| K31 | `kernel_normalize_social_loss_carry` | changed | no | V16Error | YES |
+| K32 | `kernel_retain_leg_as_pending_obligation` | changed | no | AssetStateV16, PortfolioLegV16, SideV16, V16Error | YES |
+| K33 | `kernel_recovery_pending_obligation_release_allowed` | changed | no | AssetLifecycleV16, V16Error | YES |
+| K34 | `kernel_clear_leg` | changed | kernel_band_detach, kernel_normalize_social_loss_carry | AssetStateV16, PortfolioLegV16, SideModeV16, SideV16, V16Error | YES |
+| K35 | `kernel_attach_leg` | changed | add_open_interest_for_new_position, kernel_band_attach | AssetStateV16, PortfolioLegV16, SideV16, V16Error | YES |
+| K36 | `prepare_counterparty_lien_create_delta` | changed | no | BackingBucketStatusV16, BackingBucketV16, SourceCreditStateV16, V16Error | YES |
+| K37 | `prepare_counterparty_backing_add_delta` | changed | no | BackingBucketStatusV16, BackingBucketV16, SourceCreditStateV16, V16Error | YES |
+| K38 | `prepare_counterparty_backing_withdraw_delta` | changed | no | BackingBucketStatusV16, BackingBucketV16, SourceCreditStateV16, V16Error | YES |
+| K39 | `prepare_counterparty_lien_release_delta` | changed | no | BackingBucketStatusV16, BackingBucketV16, SourceCreditStateV16, V16Error | YES |
+| K40 | `prepare_counterparty_lien_terminal_release_delta` | changed | no | BackingBucketStatusV16, BackingBucketV16, SourceCreditStateV16, V16Error | YES |
+| K41 | `prepare_counterparty_lien_consume_delta` | changed | no | BackingBucketStatusV16, BackingBucketV16, SourceCreditStateV16, V16Error | YES |
+| K42 | `prepare_counterparty_lien_impair_delta` | changed | no | BackingBucketStatusV16, BackingBucketV16, SourceCreditStateV16, V16Error | YES |
+| K43 | `prepare_counterparty_impaired_lien_retirement_delta` | changed | no | BackingBucketStatusV16, BackingBucketV16, SourceCreditStateV16, V16Error | YES |
+| K44 | `prepare_insurance_lien_create_delta` | changed | no | InsuranceCreditReservationV16, SourceCreditStateV16, V16Error | YES |
+| K45 | `prepare_insurance_lien_release_delta` | changed | no | InsuranceCreditReservationV16, SourceCreditStateV16, V16Error | YES |
+| K46 | `prepare_insurance_lien_terminal_release_delta` | changed | no | InsuranceCreditReservationV16, SourceCreditStateV16, V16Error | YES |
+| K47 | `prepare_insurance_lien_impair_delta` | changed | no | InsuranceCreditReservationV16, SourceCreditStateV16, V16Error | YES |
+| K48 | `health_requirements_from_base_and_target_lag` | changed | no | V16Error | YES |
+| K49 | `debit` | changed | no | TokenValueClassV16, TokenValueFlowProofV16, V16Error (own text: TokenValueClassV16, V16Error) | YES |
+| K50 | `apply_total_delta` | changed | no | V16Error | YES |
+| K51 | `credit_backing_provider_earnings_delta` | changed | no | V16Error | YES |
+| K52 | `set_domain_insurance_spent_delta` | changed | apply_total_delta | V16Error | YES |
+| K53 | `set_domain_insurance_budget_delta` | changed | apply_total_delta | V16Error | YES |
+| K54 | `withdraw_domain_insurance_delta` | changed | no | V16Error | YES |
+| K55 | `credit_account_from_insurance_delta` | changed | no | V16Error | YES |
+| K56 | `retire_terminal_unbudgeted_insurance_delta` | changed | no | V16Error | YES |
+| K57 | `asset_restart_next_counters` | changed | no | V16Error | YES |
+| K58 | `trade_signed_size_deltas` | changed | no | V16Error | YES |
+| K59 | `kernel_side_adl_index` | REMOVED | | | n/a |
+| K60 | `kernel_raw_basis_after_adl_reduction` | REMOVED | | | n/a |
+| K61 | `kernel_provider_protection_num` | REMOVED | | | n/a |
+| K62 | `kernel_provider_protection_floor_observe` | REMOVED | | | n/a |
+| K63 | `kernel_provider_protection_floor_shift` | REMOVED | | | n/a |
+
+kernels that need a new proof: 52: K01 K02 K03 K04 K05 K06 K07 K08 K09 K10 K11 K14 K15 K16 K18 K19 K20 K22 K23 K24 K26 K28 K29 K30 K31 K32 K33 K34 K35 K36 K37 K38 K39 K40 K41 K42 K43 K44 K45 K46 K47 K48 K49 K50 K51 K52 K53 K54 K55 K56 K57 K58

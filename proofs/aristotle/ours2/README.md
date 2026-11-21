@@ -1,41 +1,49 @@
-# Resolved close on the engine's own text: second Aristotle run
+# Resolved close and payout top-up on the engine's own text (ours2, v3 framing)
 
-## Result
+## Result so far
 
-**Nothing is proved by run 2.** The job was submitted on 2026-11-21 at 04:10:12 UTC and was cancelled from outside this session about two minutes later, before Aristotle recorded any property. About 1 free credit was used (245 → 244); nothing was bought. It was not resubmitted: see [JOB.md](JOB.md). Run 1's results ([../ours/](../ours/README.md)) stand, and are about a hand transcription.
+- **Nothing new is proved yet.** The v3 Aristotle job has not returned results (see [JOB.md](JOB.md)).
+- **F3 (`wide_mul_div_floor_u128`): proved (upstream Aristotle, add1d027; confirmed identical text).**
+  Toly's `changed_fns.py`, run unchanged on `src/wide_math.rs` add1d027 → our c38b6b1e: the function's own text is the same, it reaches no changed or new function and names no changed type ([evidence](evidence/f3_changed_fns_add1d027_vs_c38b6b1e.txt)). No credits were spent on F3.
+- **No T15 row (the full resolved close) is attempted** in v3. A whole-method proof of the close is out of this budget (ROADMAP: 3 of 32 such properties for about 1,970 credits). What v3 asks for instead, and which rows it does and does not close, is in [LEDGER-MAP.md](LEDGER-MAP.md).
+- **None of Toly's 63 kernel proofs carry over to our v16.rs** by his rule: his `changed_fns.py` on d1fa39f6 → c38b6b1e reports 52 kernels needing a new proof and 11 removed ([evidence](evidence/v16_changed_fns_d1fa39f6_vs_c38b6b1e.txt)).
 
-What exists and was checked locally (none of it is a proof):
+## What v3 asks Aristotle to prove
 
-- **The slice** ([project/](project/), 6 files, 136,668 bytes). `src/wide_math.rs` is the engine's file. `src/engine_slice.rs` is 885 engine lines in 35 blocks, each byte-identical to its line range of `src/v16.rs` at `c38b6b1e`, plus 319 marked non-engine lines. `gen_slice2.py --check` and `slice_diff2.py` both report every block identical. It compiles with `rustc --edition 2021 --crate-type lib --emit=metadata -C overflow-checks=on` and `cargo check --release`, no warnings.
-- **Byte-identical engine text in the slice:** the byte wrappers and codecs, the snapshot capture (`initialize_resolved_payout_ledger_if_needed` and `residual`), receipt creation, the claimable amount, receipt payment, receipt clearing (`clear_fully_diluted_resolved_receipt_if_terminal`), the top-up, `set_account_pnl`/`set_account_pnl_inner`, the token-flow check with `validate`, and the close tail (engine 26643-26702).
-- **Still stubbed or absent** ([SLICE-DIFF.md](SLICE-DIFF.md)): `validate_shape` and `validate_with_market` return `Ok(())`; `sync_unattributed_loss_lock` returns `Ok(())`; `burn_account_source_claim_bound_num` returns `Ok(())`, which is the engine's behaviour only for an account with no source-claim bound left; five functions in a branch the path cannot take are `panic!` stubs; the account and market structs keep only the fields the path names; the 58 engine lines before the close tail are absent, so `pnl >= 0` is a precondition.
-- **Run 1's differences:** D1 closed, D3 closed, D4 partly closed, D2 not closed. Details and reasons in [SLICE-DIFF.md](SLICE-DIFF.md).
-- **Two findings from running the engine text** (`check/`, a random search, about 1.25 million closes; a test, not a proof):
-  1. Run 1's invariant is not kept by a close once the engine's receipt clearing is in the code. Example: one account, `vault = 632`, `c_tot = 166`, `insurance = 466`, `snapshot_residual = 104`, receipt face 351 paid 104 at rate 104/351, nothing unreceipted. The close pays 166 and clears the receipt; run 1's `backed` then needs `570 <= 466`. The invariant here carries a list of cleared receipts, and no counterexample to RCs1, RCs2, RCs4, RCs5, RCs7, RC3s, RC6s was found with it.
-  2. Run 1's RC6 ("any order gives the same accounts") is false on the engine text: in 1,403 of 249,633 order pairs the receipts differed, always as "cleared in one order, present and fully paid in the other". Totals and the market header were equal in all pairs.
+Following ROADMAP's first way forward (pure kernels over small records), on the crate exactly as committed at c38b6b1e (no file edited; built by [tools/make_upload.sh](tools/make_upload.sh), which checks every blob id):
 
-  These are not engine bugs as far as this work shows: no close overpaid in the search. They are corrections to what run 1's statements say about the engine.
-- **F3 (`wide_mul_div_floor_u128`): not proved here.** Text check (`tools/wide_math_text_check.sh`): our `src/wide_math.rs` and upstream `add1d027` are identical on our lines 1-1422, 1426-1631 (which contain the function, at 1623-1629) and 1724-2217; the differences are three comment/attribute lines at 1423-1425 and the k-pair functions at 1632-1723, which nothing before line 1636 names. Upstream's ledger records F3 as proved by Aristotle on `add1d027`; we did not re-run or check that proof. Kani here covers the function for 8-bit inputs only (`proof_v17_wide_mul_div_floor_stub_correct`); no new Kani attempt was made (the 16-bit harness is documented in `tests/proofs_v17_fork.rs` as intractable, and we had no cheaper structured idea).
-- **Our Lean statements** (`statements/Spec/ResolvedClose2Model.lean`, `ResolvedClose2.lean`) typecheck with Lean 4.34.0 core: 7 theorems, 7 `sorry` warnings. They are a hand model; nothing shows it matches the Rust.
+| Label | Function | Toly row | What a proof would close |
+|---|---|---|---|
+| PR1.contract, PR1.nopanic | `V16Core::kernel_recompute_resolved_payout_rate` | PR1 | the whole row PR1 |
+| P15.nopanic, P15.contract | `resolved_receipt_claimable_against_ledger` | P15 | P15, **given** the ledger-rate invariant (PR1 + PR2–PR4; PR2–PR4 not attempted). Uses F3 as a hypothesis. |
+| OURS-K1.contract, .nopanic | `apply_resolved_payout_receipt_payment` | no row | a callee fact of the close and the top-up; closes no row |
+| OURS-K2.contract, .nopanic | `capital_and_resolved_payout_to_external_out` + `validate` | no row | the token-flow check: passes exactly when the vault falls by capital paid + resolved paid = payout; closes no row |
+| T14.header | `claim_resolved_payout_topup_not_atomic` (its two inner calls opaque) | T14.header | the whole row, if proved (path structure: it ends in `validate_shape()?`) |
+| T14.account | same | T14.account | the whole row, if proved |
+
+**A kernel proof is not a T15 proof.** PR1, P15, OURS-K1 and OURS-K2 are facts about functions the close calls; T15.header/scan/account/mirror stay open whatever v3 returns.
+
+Spec: [v3/aristotle/resolved_close_kernels_spec.md](v3/aristotle/resolved_close_kernels_spec.md). Prompt: [v3/stage_v3_resolved_close_kernels.txt](v3/stage_v3_resolved_close_kernels.txt), in the style of Toly's `stage_s2_trade_pilot.txt` and `stage_b5_remaining_kernels.txt`; statements reuse his ledger wording, and F3's text is copied from his `specs/wide_math_spec.md`.
+
+Checked locally (none of it is a proof): the upload builds with `cargo build --release` (overflow checks on); a random test of the four Part 1 statements, 2,000,000 cases each, found no counterexample ([v3/check_part1.rs](v3/check_part1.rs), run by [v3/run_check.sh](v3/run_check.sh) on a scratch copy, never uploaded). Mutating two expected conditions made the test fail, so it does exercise them.
+
+## Lean statements
+
+Toly's `Spec/*.lean` are separation-logic contracts over a Mir model that Aristotle generates from the compiled crate; they cannot be written for new functions without that generated vocabulary. So v3's statements are the spec file (his kernel-spec format and ledger wording). The earlier `statements/Spec/ResolvedClose2*.lean` are a hand model from run 2's framing: not used by v3, nothing shows they match the Rust.
+
+## Earlier work in this directory (superseded framing)
+
+- Run 2 (project `eb31e0d7`, task `c6bd990e`): cancelled after about 2 minutes, **nothing proved**; not resubmitted and not continued. Its files (`project/`, `gen_slice2.py`, `slice_diff2.py`, `SLICE-DIFF*.md`, `check/`, `statements/`, `prompts/`) are kept as a record. Its two findings from running the engine text still stand as test results, not proofs: run 1's invariant is not kept by a close once `clear_fully_diluted_resolved_receipt_if_terminal` is in the code, and run 1's RC6 is false on the engine text.
+- Run 1 (`../ours/`, RC1–RC7): proofs about a hand transcription, not about c38b6b1e and not of any T15/T14 row (see LEDGER-MAP).
 
 ## Files
 
 | Path | What |
 |---|---|
-| `project/` | The upload. |
-| `project/aristotle/resolved_close_spec.md` | Stubs, invariant `Inv(M, A, CL)`, properties RCs1, RCs2, RCs4, RCs5, RCs7, F3, RC3s, RC6s, what Kani covers. |
-| `prompts/stage_e2e_rcs_resolved_close_engine_text.txt` | The task text that was sent. |
-| `SLICE-DIFF.md` | Status of D1-D4; A: byte comparison of every block; B: every non-engine line; C: diff hunks. Regenerate with `python3 slice_diff2.py --write`. |
-| `gen_slice2.py` | Builds the two generated files from `git show c38b6b1e:...`; `--check` compares. |
-| `check/` | Random search on the uploaded crate: `cargo run --release -- 400000` (set `CARGO_TARGET_DIR` outside the repo). |
-| `tools/frame_scan.py` | Text scan behind the statement about the burn stub. |
-| `tools/wide_math_text_check.sh` | The F3 text comparison. |
-| `statements/` | Our reference statements in Lean (all `sorry`). |
-| `JOB.md` | Submission, cancellation, credits. |
-
-## Links
-
-- Branch: https://github.com/dcccrypto/percolator/tree/agent/J-20261121-ENG-E2E-PROOFS/proofs/aristotle/ours2
-- Slice, spec, prompt, statements: https://github.com/dcccrypto/percolator/commit/36005883de7d82b549842b8144db768138157010
-- Job submitted: https://github.com/dcccrypto/percolator/commit/a72e1bd6
-- Cancellation recorded: https://github.com/dcccrypto/percolator/commit/30a018c8
+| `STEER.md`, `STEER-ACK.md` | The change of plan (04:02 GMT) and its acknowledgement. |
+| `LEDGER-MAP.md` | Every property, Toly's row id, status, evidence; T15 Ok-path reading. |
+| `JOB.md` | Submission, polling, credits. |
+| `v3/` | Spec, prompt, random test of Part 1. |
+| `tools/changed_fns.py`, `tools/rs_scan.py` | Toly's scripts, byte-identical to `08d4fd09:proofs/`. |
+| `tools/make_upload.sh` | Builds the upload from `git show c38b6b1e:…` and checks blob ids. |
+| `evidence/` | changed_fns outputs, blob ids, close-path text status. |
