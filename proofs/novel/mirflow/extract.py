@@ -803,11 +803,14 @@ def lean_state(a):
                                     ", ".join("(%d, %s)" % (l, lean_aval(v)) for l, v in sorted(av.items())))
 
 
+GEN_NS = "Gen"
+
+
 def emit_lean(ns, doc, ir, inv, req, reqP, exempt, ok_only, checks, decide_tac):
     o = []
     o.append("import MirFlow.Core\n")
     o.append("/-\n" + doc + "\n-/\n")
-    o.append("namespace MirFlow.Gen.%s\n" % ns)
+    o.append("namespace MirFlow.%s.%s\n" % (GEN_NS, ns))
     o.append("open MirFlow\n")
     o.append("def cfg : Cfg := [")
     for i, (st, t) in enumerate(ir):
@@ -846,7 +849,7 @@ def emit_lean(ns, doc, ir, inv, req, reqP, exempt, ok_only, checks, decide_tac):
         for k in reqP:
             parts.append("h.2 %d (by simp [goal])" % k)
         o.append("  exact ⟨%s⟩" % ", ".join(parts) if len(parts) > 1 else "  exact %s" % parts[0])
-    o.append("\nend MirFlow.Gen.%s" % ns)
+    o.append("\nend MirFlow.%s.%s" % (GEN_NS, ns))
     return "\n".join(o) + "\n"
 
 

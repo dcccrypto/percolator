@@ -1,0 +1,3165 @@
+{
+ "methods": 334,
+ "rounds": 4,
+ "summaries": {
+  "MarketGroupV16ViewMut::<'_, T>::account_b_settlement_chunk": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::account_b_settlement_chunk_from_leg": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::account_fee_anchor_for_loss_currentness": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::account_haircut_equity": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::account_has_active_exposure_for_source_domain": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::account_has_active_source_claim_exposure": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::account_has_loss_stale_live_leg": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::account_has_normalizable_source_credit_lien": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::account_has_target_effective_lag": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::account_source_realizable_support": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::account_touches_pending_domain_loss_barrier": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::add_account_source_positive_pnl_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [
+    1
+   ],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::advance_close_progress_ledger": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::ensure_close_progress_not_expired"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::as_view": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": true,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::asset_has_target_effective_lag": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::asset_has_unsettled_kf_position": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::asset_is_loss_stale": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::asset_local_has_position_or_loss_state": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::asset_state": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::auto_crank_selected_assets": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::available_domain_insurance": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::b_target_for_leg": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::backing_bucket_for_domain": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::backing_bucket_raw_status_expiry_for_domain": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::backing_freshness_horizon_slots": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": true,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::backing_provider_earnings_total": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": true,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::bankruptcy_residual_single_step_capacity": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::build_actionable_summary": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::build_actionable_summary_and_selected_assets": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::build_actionable_summary_at_slot": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::can_ignore_unrelated_loss_stale_for_trade": {
+   "args": [
+    "market",
+    "account",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1,
+    2
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1,
+    2
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::canonicalize_retired_empty_asset_slot_not_atomic": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::canonicalize_spent_backing_history_not_atomic": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::charge_account_backing_fee_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::checked_asset_set_epoch_bump": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::claim_resolved_payout_topup_not_atomic": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [
+    0,
+    1
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::clear_fully_diluted_resolved_receipt_if_terminal": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::close_resolved_account_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [
+    0,
+    1
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::clear_fully_diluted_resolved_receipt_if_terminal",
+    "MarketGroupV16ViewMut::<'_, T>::prepare_one_source_domain_for_resolved_close_not_atomic",
+    "MarketGroupV16ViewMut::<'_, T>::sync_account_fee_to_slot_not_atomic"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::compute_account_health_cert_with_price_override": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::configured_domain_count": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::create_account_source_credit_lien_for_effective_any_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [
+    1
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::credit_account_from_insurance_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::credit_backing_provider_earnings_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::credit_domain_insurance_budget_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::credit_domain_insurance_budgets_not_atomic"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::credit_domain_insurance_budgets_not_atomic": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::cure_and_cancel_close_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [
+    0,
+    1
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::cure_and_cancel_close_with_cert_not_atomic"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::cure_and_cancel_close_with_cert_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [
+    0,
+    1
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::declare_permissionless_recovery": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::deposit_domain_insurance_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::deposit_fresh_counterparty_backing_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::deposit_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [
+    1
+   ],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::domain_asset_side": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::domain_insurance_budget_remaining": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::domain_insurance_budget_spent": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::domain_insurance_withdraw_capacity": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::effective_backing_expiry_slot": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::ensure_account_source_claim_market_id": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::ensure_close_progress_not_expired": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::declare_permissionless_recovery"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::ensure_favorable_action_allowed": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::ensure_favorable_action_current_certificate": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::ensure_open_close_snapshot_current_or_recovery": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::declare_permissionless_recovery"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::ensure_source_domain_capacity_for_new_exposure": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::execute_batch_with_fee_loss_stale_scoped_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1,
+    2
+   ],
+   "est": [
+    0,
+    1,
+    2
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::execute_trade_with_fee_loss_stale_scoped_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1,
+    2
+   ],
+   "est": [
+    0,
+    1,
+    2
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::execute_batch_with_fee_loss_stale_scoped_not_atomic"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::face_claim_to_burn_for_support": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::first_lapsed_latent_source_backing_for_account_at_slot": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::first_lapsed_roster_source_backing_for_account_at_slot": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::first_lapsed_source_backing_for_account_at_slot": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::first_terminal_claim_free_recredit_asset": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::force_asset_recovery_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::force_close_recovery_pair_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "account",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1,
+    2
+   ],
+   "est": [
+    0,
+    1,
+    2
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::execute_trade_with_fee_loss_stale_scoped_not_atomic"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::forfeit_loss_backing_capacity_atoms": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::fresh_counterparty_backing_expiry_slot": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::group_has_position_or_loss_state_for_oracle_reset": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::h_lock_lane": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::haircut_effective_support": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::has_pending_domain_loss_barrier": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::highest_risk_liquidatable_asset": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::incremental_initial_margin_source_credit_needed": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::insurance_domain_index": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::insurance_reservation_for_domain": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::junior_claim_bound": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": true,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::kf_loss_lien_backing_to_consume_num": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::kf_target_for_leg": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::leg_is_dead_for_forfeit": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::liquidation_residual_after_principal_and_insurance": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::liquidation_residual_exceeds_single_step_capacity": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::loser_paid_backing_num": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::loss_bucket_accepts_fresh": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::mark_asset_drain_only_not_atomic": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::normalize_terminal_empty_asset_history_not_atomic": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::pending_domain_loss_barrier_count": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::position_change_touches_pending_domain_loss_barrier": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::position_delta_blocked_by_pending_domain_loss_barrier": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::position_delta_lookup_for_asset": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::position_delta_touches_pending_domain_loss_barrier": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::preflight_claim_resolved_payout_topup": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [
+    1
+   ],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::preflight_convert_released_pnl_to_capital": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::preflight_cure_and_cancel_close": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [
+    1
+   ],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::preflight_liquidation_residual_durability": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::declare_permissionless_recovery"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::prepare_one_source_domain_for_resolved_close_not_atomic": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::release_account_source_credit_lien_for_domain_not_atomic",
+    "MarketGroupV16ViewMut::<'_, T>::retire_source_credit_lien_from_counterparty_impaired_not_atomic"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::provider_principal_num": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::provider_protection_floor_num": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::provider_protection_is_observed": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": true,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::provider_protection_num": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::recertify_account_after_source_lien_change": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::recertify_account_after_trade_delta": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::recovery_pending_obligation_release_allowed": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::recredit_terminal_claim_free_residual_for_asset_not_atomic": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::refresh_recovery_account_from_committed_state_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [
+    1
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::refresh_source_credit_domain_after_mutation": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::release_account_source_credit_lien_for_domain_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::release_source_credit_lien_from_counterparty_terminal_not_atomic",
+    "MarketGroupV16ViewMut::<'_, T>::release_source_credit_lien_from_insurance_terminal_not_atomic"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::release_account_source_credit_liens_if_unneeded_core_not_atomic": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [
+    0,
+    1
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::retire_source_credit_lien_from_counterparty_impaired_not_atomic"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::release_source_credit_lien_from_counterparty_terminal_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::release_source_credit_lien_from_insurance_terminal_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::require_asset_accruable": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::require_asset_live_reducible": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::require_asset_mark_pushable": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::require_asset_risk_change_allowed": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::require_empty_asset_lifecycle_state": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::require_empty_asset_lifecycle_state_with_policy": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::require_position_route_adl_safe": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::require_terminal_claim_free_state": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::reservation_encumbrance_proof_for_domain": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::reservation_encumbrance_proof_for_domain_parts": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::reset_empty_asset_oracle_anchor_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::residual": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": true,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::resolve_market_not_atomic": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::resolved_bankruptcy_attribution": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::resolved_counterparty_backing_surplus": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::resolved_junior_payout_pool": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::resolved_legs_only_wait_for_the_other_side": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::resolved_loss_backing_capacity_num": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::resolved_positive_payout_ready": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::resolved_receipt_can_still_gain": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::resolved_receipt_claimable_now": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::resolved_side_can_still_be_charged": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::resolved_unsettled_legs_with_a_possible_loss": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": true,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::restart_empty_asset_preserving_insurance_budget_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::normalize_terminal_empty_asset_history_not_atomic"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::retain_recovery_loss_weight_before_detach": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::retire_empty_asset_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::normalize_terminal_empty_asset_history_not_atomic"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::retire_source_credit_lien_from_counterparty_impaired_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::retire_terminal_unbudgeted_insurance_not_atomic": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::risk_score_unchecked": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::set_asset_raw_oracle_target_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::set_asset_raw_oracle_targets_not_atomic"
+   ]
+  },
+  "MarketGroupV16ViewMut::<'_, T>::set_asset_raw_oracle_targets_not_atomic": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::set_domain_insurance_spent": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::side_mode_for": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::source_claim_converts_to_zero_unpledged": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::source_claim_share_is_partly_pledged": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::source_credit_available_backing_num": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::source_credit_for_domain": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::source_credit_for_domain_shape": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::source_domain_prospective_support_for_face": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::source_domain_terminal_for_haircut_demote": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::source_fresh_backing_total_atoms": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": true,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::source_lien_effective_reserved_supporting": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::stored_source_credit_rate_num": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::stranded_loser_backing_owed_to_twin_num": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::sync_account_fee_to_slot_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [
+    1
+   ],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::transfer_trade_residual_reward_credit": {
+   "args": [
+    "market",
+    "account",
+    "account",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0,
+    1,
+    2
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::twin_loser_paid_share_num": {
+   "args": [
+    "market",
+    "other",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::unilateral_close_capacity": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::valid_source_lien_effective_reserved_sum": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::validate_account_audit_scan": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::validate_account_scalar_preflight": {
+   "args": [
+    "market",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::validate_configured_asset_index": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::validate_liquidation_progress_from_score": {
+   "args": [
+    "market",
+    "other",
+    "account"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::validate_shape": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::validate_shape_audit_scan": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::validate_source_domain_ledger": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::validate_source_domain_ledger_current": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::validate_trade_request": {
+   "args": [
+    "market",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::validate_unconfigured_market_tail": {
+   "args": [
+    "market"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::withdraw_backing_provider_earnings_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [],
+   "pres": [
+    0
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::withdraw_domain_insurance_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::withdraw_fresh_counterparty_backing_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::withdraw_not_atomic": {
+   "args": [
+    "market",
+    "account",
+    "other"
+   ],
+   "checks": [
+    0,
+    1
+   ],
+   "est": [],
+   "pres": [
+    0,
+    1
+   ],
+   "returns": 1,
+   "uncond": false,
+   "uses": []
+  },
+  "MarketGroupV16ViewMut::<'_, T>::withdraw_resolved_counterparty_backing_surplus_not_atomic": {
+   "args": [
+    "market",
+    "other",
+    "other"
+   ],
+   "checks": [
+    0
+   ],
+   "est": [
+    0
+   ],
+   "pres": [],
+   "returns": 1,
+   "uncond": false,
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::withdraw_fresh_counterparty_backing_not_atomic"
+   ]
+  }
+ },
+ "unsupported": {
+  "MarketGroupV16ViewMut::<'_, T>::burn_account_source_claim_bound_num": "argument _4 is reassigned or mutably borrowed",
+  "MarketGroupV16ViewMut::<'_, T>::burn_account_source_lien_face_not_atomic": "argument _6 is reassigned or mutably borrowed"
+ }
+}

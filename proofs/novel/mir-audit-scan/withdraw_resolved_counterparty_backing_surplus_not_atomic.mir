@@ -1,0 +1,86 @@
+fn v16::<impl at src/v16.rs:9719:1: 9719:41>::withdraw_resolved_counterparty_backing_surplus_not_atomic(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: usize, _3: u128) -> Result<(), V16Error> {
+    debug self => _1;
+    debug domain => _2;
+    debug amount => _3;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+    let mut _4: bool;
+    let mut _5: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u128>;
+    let mut _6: core::result::Result<u128, v16::V16Error>;
+    let mut _7: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _8: isize;
+    let _9: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let _10: u128;
+    scope 1 {
+        debug residual => _9;
+        scope 2 {
+        }
+    }
+    scope 3 {
+        debug val => _10;
+        scope 4 {
+        }
+    }
+
+    bb0: {
+        StorageLive(_4);
+        StorageLive(_5);
+        StorageLive(_6);
+        StorageLive(_7);
+        _7 = &(*_1);
+        _6 = MarketGroupV16ViewMut::<'_, T>::resolved_counterparty_backing_surplus(move _7, copy _2) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        StorageDead(_7);
+        _5 = <Result<u128, V16Error> as Try>::branch(move _6) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        StorageDead(_6);
+        _8 = discriminant(_5);
+        switchInt(move _8) -> [0: bb4, 1: bb5, otherwise: bb3];
+    }
+
+    bb3: {
+        unreachable;
+    }
+
+    bb4: {
+        _10 = copy ((_5 as Continue).0: u128);
+        _4 = Gt(copy _3, copy _10);
+        switchInt(move _4) -> [0: bb8, otherwise: bb7];
+    }
+
+    bb5: {
+        StorageLive(_9);
+        _9 = copy ((_5 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _9) -> [return: bb6, unwind continue];
+    }
+
+    bb6: {
+        StorageDead(_9);
+        StorageDead(_5);
+        goto -> bb9;
+    }
+
+    bb7: {
+        StorageDead(_5);
+        _0 = const Result::<(), V16Error>::Err(V16Error::LockActive);
+        goto -> bb9;
+    }
+
+    bb8: {
+        StorageDead(_5);
+        StorageDead(_4);
+        _0 = MarketGroupV16ViewMut::<'_, T>::withdraw_fresh_counterparty_backing_not_atomic(move _1, move _2, move _3) -> [return: bb10, unwind continue];
+    }
+
+    bb9: {
+        StorageDead(_4);
+        goto -> bb10;
+    }
+
+    bb10: {
+        return;
+    }
+}

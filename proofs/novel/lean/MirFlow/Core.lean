@@ -681,8 +681,42 @@ theorem checkCert_sound {g : Goal} {cfg : Cfg} {inv : List (Option AState)}
     · exact hP k h' hw0
     · exact hH k h'
 
+/-- **Composition.** A certified callee justifies the `call` instruction that stands for it in a
+caller. If the callee's certificate checks for the goal `⟨est, pres, [], okOnly⟩`, then any actual
+return of the callee from world `w` to world `w'` with return discriminant `d` is a step of
+`.call dst b same pres est (!okOnly)` in the caller, provided the frame part `same` holds for that
+call (that part comes from the types of the arguments, not from the certificate).
+
+This is why a summary derived by the tool for a callee may be used in a caller's graph: the
+`call` instruction allows at least every behaviour the callee's own graph has. The check numbers
+of caller and callee must denote the same predicates; the extractor only applies a summary when
+the callee's market and account arguments are the caller's own. -/
+theorem call_of_cert {est pres : List Nat} {okOnly : Bool} {cfgC : Cfg} {invC : List (Option AState)}
+    (hc : checkCert ⟨est, pres, [], okOnly⟩ cfgC invC = true)
+    {w w' : W} {bC : Block} {envC : Env}
+    (hret : Returns chk [] cfgC w bC w' envC)
+    {same : List Nat} (hsame : ∀ k, k ∈ same → chk k w' = chk k w)
+    (env : Env) (dst : Local) (b : Block) :
+    TStep chk (.call dst b same pres est (!okOnly)) w env b w' (upd env dst (envC 0)) := by
+  refine TStep.call upd_other hsame ?_ ?_
+  · intro k hk hcond hw
+    have hok : okOnly = true → envC 0 = 0 := by
+      intro ho
+      rcases hcond with h | h
+      · simp [ho] at h
+      · simpa [upd] using h
+    exact (checkCert_sound chk hc hret hok).2 k hk hw
+  · intro k hk hcond
+    have hok : okOnly = true → envC 0 = 0 := by
+      intro ho
+      rcases hcond with h | h
+      · simp [ho] at h
+      · simpa [upd] using h
+    exact (checkCert_sound chk hc hret hok).1 k hk
+
 end Sound
 
 end MirFlow
 
 #print axioms MirFlow.checkCert_sound
+#print axioms MirFlow.call_of_cert

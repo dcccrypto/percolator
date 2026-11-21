@@ -1,0 +1,12 @@
+PASS  A1 crate denies unsafe code (#![deny(unsafe_code)] in src/lib.rs) (1 hits)
+      #![deny(unsafe_code)]
+PASS  A1 no unsafe block or unsafe fn (only `unsafe trait` / `unsafe impl` marker items allowed)
+PASS  A1 `#[allow(unsafe_code)]` appears only directly above an `unsafe trait`/`unsafe impl`
+PASS  A2 no interior mutability or shared mutable state (Cell, RefCell, UnsafeCell, Mutex, RwLock, Atomic*, OnceCell, OnceLock, static mut, thread_local)
+PASS  A2 no raw pointers (*const, *mut, as_ptr, as_mut_ptr, addr_of)
+PASS  A3 no clock, randomness, environment, file or network access (std::time, rand, std::env, std::fs, std::net)
+PASS  A3 no extern blocks / FFI
+PASS  A4 by-value view `MarketGroupV16View` holds only shared references: ["pub header: &'a MarketGroupV16HeaderAccount,", "pub markets: &'a [Market<T>],"]
+PASS  A4 by-value view `PortfolioV16View` holds only shared references: ["pub header: &'a PortfolioAccountV16Account,"]
+INFO  dependencies of the library: ['bytemuck = { version = "1.23", default-features = false, features = ["derive"] }']
+INFO  `bytemuck` is used through its safe API; its own `unsafe` is outside this crate and is assumed correct.

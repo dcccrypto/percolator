@@ -8,12 +8,13 @@ import re
 import sys
 
 out = sys.argv[1]
+genns = sys.argv[2] if len(sys.argv) > 2 else "Gen"
 run = json.load(open(os.path.join(out, "run.json")))
 t15 = json.load(open(os.path.join(out, "t15.json")))
 ax = re.sub(r"\s+", " ", open(os.path.join(out, "axioms.txt")).read())
 build = open(os.path.join(out, "lake_build.log")).read()
 checked = {}
-for m in re.finditer(r"'MirFlow\.Gen\.(\w+)\.main' (depends on axioms: \[([^\]]*)\]|does not depend on any axioms)", ax):
+for m in re.finditer(r"'MirFlow\.%s\.(\w+)\.main' (depends on axioms: \[([^\]]*)\]|does not depend on any axioms)" % genns, ax):
     checked[m.group(1)] = m.group(3) or "none"
 build_ok = "Build completed successfully" in build
 rows = list(csv.DictReader(open(os.path.join(out, "ledger_results.tsv")), delimiter="\t"))
@@ -43,7 +44,7 @@ def table(kind):
             n[r["tool_result"]] += 1
         print("| %s | `%s` | %s | %s | %s | %s |" % (
             r["row"], r["function"], r["ledger_class"] or "-", r["tool_result"],
-            "`MirFlow.Gen.%s.main`" % mod if mod else "", kc))
+            "`MirFlow.%s.%s.main`" % (genns, mod) if mod else "", kc))
     return n
 
 print("## Header rows (check 0: `self.validate_shape()` returns Ok)\n")
@@ -55,6 +56,10 @@ print("\nKernel-checked header rows: **%d** (%d `est`, %d `pres`).\n" % (nh["est
 print("## Account rows (check k: `account_k.validate_with_market(&self.as_view())` returns Ok)\n")
 na = table("account")
 print("\nKernel-checked account rows: **%d** (%d `est`, %d `pres`).\n" % (na["est"] + na["pres"], na["est"], na["pres"]))
+if any(r["row"].endswith(".scan") for r in rows):
+    print("## Scan rows, THIS BUILD ONLY (check 0; in an audit-scan build `validate_shape` runs the full scan)\n")
+    ns_ = table("scan")
+    print("\nKernel-checked scan rows for this build: **%d** (%d `est`, %d `pres`).\n" % (ns_["est"] + ns_["pres"], ns_["est"], ns_["pres"]))
 other = {}
 for r in rows:
     if r["tool_result"] in ("no-mir", "no-account-argument"):
@@ -68,7 +73,7 @@ print("\n## T15 `close_resolved_account_not_atomic`\n")
 for ns in ("T15_header_checked_paths", "T15_account_checked_paths", "T15_header_conditional", "T15_account_conditional"):
     i = t15.get(ns, {})
     kc = "kernel-checked" if ns in checked else "NOT kernel-checked"
-    print("### `MirFlow.Gen.%s.main` (%s)\n" % (ns, kc if "result" not in i else "not generated"))
+    print("### `MirFlow.%s.%s.main` (%s)\n" % (genns, ns, kc if "result" not in i else "not generated"))
     if "result" in i:
         print("- %s. Ok sites still open: blocks %s.\n" % (i["result"], i["open_ok_sites"]))
         continue

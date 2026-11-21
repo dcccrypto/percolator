@@ -1,0 +1,12 @@
+fn v16::<impl at src/v16.rs:9719:1: 9719:41>::validate_shape_audit_scan(_1: &MarketGroupV16ViewMut<'_, T>) -> Result<(), V16Error> {
+    debug self => _1;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+
+    bb0: {
+        _0 = MarketGroupV16ViewMut::<'_, T>::validate_shape(move _1) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}

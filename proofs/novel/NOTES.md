@@ -25,3 +25,19 @@ Times are `date -u` output at the moment of writing.
   `execute_batch_with_fee_loss_stale_scoped_not_atomic` (est checks 0, 1, 2).
 - 05:07 Mutation tests: 18 mutations of T14, 0 unsound answers. Independent adversarial audit of
   the extractor started (separate agent, read-only).
+- 05:08 `call_of_cert` proved in Core.lean: a callee's certificate licenses the `call` instruction
+  that stands for it in a caller (composition is now a theorem, not a remark).
+- 05:09 Second variant: `--features audit-scan` build (the build the fuzzers run). There
+  `validate_shape_audit_scan` is a real check: 39 header rows; T15.header needs only 2 assumed
+  callee contracts. Kept in separate tables (`out-audit-scan/`), never mixed with the deployed build.
+- 05:10 Experiment: a 7-line patch (`patches/t15_checked_exits.patch`) adds the checks before the
+  unchecked `ProgressOnly` returns. On the patched text the tool gives T15.header and T15.account
+  whole, no exemption, no assumption (`GenT15Patch/T15_patched.lean`, kernel-checked).
+- 05:12 Engine tests on the patched tree. FIRST RUN INVALID: it shared the baseline's target dir,
+  cargo printed `Finished in 0.02s` and re-ran the baseline binaries. Caught by reading the log.
+- 05:17 Rerun with its own target dir: compiled (2m44s), 528 passed / 0 failed, same as baseline.
+- Kani: no run. The six callee contracts T15.header still needs must hold for every state; the
+  existing harnesses fix concrete market shapes (e.g. `src/v16_proofs.rs:2685-2707` keeps the
+  fixture in one constructor "avoiding three full validation scans in one CBMC query"), so a
+  verdict from them cannot be imported as an all-states summary.
+- Aristotle: no job submitted by this session; 0 credits used.
