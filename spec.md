@@ -1211,6 +1211,33 @@ its principal and is never repaid, and the consumed backing is retired at
 terminal. The face burned by that path, and the rate it is burned at, are
 unchanged.
 
+Liened face that a Live K/F loss burns (upstream 1683b11d). The support-and-burn path burns liened
+face after unliened face. The counterparty backing behind burned liened face is
+reserved for the account alone and is what the account pays that part of its
+loss with, so it MUST leave with the loss: instead of being un-pledged into its
+bucket it is consumed from the lien (valid liened to consumed, with spent /
+provider-receivable / consumed in lockstep as above) and booked for `L` by the
+same rule as the paragraph above. The account-side effect is unchanged: the same
+face is burned and the lien shrinks by the same amounts. Only whole atoms are
+consumed; a fraction of an atom is un-pledged in place. The exceptions are those
+of the netting above. Face held in `L` itself moves nothing: its backing already
+sits where the loss is owed. For face in the twin domain `T` only the share its
+losers paid in follows, `burned face * loser_paid_T / claims_T`, rounded up to a
+whole atom and never more than the lien's backing or `T`'s loser-paid backing,
+so what a provider fronted stays with the provider (v2.2: `loser_paid_T` is `T`'s
+fresh reserved backing beyond the S10 provider-principal mirror). Nothing is consumed while
+either side of either asset has a pending domain-loss barrier, while the face's
+bucket is not Fresh and unlapsed, or while `L`'s bucket cannot accept fresh
+principal; the lien is then un-pledged in place (or retired, for an impaired
+lien) as before. Insurance-backed liens are released as before. In Resolved mode
+and on every other path that burns liened face (forfeit, conversion, close) the
+lien is un-pledged in place. Without this rule the backing stays in a domain
+that no longer has a claim on it while the opposite side's gain is unbacked, or
+is paid by a provider in `L` that is never repaid. Under the lien-aware credit
+rate (section 2) a partial lien does not lower its domain's rate, so rule (b)
+does not shield a partly liened account: every loss beyond its unliened face
+reaches liened face.
+
 Then update stress consumption:
 
 ```text

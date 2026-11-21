@@ -6877,6 +6877,11 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
         .try_to_runtime()
         .unwrap();
     let insurance_before_reversal = market.header.insurance.get();
+    let long_loss_domain_backing_before = market.markets[0]
+        .engine
+        .source_credit_long
+        .fresh_reserved_backing_num
+        .get();
     let risk_epoch_before_reversal = market.header.risk_epoch.get();
     let source_credit_epoch_before_reversal = market.markets[0]
         .engine
@@ -6942,23 +6947,47 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
         );
         assert_eq!(backing_after_reversal, backing_before_reversal);
     } else {
+        // upstream 1683b11d restates this branch. The liened face is the rest of the same
+        // unrealized gain, and the short paid in the backing behind it as well. It follows the
+        // cancelled face too: it is consumed from the lien and booked for the long-loss domain.
+        // Un-pledging it back into the twin would leave it there with no claim to own it,
+        // beside the provider's principal, while the short's regain was only partly backed.
+        // (Fork names: `unliened_support_consumed` is upstream's `unliened_face_netted`.)
+        let long_loss_domain_backing_after = market.markets[0]
+            .engine
+            .source_credit_long
+            .fresh_reserved_backing_num
+            .get();
+        let lien_backing_num = lien_before.source_lien_counterparty_backing_num.get();
+        assert_eq!(lien_backing_num, lien_effective * BOUND_SCALE);
         assert_eq!(
             backing_after_reversal.fresh_unliened_backing_num,
             backing_before_reversal
                 .fresh_unliened_backing_num
                 .checked_sub(unliened_support_consumed * BOUND_SCALE)
-                .unwrap()
-                .checked_add(lien_before.source_lien_counterparty_backing_num.get())
                 .unwrap(),
-            "the still-liened backing is unpledged rather than consumed"
+            "the lien's backing leaves with the loss instead of being unpledged in place"
+        );
+        assert_eq!(
+            backing_after_reversal.fresh_unliened_backing_num,
+            100_000 * BOUND_SCALE,
+            "the twin keeps exactly the provider's principal"
         );
         assert_eq!(backing_after_reversal.valid_liened_backing_num, 0);
         assert_eq!(
             backing_after_reversal.consumed_liened_backing_num,
             backing_before_reversal.consumed_liened_backing_num
-                + unliened_support_consumed * BOUND_SCALE,
-            "only realizable unliened support offsets the reversal loss"
+                + unliened_support_consumed * BOUND_SCALE
+                + lien_backing_num,
+            "the netted face's backing and the lien's backing are each consumed exactly once"
         );
+        assert_eq!(
+            long_loss_domain_backing_after,
+            long_loss_domain_backing_before
+                + (unliened_support_consumed + lien_effective + principal_loss) * BOUND_SCALE,
+            "the reversal loss is booked in full for the side it is owed to"
+        );
+        assert_eq!(unliened_support_consumed + lien_effective + principal_loss, 5_250);
         assert_eq!(market.header.insurance.get(), insurance_before_reversal);
     }
     // 4c4dfb20's fused burn advances the credit epoch by
