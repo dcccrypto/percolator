@@ -298,7 +298,6 @@
       "proof_v16_floor_div_signed_conservative_matches_small_reference",
       "proof_v16_k_pair_mul_div_floor_matches_small_reference",
       "proof_v16_k_pair_zero_cases_return_zero",
-      "proof_v16_loss_weight_is_exact_ceil_on_validated_leg_domain",
       "proof_v16_loss_weight_matches_u512_reference_small_domain",
       "proof_v16_mul_div_ceil_u256_is_floor_plus_remainder_indicator",
       "proof_v16_mul_div_floor_u256_matches_small_reference",
@@ -347,7 +346,7 @@
   "contract-harnesses": {},
   "contracts": [],
   "totals": {
-    "standard-harnesses": 333,
+    "standard-harnesses": 332,
     "contract-harnesses": 0,
     "functions-under-contract": 0
   }

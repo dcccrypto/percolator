@@ -29473,7 +29473,7 @@ fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
 }
 
 /// Test hooks for `tests/loss_weight_u128_fast_path.rs` (`--features fuzz`) and the Kani
-/// harnesses: the production loss weight, and the U512 computation it replaced (kept verbatim).
+/// harness: the production loss weight, and the U512 computation it replaced (kept verbatim).
 #[cfg(any(kani, feature = "fuzz"))]
 pub fn loss_weight_for_basis_for_test(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     loss_weight_for_basis(abs_basis_q, a_basis)

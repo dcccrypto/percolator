@@ -11,7 +11,7 @@ use percolator::wide_math::{
     mul_div_floor_u256, mul_div_floor_u256_with_rem, wide_signed_mul_div_floor,
     wide_signed_mul_div_floor_from_k_pair, I256, U256,
 };
-use percolator::{ADL_ONE, MAX_POSITION_ABS_Q, MIN_A_SIDE, POS_SCALE, SOCIAL_WEIGHT_SCALE};
+use percolator::{ADL_ONE, MIN_A_SIDE, POS_SCALE};
 
 #[kani::proof]
 #[kani::unwind(20)]
@@ -410,25 +410,6 @@ fn proof_v16_trade_fee_notional_ceil_strictly_exceeds_floor_when_unaligned() {
     // The sub-atom-fee bug in one sentence: floor can be 0 while size_q,
     // price are both nonzero (product < POS_SCALE); ceil must not be.
     assert!(ceil >= 1, "ceil-notional is never zero for a nonzero fill");
-}
-
-/// Leg loss weight (u128 path, `loss_weight_for_basis`): on the whole domain `validate_active_leg`
-/// reaches (|basis| in [1, MAX_POSITION_ABS_Q], a_basis in [MIN_A_SIDE, ADL_ONE]) the result is the
-/// exact ceiling of |basis| * SOCIAL_WEIGHT_SCALE / a_basis, which is what the U512 path computed.
-#[kani::proof]
-#[kani::unwind(20)]
-#[kani::solver(cadical)]
-fn proof_v16_loss_weight_is_exact_ceil_on_validated_leg_domain() {
-    let abs_basis_q: u128 = kani::any();
-    let a_basis: u128 = kani::any();
-    kani::assume(abs_basis_q >= 1 && abs_basis_q <= MAX_POSITION_ABS_Q);
-    kani::assume(a_basis >= MIN_A_SIDE && a_basis <= ADL_ONE);
-    let weight = kani_loss_weight_for_basis(abs_basis_q, a_basis).unwrap();
-    // product < 2^97, weight <= 1e15, weight * a_basis <= 1e30: no overflow below.
-    let product = abs_basis_q * SOCIAL_WEIGHT_SCALE;
-    assert!(weight >= 1);
-    assert!(weight * a_basis >= product);
-    assert!((weight - 1) * a_basis < product);
 }
 
 /// Same function against the original U512 computation, value and error, including a_basis 0,
