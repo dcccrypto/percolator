@@ -1,5 +1,7 @@
 # Aristotle job (first run, free-tier credits only)
 
+A second run, on the engine's own text for this path, is in [../ours2/](../ours2/README.md). It found that run 1's invariant and RC6 do not hold word for word once the engine's receipt clearing is in the code (see `../ours2/README.md`). The record below is of run 1 and is about the transcription.
+
 ## Run
 
 - Submitted 2026-11-21 01:58:17 UTC, started 01:58:18Z, last update 03:24:48Z (wall time 1 h 26 m 30 s).
