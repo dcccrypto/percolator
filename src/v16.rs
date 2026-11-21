@@ -6526,6 +6526,12 @@ impl<'a> PortfolioV16View<'a> {
         while slot_index < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = self.source_domains()[slot_index];
             if source.has_default_sparse_tag() && !source.is_occupied() {
+                // An all-zero rest of the table is default slots only: every remaining iteration
+                // would take this same `continue`. One byte compare instead of ~100 CU per slot.
+                #[cfg(not(kani))]
+                if source_domain_tail_is_zero(self.source_domains(), slot_index + 1) {
+                    break;
+                }
                 slot_index += 1;
                 continue;
             }
@@ -6638,9 +6644,13 @@ impl<'a> PortfolioV16View<'a> {
         let mut sum = 0u128;
         let mut d = 0usize;
         while d < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            sum = sum
-                .checked_add(self.source_domains()[d].source_claim_bound_num.get())
-                .ok_or(V16Error::ArithmeticOverflow)?;
+            let bound = self.source_domains()[d].source_claim_bound_num.get();
+            // An all-zero rest of the table adds nothing.
+            #[cfg(not(kani))]
+            if bound == 0 && source_domain_tail_is_zero(self.source_domains(), d) {
+                break;
+            }
+            sum = sum.checked_add(bound).ok_or(V16Error::ArithmeticOverflow)?;
             d += 1;
         }
         Ok(sum)
@@ -28159,6 +28169,30 @@ pub struct PortfolioSourceDomainV16Account {
     // the impaired counter to cap residual reward weight. Event-local, never a cumulative total.
     pub source_lien_capital_at_risk_fee_revenue: V16PodU128,
     pub source_lien_impaired_capital_at_risk_fee_revenue: V16PodU128,
+}
+
+/// True iff every slot in `domains[from..]` is all-zero bytes, i.e. equal to
+/// `PortfolioSourceDomainV16Account::default()` (Pod, no padding). One overlapping compare
+/// (`b[0] == 0 && b[..n-1] == b[1..]`, a single `sol_memcmp_` on SBF) instead of walking up to 32
+/// slots of 196 bytes field by field. `from >= PORTFOLIO_SOURCE_DOMAIN_CAP` is an empty tail.
+#[inline]
+fn source_domain_tail_is_zero(
+    domains: &[PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
+    from: usize,
+) -> bool {
+    if from >= PORTFOLIO_SOURCE_DOMAIN_CAP {
+        return true;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(&domains[from..]);
+    bytes[0] == 0 && bytes[..bytes.len() - 1] == bytes[1..]
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn source_domain_tail_is_zero_for_test(
+    domains: &[PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
+    from: usize,
+) -> bool {
+    source_domain_tail_is_zero(domains, from)
 }
 
 impl PortfolioSourceDomainV16Account {
