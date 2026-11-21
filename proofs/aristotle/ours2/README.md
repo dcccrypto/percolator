@@ -2,7 +2,10 @@
 
 ## Result so far
 
-- **Nothing new is proved yet.** The v3 Aristotle job (project `b2fa5632`, task `42085a7d`, submitted 2026-11-21 04:53:00Z) has not returned results (see [JOB.md](JOB.md)).
+- **v3 proved nothing.** The Aristotle job (project `b2fa5632`, task `42085a7d`) was submitted at 04:53:00Z. This session cancelled it at 05:55:18Z, when the free balance reached 116 (below its stated 120 rule). It used 128 free credits, 0 purchased. Aristotle recorded **no property**: nothing proved, nothing refuted. The download contains only our upload, unchanged, and Aristotle's own `SepLogic` library files ([JOB.md](JOB.md)).
+- **What that leaves:** PR1, P15, OURS-K1, OURS-K2, T14.header and T14.account are **not proved**. Every T15 row and T37 are **not attempted**. With 116 free credits left, under the 120 submit floor, there will be no retry or follow-up job on this budget.
+- **Why it cost more than Toly's kernels (~14 credits each): an inference, not measured.** His kernel tasks ran as follow-ups on a project that already had the crate translated. v3 was a new project holding the whole 1.3 MB `v16.rs`. After an hour it had recorded nothing, and `show` listed only "Reading Lean" and "Running command". A follow-up attempt would be better placed on a project that has already done that setup.
+- The random tests of the four Part 1 statements (2,000,000 cases each, no counterexample) are tests, not proofs.
 - **F3 (`wide_mul_div_floor_u128`): proved (upstream Aristotle, add1d027; confirmed identical text).**
   Toly's `changed_fns.py`, run unchanged on `src/wide_math.rs` add1d027 → our c38b6b1e: the function's own text is the same, it reaches no changed or new function and names no changed type ([evidence](evidence/f3_changed_fns_add1d027_vs_c38b6b1e.txt)). No credits were spent on F3.
 - **No T15 row (the full resolved close) is attempted** in v3. A whole-method proof of the close is out of this budget (ROADMAP: 3 of 32 such properties for about 1,970 credits). What v3 asks for instead, and which rows it does and does not close, is in [LEDGER-MAP.md](LEDGER-MAP.md).
