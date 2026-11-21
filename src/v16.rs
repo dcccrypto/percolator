@@ -29466,14 +29466,20 @@ fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     // natively (it falls back to the same U256 path when the product does not fit).
     // An unscaled side (a_basis == SOCIAL_WEIGHT_SCALE, no ADL yet) divides exactly:
     // ceil(x * S / S) == x for every x, and x always fits u128.
+    // Kani keeps the original U512 computation for the general case (same pattern as the
+    // bit-serial division in wide_math), so existing proofs see the arithmetic they were written
+    // against; tests/loss_weight_u128_fast_path.rs pins the two paths together.
     if a_basis == SOCIAL_WEIGHT_SCALE {
         return Ok(abs_basis_q);
     }
-    V16Core::mul_div_ceil_u128_or_wide(abs_basis_q, SOCIAL_WEIGHT_SCALE, a_basis)
+    #[cfg(not(kani))]
+    return V16Core::mul_div_ceil_u128_or_wide(abs_basis_q, SOCIAL_WEIGHT_SCALE, a_basis);
+    #[cfg(kani)]
+    return loss_weight_for_basis_wide_reference_for_test(abs_basis_q, a_basis);
 }
 
-/// Test hooks for `tests/loss_weight_u128_fast_path.rs` (`--features fuzz`) and the Kani
-/// harness: the production loss weight, and the U512 computation it replaced (kept verbatim).
+/// Test hooks for `tests/loss_weight_u128_fast_path.rs` (`--features fuzz`): the production loss
+/// weight, and the U512 computation it replaced (kept verbatim; also the Kani path above).
 #[cfg(any(kani, feature = "fuzz"))]
 pub fn loss_weight_for_basis_for_test(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     loss_weight_for_basis(abs_basis_q, a_basis)
@@ -29494,11 +29500,6 @@ pub fn loss_weight_for_basis_wide_reference_for_test(
     )
     .and_then(|v| v.try_into_u128())
     .ok_or(V16Error::ArithmeticOverflow)
-}
-
-#[cfg(kani)]
-pub fn kani_loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
-    loss_weight_for_basis(abs_basis_q, a_basis)
 }
 
 #[cfg(any(kani, feature = "fuzz"))]
