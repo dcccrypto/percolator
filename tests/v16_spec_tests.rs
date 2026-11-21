@@ -20291,6 +20291,7 @@ fn issue206_lien_fixture() -> (
                     exec_price: 100,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
         market.set_asset_raw_oracle_target_not_atomic(0, 200).unwrap();
@@ -20307,6 +20308,7 @@ fn issue206_lien_fixture() -> (
                     exec_price: 200,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
     }
