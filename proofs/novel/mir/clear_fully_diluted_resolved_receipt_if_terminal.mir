@@ -1,0 +1,290 @@
+fn v16::<impl at src/v16.rs:9719:1: 9719:41>::clear_fully_diluted_resolved_receipt_if_terminal(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: &mut PortfolioV16ViewMut<'_>) -> Result<(), V16Error> {
+    debug self => _1;
+    debug account => _2;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+    let mut _3: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, v16::ResolvedPayoutReceiptV16>;
+    let mut _4: core::result::Result<v16::ResolvedPayoutReceiptV16, v16::V16Error>;
+    let mut _5: &v16::ResolvedPayoutReceiptV16Account;
+    let mut _6: isize;
+    let _7: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let _8: v16::ResolvedPayoutReceiptV16;
+    let mut _9: bool;
+    let mut _10: bool;
+    let mut _11: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, bool>;
+    let mut _12: core::result::Result<bool, v16::V16Error>;
+    let mut _13: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _14: isize;
+    let mut _17: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, bool>;
+    let mut _18: core::result::Result<bool, v16::V16Error>;
+    let mut _19: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _20: isize;
+    let mut _23: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u128>;
+    let mut _24: core::result::Result<u128, v16::V16Error>;
+    let mut _25: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _26: isize;
+    let mut _29: v16::ResolvedPayoutReceiptV16Account;
+    let mut _30: &mut v16::PortfolioAccountV16Account;
+    let mut _31: &mut v16::PortfolioAccountV16Account;
+    scope 1 {
+        debug receipt => _8;
+        let _15: core::result::Result<core::convert::Infallible, v16::V16Error>;
+        let _16: bool;
+        let _21: core::result::Result<core::convert::Infallible, v16::V16Error>;
+        let _22: bool;
+        let _27: core::result::Result<core::convert::Infallible, v16::V16Error>;
+        let _28: u128;
+        scope 6 {
+            debug residual => _15;
+            scope 7 {
+            }
+        }
+        scope 8 {
+            debug val => _16;
+            scope 9 {
+            }
+        }
+        scope 10 {
+            debug residual => _21;
+            scope 11 {
+            }
+        }
+        scope 12 {
+            debug val => _22;
+            scope 13 {
+            }
+        }
+        scope 14 {
+            debug residual => _27;
+            scope 15 {
+            }
+        }
+        scope 16 {
+            debug val => _28;
+            scope 17 {
+            }
+        }
+    }
+    scope 2 {
+        debug residual => _7;
+        scope 3 {
+        }
+    }
+    scope 4 {
+        debug val => _8;
+        scope 5 {
+        }
+    }
+
+    bb0: {
+        StorageLive(_3);
+        StorageLive(_4);
+        StorageLive(_5);
+        _30 = no_retag copy ((*_2).0: &mut v16::PortfolioAccountV16Account);
+        _5 = &((*_30).24: v16::ResolvedPayoutReceiptV16Account);
+        _4 = ResolvedPayoutReceiptV16Account::try_to_runtime(move _5) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        StorageDead(_5);
+        _3 = <Result<ResolvedPayoutReceiptV16, V16Error> as Try>::branch(move _4) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        StorageDead(_4);
+        _6 = discriminant(_3);
+        switchInt(move _6) -> [0: bb4, 1: bb5, otherwise: bb3];
+    }
+
+    bb3: {
+        unreachable;
+    }
+
+    bb4: {
+        _8 = copy ((_3 as Continue).0: v16::ResolvedPayoutReceiptV16);
+        StorageDead(_3);
+        StorageLive(_9);
+        _9 = copy (_8.0: bool);
+        switchInt(move _9) -> [0: bb9, otherwise: bb7];
+    }
+
+    bb5: {
+        StorageLive(_7);
+        _7 = copy ((_3 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _7) -> [return: bb6, unwind continue];
+    }
+
+    bb6: {
+        StorageDead(_7);
+        StorageDead(_3);
+        goto -> bb33;
+    }
+
+    bb7: {
+        StorageLive(_10);
+        _10 = copy (_8.5: bool);
+        switchInt(move _10) -> [0: bb8, otherwise: bb9];
+    }
+
+    bb8: {
+        StorageDead(_10);
+        StorageDead(_9);
+        StorageLive(_11);
+        StorageLive(_12);
+        StorageLive(_13);
+        _13 = &(*_1);
+        _12 = MarketGroupV16ViewMut::<'_, T>::resolved_receipt_can_still_gain(move _13, copy _8) -> [return: bb10, unwind continue];
+    }
+
+    bb9: {
+        _0 = const Result::<(), V16Error>::Ok(());
+        StorageDead(_10);
+        StorageDead(_9);
+        goto -> bb33;
+    }
+
+    bb10: {
+        StorageDead(_13);
+        _11 = <Result<bool, V16Error> as Try>::branch(move _12) -> [return: bb11, unwind continue];
+    }
+
+    bb11: {
+        StorageDead(_12);
+        _14 = discriminant(_11);
+        switchInt(move _14) -> [0: bb12, 1: bb13, otherwise: bb3];
+    }
+
+    bb12: {
+        _16 = copy ((_11 as Continue).0: bool);
+        switchInt(copy _16) -> [0: bb16, otherwise: bb15];
+    }
+
+    bb13: {
+        StorageLive(_15);
+        _15 = copy ((_11 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _15) -> [return: bb14, unwind continue];
+    }
+
+    bb14: {
+        StorageDead(_15);
+        StorageDead(_11);
+        goto -> bb33;
+    }
+
+    bb15: {
+        StorageDead(_11);
+        _0 = const Result::<(), V16Error>::Ok(());
+        goto -> bb33;
+    }
+
+    bb16: {
+        StorageDead(_11);
+        StorageLive(_17);
+        StorageLive(_18);
+        StorageLive(_19);
+        _19 = &(*_1);
+        _18 = MarketGroupV16ViewMut::<'_, T>::resolved_positive_payout_ready(move _19) -> [return: bb17, unwind continue];
+    }
+
+    bb17: {
+        StorageDead(_19);
+        _17 = <Result<bool, V16Error> as Try>::branch(move _18) -> [return: bb18, unwind continue];
+    }
+
+    bb18: {
+        StorageDead(_18);
+        _20 = discriminant(_17);
+        switchInt(move _20) -> [0: bb19, 1: bb20, otherwise: bb3];
+    }
+
+    bb19: {
+        _22 = copy ((_17 as Continue).0: bool);
+        switchInt(copy _22) -> [0: bb23, otherwise: bb22];
+    }
+
+    bb20: {
+        StorageLive(_21);
+        _21 = copy ((_17 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _21) -> [return: bb21, unwind continue];
+    }
+
+    bb21: {
+        StorageDead(_21);
+        StorageDead(_17);
+        goto -> bb33;
+    }
+
+    bb22: {
+        StorageDead(_17);
+        StorageLive(_23);
+        StorageLive(_24);
+        StorageLive(_25);
+        _25 = &(*_1);
+        _24 = MarketGroupV16ViewMut::<'_, T>::resolved_receipt_claimable_now(move _25, move _8) -> [return: bb24, unwind continue];
+    }
+
+    bb23: {
+        StorageDead(_17);
+        _0 = const Result::<(), V16Error>::Ok(());
+        goto -> bb33;
+    }
+
+    bb24: {
+        StorageDead(_25);
+        _23 = <Result<u128, V16Error> as Try>::branch(move _24) -> [return: bb25, unwind continue];
+    }
+
+    bb25: {
+        StorageDead(_24);
+        _26 = discriminant(_23);
+        switchInt(move _26) -> [0: bb26, 1: bb27, otherwise: bb3];
+    }
+
+    bb26: {
+        _28 = copy ((_23 as Continue).0: u128);
+        switchInt(copy _28) -> [0: bb30, otherwise: bb29];
+    }
+
+    bb27: {
+        StorageLive(_27);
+        _27 = copy ((_23 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _27) -> [return: bb28, unwind continue];
+    }
+
+    bb28: {
+        StorageDead(_27);
+        StorageDead(_23);
+        goto -> bb32;
+    }
+
+    bb29: {
+        StorageDead(_23);
+        _0 = const Result::<(), V16Error>::Ok(());
+        goto -> bb32;
+    }
+
+    bb30: {
+        StorageDead(_23);
+        StorageLive(_29);
+        _29 = ResolvedPayoutReceiptV16Account::from_runtime(const v16::MarketGroupV16ViewMut::<'_, T>::clear_fully_diluted_resolved_receipt_if_terminal::promoted[0]) -> [return: bb31, unwind continue];
+    }
+
+    bb31: {
+        _31 = no_retag copy ((*_2).0: &mut v16::PortfolioAccountV16Account);
+        ((*_31).24: v16::ResolvedPayoutReceiptV16Account) = move _29;
+        StorageDead(_29);
+        _0 = const Result::<(), V16Error>::Ok(());
+        goto -> bb34;
+    }
+
+    bb32: {
+        goto -> bb33;
+    }
+
+    bb33: {
+        goto -> bb34;
+    }
+
+    bb34: {
+        return;
+    }
+}

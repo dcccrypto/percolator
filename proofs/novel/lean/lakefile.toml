@@ -1,0 +1,6 @@
+name = "mirflow"
+defaultTargets = ["MirFlow"]
+
+[[lean_lib]]
+name = "MirFlow"
+globs = ["MirFlow.+"]
