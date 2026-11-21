@@ -3,6 +3,8 @@
 //! rest of the 32-slot table is all default slots. It must say "zero" only when every slot from
 //! `from` on equals `PortfolioSourceDomainV16Account::default()`: one non-zero byte anywhere in
 //! the tail, in any field, must make it false.
+//! Needs `--features fuzz` (exposes the test hook, same as tests/rounding_edge.rs).
+#![cfg(feature = "fuzz")]
 use percolator::{
     source_domain_tail_is_zero_for_test as tail_is_zero, PortfolioSourceDomainV16Account,
     V16PodU128, V16PodU32, V16PodU64, PORTFOLIO_SOURCE_DOMAIN_CAP,

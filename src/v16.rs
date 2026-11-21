@@ -28115,7 +28115,7 @@ fn source_domain_tail_is_zero(
     bytes[0] == 0 && bytes[..bytes.len() - 1] == bytes[1..]
 }
 
-#[doc(hidden)]
+#[cfg(any(kani, feature = "fuzz"))]
 pub fn source_domain_tail_is_zero_for_test(
     domains: &[PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
     from: usize,

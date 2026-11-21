@@ -137,6 +137,5 @@ pub use v16::STRESS_ENVELOPE_TRIGGER_BPS_E9;
 // The module is private by default (frozen surface); fork-facade elevates it to pub.
 
 // Source-domain all-zero tail check (test only).
-#[cfg(not(kani))]
-#[doc(hidden)]
+#[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::source_domain_tail_is_zero_for_test;
