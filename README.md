@@ -215,120 +215,57 @@ price diverge.
 
 ## Features
 
-- **v12.17 two-bucket warmup** — unrealized profit sits in a scheduled then pending reserve before entering the matured haircut denominator, bounding oracle-manipulation exposure
-- **Per-side funding** — long and short funding indices (F coefficients) are tracked independently, enabling asymmetric funding rates
-- **ADL via A/K coefficients** — position overhang is cleared lazily without singling out counterparties; O(1) per account, order-independent
-- **Three-phase side reset** — `DrainOnly` → `ResetPending` → `Normal` guarantees markets always recover without admin intervention
-- **No external dependencies** — pure `no_std` compatible Rust library; no CPI, no token transfers, no signer checks
+- **Two-bucket warmup**: fresh profit sits in a per-account reserve before entering the matured haircut denominator, which bounds oracle-manipulation exposure.
+- **Per-side funding**: long and short funding indices (F) are tracked independently.
+- **ADL via A/K**: position overhang is cleared lazily without singling out counterparties; O(1) per account, order-independent.
+- **Side reset**: `DrainOnly` -> `ResetPending` -> `Normal`, so a drained side recovers without admin intervention.
+- **No external dependencies beyond `bytemuck`**: a `no_std`-compatible Rust library with no CPI, token transfers or signer checks. Those belong to the wrapper program.
 
 ## Build and Test
 
 ```bash
-# Default suite
-cargo test                          # 344 tests, 0 failures (all targets, main a90fb27f + this stack)
-
-# With the fuzz/property targets (v16_fuzzing is `required-features = ["fuzz"]`)
-cargo test --features fuzz          # 398 tests, 0 failures
-
-# With the O(N) account-table invariant scans. This feature is the ONLY build in which
-# validate_shape_full_audit_scan / validate_asset_shape_for_view compile in at all, so the
-# default suite being green says nothing about them. CI runs these two as the `audit-scan` job.
-cargo test --features audit-scan --test v16_spec_tests   # 179 tests, 0 failures
-cargo test --features audit-scan --lib                   # 68 tests, 0 failures
+cargo check
+cargo test                      # default suite
+cargo test --features fuzz      # adds the fuzz/property targets
+cargo test --features audit-scan --test v16_spec_tests   # O(N) account-table invariant scans
+cargo test --features audit-scan --lib
 ```
 
-`v16_spec_tests` runs 179 under `audit-scan` and 180 by default: exactly one test is
-`#[cfg(not(feature = "audit-scan"))]`, because its fixture is deliberately off-model for the
-Live matched-book invariant — see the comment above
-`v16_auto_crank_does_not_liquidate_against_unmatched_effective_oi`.
-
-The `audit-scan` CI job runs `cargo test --features audit-scan --no-fail-fast --all-targets`
-and is green across every target (343 tests, 0 failures at this stack's tip). It was briefly
-scoped to two targets while `tests/grief_econ_final.rs` (5/2) and `tests/f03_regression.rs`
-(3/1) carried the same hand-written-fixture shape the spec suite's seven had —
-`Err(InvalidConfig)` from `validate_shape()` on state a helper assigned directly, never
-produced by an engine instruction. Both fixtures were put back on-model (AS-03, AS-05) and the
-job was widened. Seven of the twenty targets contribute zero tests under `audit-scan` (two
-need `fuzz`, one needs `fork-facade`, four are Kani-only proof files) — a `running 0 tests`
-line there is expected, not a pass.
-
-There is no `test` feature; the declared features are `stress`, `fuzz`, `audit-scan` and
-`fork-facade` (`Cargo.toml`), with `default = []`.
+Declared features (see `Cargo.toml`): `stress`, `fuzz`, `audit-scan`, `fork-facade`; `default = []`.
+Some test targets only contribute tests under particular features, so a target that
+reports `running 0 tests` is expected in some configurations.
 
 ## Kani
 
-**Pinned to Kani 0.67.0.** `scripts/run_kani_full_audit.sh` refuses to run against any other
-version: harness counts, the JSON schema of `kani-list.json`, and which unstable flags are
-required all move between Kani releases, and a results table that does not name its verifier
-version cannot be reproduced.
+Formal proofs use Kani, pinned to 0.67.0 (`scripts/run_kani_full_audit.sh` refuses other versions).
 
 ```bash
-# One-time setup
 cargo install --locked kani-verifier@0.67.0
 cargo kani setup
 
-# All harnesses. --features fuzz is REQUIRED, not optional: [workspace.metadata.kani] sets
-# `flags = { tests = true }`, so cargo builds every test target, and the v16_fuzzing target
-# is `required-features = ["fuzz"]`. Without it cargo aborts before any proof runs:
-#   error: target `v16_fuzzing` in package `percolator` requires the features: `fuzz`
+# All harnesses. --features fuzz is required: the v16_fuzzing test target needs it.
 cargo kani --tests --features fuzz
 
-# One harness (the fully-qualified name; --exact matches same-named harnesses across files)
+# One harness
 cargo kani --tests --features fuzz --jobs 1 --harness HARNESS_NAME
 
-# Long audits: one harness per process, with a 20-minute cap and a results TSV.
-# Linux only: the per-harness cap is `timeout 1200` (scripts/run_kani_full_audit.sh:83),
-# a coreutils binary that macOS does not ship (`brew install coreutils` provides it as
-# `gtimeout`). The script is unchanged; run it on Linux, or expect it to abort there.
+# Long audits: one harness per process with a per-harness timeout and a results TSV.
+# Uses coreutils `timeout`; on macOS install coreutils and adapt, or run on Linux.
 bash scripts/run_kani_full_audit.sh
 ```
 
-### Harness census
-
-Counted at this checkout, not carried forward from a previous one:
-
-| Class | Count | Where |
-| --- | ---: | --- |
-| `#[kani::proof]` harnesses | **325** | `tests/proofs_v16.rs` 289, `tests/proofs_v17_fork.rs` 21, `tests/proofs_v16_arithmetic.rs` 13, `tests/proofs_v16_asymmetric_a_accrual.rs` 2 |
-| `#[kani::proof_for_contract]` harnesses | **0** | this fork has no `contracts` feature and no `src/v16_proofs.rs` |
+The harnesses are the `#[kani::proof]` functions in `tests/proofs_*.rs`; `kani-list.json`
+lists them. Count them yourself rather than trusting a number in a README:
 
 ```bash
-# Reproduce both numbers. Exclude comment lines: a `#[kani::proof]` written inside a doc
-# comment is not a harness (there are 3 such lines, e.g. tests/proofs_v17_fork.rs:722).
-grep -rn '#\[kani::proof\]' --include='*.rs' . | grep -vE ':\s*//' | wc -l   # 325
-grep -rn '#\[kani::proof_for_contract' --include='*.rs' . | grep -vE ':\s*//' | wc -l  # 0
+grep -rn '#\[kani::proof\]' --include='*.rs' . | grep -vE ':\s*//' | wc -l
 ```
 
-`kani-list.json` is the machine-readable form of the same census and agrees: 325
-standard harnesses, 0 contract harnesses, `"kani-version": "0.67.0"`. Regenerate it with
+A harness that reports SUCCESSFUL is not proof by itself: if its `kani::cover!`
+properties are unreachable it proved nothing, so check the cover lines too.
 
-```bash
-# `cargo kani list` (0.67.0) accepts no cargo flags, so the features have to reach it
-# through the manifest for the duration of the run.
-sed -i.bak 's/flags = { tests = true }/flags = { tests = true, features = ["fuzz"] }/' Cargo.toml
-cargo kani list --format json -Z stubbing    # -Z stubbing: tests/proofs_v17_fork.rs:835 uses #[kani::stub]
-mv Cargo.toml.bak Cargo.toml
-```
-
-**On the contract layer.** Upstream (`aeyakovenko/percolator`) carries a `contracts` feature and
-61 `#[kani::proof_for_contract]` harnesses in `src/v16_proofs.rs`, run there with
-`cargo kani --tests --features fuzz,contracts -Z function-contracts`. **That invocation does not
-apply to this fork**: `Cargo.toml` declares no `contracts` feature and this tree has no
-`src/v16_proofs.rs`, so the command fails at cargo. Five upstream contract properties are carried
-here as plain `#[kani::proof]` harnesses that assert the same postcondition over the same
-unconstrained domain — `proof_v16_terminal_source_haircut_reserved_exactly_once`,
-`proof_v16_kernel_advance_leg_b_snap_rank_witness`,
-`proof_v16_kernel_initial_margin_gate_exact_decision`,
-`proof_v16_kernel_accumulate_batch_trade_exact_fold` and
-`proof_v16_kernel_settle_principal_exact_paid_and_conservation` (plus
-`proof_v16_cert_is_current_matches_the_favorable_action_gate` for upstream's
-`contract_check_kernel_cert_is_current`). They are inside the 328, not additional to it; each
-names its upstream contract in a comment above the harness.
-
-**A SUCCESSFUL harness is not by itself evidence.** Kani reports SUCCESSFUL for a harness whose
-`kani::cover!` properties are unreachable. Judge every result on its cover line as well —
-`0 of N cover properties satisfied` means the harness proved nothing. The CI smoke job gates on
-exactly that.
+Upstream (`aeyakovenko/percolator`) has a `contracts` feature with
+`#[kani::proof_for_contract]` harnesses. This fork does not; `--features contracts` will fail here.
 
 ## Security
 
