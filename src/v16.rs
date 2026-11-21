@@ -13042,7 +13042,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// atoms; the rest is un-pledged in place as before).
     ///
     /// The lien is backing reserved for this account alone, so all of it goes,
-    /// with the exceptions the unliened netting has (`net_slot_face_at_par_not_atomic`):
+    /// with the exceptions upstream's unliened netting has (`net_slot_face_at_par_not_atomic`;
+    /// v2.2 note: this fork's unliened twin netting does not carry upstream's S1 loser-paid
+    /// cap, so here the twin rule below is stricter than the unliened one):
     /// - face held in `loss_domain` itself: its backing already sits where the
     ///   loss is owed (#252), nothing moves;
     /// - face in the leg's twin domain is a gain the reversal undoes, so only the
@@ -15768,8 +15770,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// 3. if the account holds unliened face in a partially backed (rate < 1)
     ///    domain, the whole rest is paid from free capital into `loss_domain`,
     ///    keeping that face (worth face * rate in health either way) instead of
-    ///    burning face / rate of it. Liened face keeps the ordinary
-    ///    unwind-and-burn path.
+    ///    burning face / rate of it. Liened face is left to the ordinary
+    ///    support-and-burn path, which in Live consumes its lien backing for
+    ///    `loss_domain` (upstream 1683b11d, `burn_account_source_lien_face_not_atomic`).
     ///
     /// Whatever remains (capital exhausted) takes the ordinary path. Returns the
     /// loss amount settled here.
@@ -16106,7 +16109,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// beyond provider principal. Fork adaptation of upstream 72bfb065's
     /// `loser_paid_backing_num` (needed by 1683b11d): the provider principal here is the
     /// fork's S10 mirror (`provider_principal_for_domain`), not upstream's
-    /// `provider_principal_{long,short}_num`.
+    /// `provider_principal_{long,short}_num`. Known difference: upstream lowers its
+    /// principal when backing leaves by expiry or impairment
+    /// (`release_provider_principal_after`); the S10 mirror moves only on deposit, withdraw
+    /// and the wholly-empty reset. After an expiry the mirror can read high, so this
+    /// returns less (never more) than upstream's value, and less liened twin backing
+    /// moves with a loss (it is un-pledged in place, the pre-1683b11d behaviour).
     fn loser_paid_backing_num(&self, domain: usize) -> V16Result<u128> {
         let reserved = self
             .source_credit_for_domain(domain)?

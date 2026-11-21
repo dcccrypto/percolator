@@ -1220,12 +1220,15 @@ provider-receivable / consumed in lockstep as above) and booked for `L` by the
 same rule as the paragraph above. The account-side effect is unchanged: the same
 face is burned and the lien shrinks by the same amounts. Only whole atoms are
 consumed; a fraction of an atom is un-pledged in place. The exceptions are those
-of the netting above. Face held in `L` itself moves nothing: its backing already
+of upstream's netting (v2.2: the unliened twin netting above has no loser-paid cap, so
+the twin rule here is stricter than it). Face held in `L` itself moves nothing: its backing already
 sits where the loss is owed. For face in the twin domain `T` only the share its
 losers paid in follows, `burned face * loser_paid_T / claims_T`, rounded up to a
 whole atom and never more than the lien's backing or `T`'s loser-paid backing,
 so what a provider fronted stays with the provider (v2.2: `loser_paid_T` is `T`'s
-fresh reserved backing beyond the S10 provider-principal mirror). Nothing is consumed while
+fresh reserved backing beyond the S10 provider-principal mirror; that mirror does
+not fall on expiry or impairment as upstream's principal does, so after an expiry
+`loser_paid_T` can read lower than upstream's and less backing moves). Nothing is consumed while
 either side of either asset has a pending domain-loss barrier, while the face's
 bucket is not Fresh and unlapsed, or while `L`'s bucket cannot accept fresh
 principal; the lien is then un-pledged in place (or retired, for an impaired
