@@ -9,6 +9,7 @@ MIR blocks: 112, locals: 129. market root: _1; accounts: _2 (mut)
 result = local 0 (0 is Ok); payload = local 1000000 (ghost: integer value or enum discriminant
 of the Ok payload; for Option: None = 0, Some = 1).
 callee summaries used (block, callee), each certified by its own module in this directory:
+  bb80 MarketGroupV16ViewMut::<'_, T>::settle_negative_pnl_from_principal_core_not_atomic
   bb83 MarketGroupV16ViewMut::<'_, T>::charge_account_fee_current_not_atomic
 summary clauses (the goal):
   result = 0: checks [1] hold; checks [0] preserved
@@ -100,7 +101,7 @@ def cfg : Cfg := [
   /- bb77 -/ ⟨[.havoc 86, .havoc 1000086], .goto 80⟩,
   /- bb78 -/ ⟨[.setD 0 1, .havoc 1000000], .goto 104⟩,
   /- bb79 -/ ⟨[.havoc 80, .havoc 1000080, .havoc 79, .havoc 1000079, .havoc 78, .havoc 1000078], .goto 80⟩,
-  /- bb80 -/ ⟨[.havoc 77, .havoc 1000077], .call [95, 1000095] 81 [] []⟩,
+  /- bb80 -/ ⟨[.havoc 77, .havoc 1000077], .call [95, 1000095] 81 [] [⟨[(95, .eq 0), (1000095, .eq 0)], .chk [] [1]⟩]⟩,
   /- bb81 -/ ⟨[], .branch 94 95 1000094 1000095 82⟩,
   /- bb82 -/ ⟨[.havoc 95, .havoc 1000095, .copy 96 94, .copy 1000096 1000094], .switch 96 [(0, 83), (1, 84)] (some 4)⟩,
   /- bb83 -/ ⟨[.copy 98 1000094, .havoc 1000098, .havoc 98, .havoc 1000098, .havoc 94, .havoc 1000094], .call [100, 1000100] 86 [] [⟨[(100, .eq 0), (1000100, .eq 0)], .chk [] [0, 1]⟩]⟩,

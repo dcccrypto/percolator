@@ -1,0 +1,391 @@
+fn v16::<impl at src/v16.rs:9719:1: 9719:41>::begin_legless_asset_resets(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: usize) -> Result<(), V16Error> {
+    debug self => _1;
+    debug asset_index => _2;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+    let mut _3: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, v16::AssetStateV16>;
+    let mut _4: core::result::Result<v16::AssetStateV16, v16::V16Error>;
+    let mut _5: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _6: isize;
+    let _7: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let mut _8: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>>;
+    let mut _9: core::result::Result<(), v16::V16Error>;
+    let mut _10: isize;
+    let _12: u64;
+    let _13: u64;
+    let _14: v16::AssetLifecycleV16;
+    let _15: u64;
+    let _16: u64;
+    let _17: u64;
+    let _18: u64;
+    let _19: u128;
+    let _20: u128;
+    let _21: i128;
+    let _22: i128;
+    let _23: i128;
+    let _24: i128;
+    let _25: u64;
+    let _26: u64;
+    let _27: i128;
+    let _28: i128;
+    let _29: i128;
+    let _30: i128;
+    let _31: u128;
+    let _32: u128;
+    let _33: u128;
+    let _34: u128;
+    let _35: u128;
+    let _36: u128;
+    let _37: u128;
+    let _38: u128;
+    let _39: u64;
+    let _40: u64;
+    let _41: u64;
+    let _42: u64;
+    let _43: u64;
+    let _44: u64;
+    let _45: u128;
+    let _46: u128;
+    let _47: u128;
+    let _48: u128;
+    let _49: u128;
+    let _50: u128;
+    let _51: u128;
+    let _52: u128;
+    let _53: u64;
+    let _54: u64;
+    let _55: v16::SideModeV16;
+    let _56: v16::SideModeV16;
+    scope 1 {
+        debug ((asset: AssetStateV16).0: u64) => _12;
+        debug ((asset: AssetStateV16).1: u64) => _13;
+        debug ((asset: AssetStateV16).2: v16::AssetLifecycleV16) => _14;
+        debug ((asset: AssetStateV16).3: u64) => _15;
+        debug ((asset: AssetStateV16).4: u64) => _16;
+        debug ((asset: AssetStateV16).5: u64) => _17;
+        debug ((asset: AssetStateV16).6: u64) => _18;
+        debug ((asset: AssetStateV16).7: u128) => _19;
+        debug ((asset: AssetStateV16).8: u128) => _20;
+        debug ((asset: AssetStateV16).9: i128) => _21;
+        debug ((asset: AssetStateV16).10: i128) => _22;
+        debug ((asset: AssetStateV16).11: i128) => _23;
+        debug ((asset: AssetStateV16).12: i128) => _24;
+        debug ((asset: AssetStateV16).13: u64) => _25;
+        debug ((asset: AssetStateV16).14: u64) => _26;
+        debug ((asset: AssetStateV16).15: i128) => _27;
+        debug ((asset: AssetStateV16).16: i128) => _28;
+        debug ((asset: AssetStateV16).17: i128) => _29;
+        debug ((asset: AssetStateV16).18: i128) => _30;
+        debug ((asset: AssetStateV16).19: u128) => _31;
+        debug ((asset: AssetStateV16).20: u128) => _32;
+        debug ((asset: AssetStateV16).21: u128) => _33;
+        debug ((asset: AssetStateV16).22: u128) => _34;
+        debug ((asset: AssetStateV16).23: u128) => _35;
+        debug ((asset: AssetStateV16).24: u128) => _36;
+        debug ((asset: AssetStateV16).25: u128) => _37;
+        debug ((asset: AssetStateV16).26: u128) => _38;
+        debug ((asset: AssetStateV16).27: u64) => _39;
+        debug ((asset: AssetStateV16).28: u64) => _40;
+        debug ((asset: AssetStateV16).29: u64) => _41;
+        debug ((asset: AssetStateV16).30: u64) => _42;
+        debug ((asset: AssetStateV16).31: u64) => _43;
+        debug ((asset: AssetStateV16).32: u64) => _44;
+        debug ((asset: AssetStateV16).33: u128) => _45;
+        debug ((asset: AssetStateV16).34: u128) => _46;
+        debug ((asset: AssetStateV16).35: u128) => _47;
+        debug ((asset: AssetStateV16).36: u128) => _48;
+        debug ((asset: AssetStateV16).37: u128) => _49;
+        debug ((asset: AssetStateV16).38: u128) => _50;
+        debug ((asset: AssetStateV16).39: u128) => _51;
+        debug ((asset: AssetStateV16).40: u128) => _52;
+        debug ((asset: AssetStateV16).41: u64) => _53;
+        debug ((asset: AssetStateV16).42: u64) => _54;
+        debug ((asset: AssetStateV16).43: v16::SideModeV16) => _55;
+        debug ((asset: AssetStateV16).44: v16::SideModeV16) => _56;
+        let _11: core::result::Result<core::convert::Infallible, v16::V16Error>;
+        scope 6 {
+            debug residual => _11;
+            scope 7 {
+            }
+        }
+        scope 8 {
+            debug val => const ();
+            scope 9 {
+            }
+        }
+    }
+    scope 2 {
+        debug residual => _7;
+        scope 3 {
+        }
+    }
+    scope 4 {
+        debug ((val: AssetStateV16).0: u64) => _12;
+        debug ((val: AssetStateV16).1: u64) => _13;
+        debug ((val: AssetStateV16).2: v16::AssetLifecycleV16) => _14;
+        debug ((val: AssetStateV16).3: u64) => _15;
+        debug ((val: AssetStateV16).4: u64) => _16;
+        debug ((val: AssetStateV16).5: u64) => _17;
+        debug ((val: AssetStateV16).6: u64) => _18;
+        debug ((val: AssetStateV16).7: u128) => _19;
+        debug ((val: AssetStateV16).8: u128) => _20;
+        debug ((val: AssetStateV16).9: i128) => _21;
+        debug ((val: AssetStateV16).10: i128) => _22;
+        debug ((val: AssetStateV16).11: i128) => _23;
+        debug ((val: AssetStateV16).12: i128) => _24;
+        debug ((val: AssetStateV16).13: u64) => _25;
+        debug ((val: AssetStateV16).14: u64) => _26;
+        debug ((val: AssetStateV16).15: i128) => _27;
+        debug ((val: AssetStateV16).16: i128) => _28;
+        debug ((val: AssetStateV16).17: i128) => _29;
+        debug ((val: AssetStateV16).18: i128) => _30;
+        debug ((val: AssetStateV16).19: u128) => _31;
+        debug ((val: AssetStateV16).20: u128) => _32;
+        debug ((val: AssetStateV16).21: u128) => _33;
+        debug ((val: AssetStateV16).22: u128) => _34;
+        debug ((val: AssetStateV16).23: u128) => _35;
+        debug ((val: AssetStateV16).24: u128) => _36;
+        debug ((val: AssetStateV16).25: u128) => _37;
+        debug ((val: AssetStateV16).26: u128) => _38;
+        debug ((val: AssetStateV16).27: u64) => _39;
+        debug ((val: AssetStateV16).28: u64) => _40;
+        debug ((val: AssetStateV16).29: u64) => _41;
+        debug ((val: AssetStateV16).30: u64) => _42;
+        debug ((val: AssetStateV16).31: u64) => _43;
+        debug ((val: AssetStateV16).32: u64) => _44;
+        debug ((val: AssetStateV16).33: u128) => _45;
+        debug ((val: AssetStateV16).34: u128) => _46;
+        debug ((val: AssetStateV16).35: u128) => _47;
+        debug ((val: AssetStateV16).36: u128) => _48;
+        debug ((val: AssetStateV16).37: u128) => _49;
+        debug ((val: AssetStateV16).38: u128) => _50;
+        debug ((val: AssetStateV16).39: u128) => _51;
+        debug ((val: AssetStateV16).40: u128) => _52;
+        debug ((val: AssetStateV16).41: u64) => _53;
+        debug ((val: AssetStateV16).42: u64) => _54;
+        debug ((val: AssetStateV16).43: v16::SideModeV16) => _55;
+        debug ((val: AssetStateV16).44: v16::SideModeV16) => _56;
+        scope 5 {
+        }
+    }
+
+    bb0: {
+        StorageLive(_3);
+        StorageLive(_4);
+        StorageLive(_5);
+        _5 = &(*_1);
+        _4 = MarketGroupV16ViewMut::<'_, T>::asset_state(move _5, copy _2) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        StorageDead(_5);
+        _3 = <Result<AssetStateV16, V16Error> as Try>::branch(move _4) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        StorageDead(_4);
+        _6 = discriminant(_3);
+        switchInt(move _6) -> [0: bb4, 1: bb5, otherwise: bb3];
+    }
+
+    bb3: {
+        unreachable;
+    }
+
+    bb4: {
+        StorageLive(_12);
+        StorageLive(_13);
+        StorageLive(_14);
+        StorageLive(_15);
+        StorageLive(_16);
+        StorageLive(_17);
+        StorageLive(_18);
+        StorageLive(_19);
+        StorageLive(_20);
+        StorageLive(_21);
+        StorageLive(_22);
+        StorageLive(_23);
+        StorageLive(_24);
+        StorageLive(_25);
+        StorageLive(_26);
+        StorageLive(_27);
+        StorageLive(_28);
+        StorageLive(_29);
+        StorageLive(_30);
+        StorageLive(_31);
+        StorageLive(_32);
+        StorageLive(_33);
+        StorageLive(_34);
+        StorageLive(_35);
+        StorageLive(_36);
+        StorageLive(_37);
+        StorageLive(_38);
+        StorageLive(_41);
+        StorageLive(_42);
+        StorageLive(_43);
+        StorageLive(_44);
+        StorageLive(_45);
+        StorageLive(_46);
+        StorageLive(_47);
+        StorageLive(_48);
+        StorageLive(_49);
+        StorageLive(_50);
+        StorageLive(_51);
+        StorageLive(_52);
+        StorageLive(_53);
+        StorageLive(_54);
+        StorageLive(_55);
+        StorageLive(_56);
+        _12 = copy (((_3 as Continue).0: v16::AssetStateV16).0: u64);
+        _13 = copy (((_3 as Continue).0: v16::AssetStateV16).1: u64);
+        _14 = copy (((_3 as Continue).0: v16::AssetStateV16).2: v16::AssetLifecycleV16);
+        _15 = copy (((_3 as Continue).0: v16::AssetStateV16).3: u64);
+        _16 = copy (((_3 as Continue).0: v16::AssetStateV16).4: u64);
+        _17 = copy (((_3 as Continue).0: v16::AssetStateV16).5: u64);
+        _18 = copy (((_3 as Continue).0: v16::AssetStateV16).6: u64);
+        _19 = copy (((_3 as Continue).0: v16::AssetStateV16).7: u128);
+        _20 = copy (((_3 as Continue).0: v16::AssetStateV16).8: u128);
+        _21 = copy (((_3 as Continue).0: v16::AssetStateV16).9: i128);
+        _22 = copy (((_3 as Continue).0: v16::AssetStateV16).10: i128);
+        _23 = copy (((_3 as Continue).0: v16::AssetStateV16).11: i128);
+        _24 = copy (((_3 as Continue).0: v16::AssetStateV16).12: i128);
+        _25 = copy (((_3 as Continue).0: v16::AssetStateV16).13: u64);
+        _26 = copy (((_3 as Continue).0: v16::AssetStateV16).14: u64);
+        _27 = copy (((_3 as Continue).0: v16::AssetStateV16).15: i128);
+        _28 = copy (((_3 as Continue).0: v16::AssetStateV16).16: i128);
+        _29 = copy (((_3 as Continue).0: v16::AssetStateV16).17: i128);
+        _30 = copy (((_3 as Continue).0: v16::AssetStateV16).18: i128);
+        _31 = copy (((_3 as Continue).0: v16::AssetStateV16).19: u128);
+        _32 = copy (((_3 as Continue).0: v16::AssetStateV16).20: u128);
+        _33 = copy (((_3 as Continue).0: v16::AssetStateV16).21: u128);
+        _34 = copy (((_3 as Continue).0: v16::AssetStateV16).22: u128);
+        _35 = copy (((_3 as Continue).0: v16::AssetStateV16).23: u128);
+        _36 = copy (((_3 as Continue).0: v16::AssetStateV16).24: u128);
+        _37 = copy (((_3 as Continue).0: v16::AssetStateV16).25: u128);
+        _38 = copy (((_3 as Continue).0: v16::AssetStateV16).26: u128);
+        _39 = copy (((_3 as Continue).0: v16::AssetStateV16).27: u64);
+        _40 = copy (((_3 as Continue).0: v16::AssetStateV16).28: u64);
+        _41 = copy (((_3 as Continue).0: v16::AssetStateV16).29: u64);
+        _42 = copy (((_3 as Continue).0: v16::AssetStateV16).30: u64);
+        _43 = copy (((_3 as Continue).0: v16::AssetStateV16).31: u64);
+        _44 = copy (((_3 as Continue).0: v16::AssetStateV16).32: u64);
+        _45 = copy (((_3 as Continue).0: v16::AssetStateV16).33: u128);
+        _46 = copy (((_3 as Continue).0: v16::AssetStateV16).34: u128);
+        _47 = copy (((_3 as Continue).0: v16::AssetStateV16).35: u128);
+        _48 = copy (((_3 as Continue).0: v16::AssetStateV16).36: u128);
+        _49 = copy (((_3 as Continue).0: v16::AssetStateV16).37: u128);
+        _50 = copy (((_3 as Continue).0: v16::AssetStateV16).38: u128);
+        _51 = copy (((_3 as Continue).0: v16::AssetStateV16).39: u128);
+        _52 = copy (((_3 as Continue).0: v16::AssetStateV16).40: u128);
+        _53 = copy (((_3 as Continue).0: v16::AssetStateV16).41: u64);
+        _54 = copy (((_3 as Continue).0: v16::AssetStateV16).42: u64);
+        _55 = copy (((_3 as Continue).0: v16::AssetStateV16).43: v16::SideModeV16);
+        _56 = copy (((_3 as Continue).0: v16::AssetStateV16).44: v16::SideModeV16);
+        StorageDead(_12);
+        StorageDead(_13);
+        StorageDead(_14);
+        StorageDead(_15);
+        StorageDead(_16);
+        StorageDead(_17);
+        StorageDead(_18);
+        StorageDead(_19);
+        StorageDead(_20);
+        StorageDead(_21);
+        StorageDead(_22);
+        StorageDead(_23);
+        StorageDead(_24);
+        StorageDead(_25);
+        StorageDead(_26);
+        StorageDead(_27);
+        StorageDead(_28);
+        StorageDead(_29);
+        StorageDead(_30);
+        StorageDead(_31);
+        StorageDead(_32);
+        StorageDead(_33);
+        StorageDead(_34);
+        StorageDead(_35);
+        StorageDead(_36);
+        StorageDead(_37);
+        StorageDead(_38);
+        StorageDead(_41);
+        StorageDead(_42);
+        StorageDead(_43);
+        StorageDead(_44);
+        StorageDead(_45);
+        StorageDead(_46);
+        StorageDead(_47);
+        StorageDead(_48);
+        StorageDead(_49);
+        StorageDead(_50);
+        StorageDead(_51);
+        StorageDead(_52);
+        StorageDead(_53);
+        StorageDead(_54);
+        StorageDead(_55);
+        StorageDead(_56);
+        StorageDead(_3);
+        switchInt(copy _39) -> [0: bb7, otherwise: bb14];
+    }
+
+    bb5: {
+        StorageLive(_7);
+        _7 = copy ((_3 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _7) -> [return: bb6, unwind continue];
+    }
+
+    bb6: {
+        StorageDead(_7);
+        StorageDead(_3);
+        goto -> bb15;
+    }
+
+    bb7: {
+        switchInt(copy _40) -> [0: bb8, otherwise: bb14];
+    }
+
+    bb8: {
+        StorageLive(_8);
+        StorageLive(_9);
+        _9 = MarketGroupV16ViewMut::<'_, T>::begin_zero_oi_residue_resets(move _1, move _2) -> [return: bb9, unwind continue];
+    }
+
+    bb9: {
+        _8 = <Result<(), V16Error> as Try>::branch(move _9) -> [return: bb10, unwind continue];
+    }
+
+    bb10: {
+        StorageDead(_9);
+        _10 = discriminant(_8);
+        switchInt(move _10) -> [0: bb11, 1: bb12, otherwise: bb3];
+    }
+
+    bb11: {
+        StorageDead(_8);
+        goto -> bb14;
+    }
+
+    bb12: {
+        StorageLive(_11);
+        _11 = copy ((_8 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _11) -> [return: bb13, unwind continue];
+    }
+
+    bb13: {
+        StorageDead(_11);
+        StorageDead(_8);
+        goto -> bb15;
+    }
+
+    bb14: {
+        _0 = const Result::<(), V16Error>::Ok(());
+        goto -> bb16;
+    }
+
+    bb15: {
+        goto -> bb16;
+    }
+
+    bb16: {
+        return;
+    }
+}

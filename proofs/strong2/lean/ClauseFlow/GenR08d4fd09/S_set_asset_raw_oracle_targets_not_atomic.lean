@@ -9,7 +9,7 @@ MIR blocks: 79, locals: 128. market root: _1; accounts: none
 result = local 0 (0 is Ok); payload = local 1000000 (ghost: integer value or enum discriminant
 of the Ok payload; for Option: None = 0, Some = 1).
 callee summaries used (block, callee), each certified by its own module in this directory:
-  none
+  bb60 MarketGroupV16ViewMut::<'_, T>::set_asset_state
 summary clauses (the goal):
   result = 0: checks [0] hold
 -/
@@ -79,7 +79,7 @@ def cfg : Cfg := [
   /- bb57 -/ ⟨[.havoc 61, .havoc 1000061, .havoc 60, .havoc 1000060, .havoc 58, .havoc 1000058, .copy 75 49, .copy 1000075 1000049], .switch 75 [(1, 68), (0, 70)] (some 5)⟩,
   /- bb58 -/ ⟨[.havoc 67, .havoc 1000067], .branch 65 66 1000065 1000066 59⟩,
   /- bb59 -/ ⟨[.havoc 66, .havoc 1000066, .copy 68 65, .copy 1000068 1000065], .switch 68 [(0, 60), (1, 61)] (some 5)⟩,
-  /- bb60 -/ ⟨[.copy 70 1000065, .havoc 1000070, .havoc 65, .havoc 1000065, .havoc 70, .havoc 1000070], .call [72, 1000072] 63 [] []⟩,
+  /- bb60 -/ ⟨[.copy 70 1000065, .havoc 1000070, .havoc 65, .havoc 1000065, .havoc 70, .havoc 1000070], .call [72, 1000072] 63 [] [⟨[(72, .eq 0)], .chk [] [0]⟩]⟩,
   /- bb61 -/ ⟨[.havoc 69, .havoc 1000069, .setD 0 1, .havoc 1000000], .goto 62⟩,
   /- bb62 -/ ⟨[.havoc 69, .havoc 1000069, .havoc 65, .havoc 1000065], .goto 72⟩,
   /- bb63 -/ ⟨[], .branch 71 72 1000071 1000072 64⟩,
@@ -88,7 +88,7 @@ def cfg : Cfg := [
   /- bb66 -/ ⟨[.havoc 74, .havoc 1000074, .setD 0 1, .havoc 1000000], .goto 67⟩,
   /- bb67 -/ ⟨[.havoc 74, .havoc 1000074, .havoc 71, .havoc 1000071], .goto 72⟩,
   /- bb68 -/ ⟨[.havoc 76, .havoc 1000076], .call [77, 1000077] 69 [0] []⟩,
-  /- bb69 -/ ⟨[.havoc 82, .havoc 1000082, .write [], .havoc 77, .havoc 1000077, .havoc 76, .havoc 1000076], .goto 70⟩,
+  /- bb69 -/ ⟨[.havoc 82, .havoc 1000082, .havoc 77, .havoc 1000077, .havoc 76, .havoc 1000076], .goto 70⟩,
   /- bb70 -/ ⟨[.havoc 78, .havoc 1000078], .call [0, 1000000] 71 [0] [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
   /- bb71 -/ ⟨[.havoc 78, .havoc 1000078, .havoc 49, .havoc 1000049, .havoc 14, .havoc 1000014], .goto 78⟩,
   /- bb72 -/ ⟨[.havoc 64, .havoc 1000064, .havoc 63, .havoc 1000063, .havoc 61, .havoc 1000061, .havoc 60, .havoc 1000060, .havoc 58, .havoc 1000058], .goto 73⟩,

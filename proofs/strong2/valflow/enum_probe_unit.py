@@ -48,6 +48,17 @@ cases = [
     ("arm constants out of sequence in the probe text", dict(edit_src=lambda s: s.replace(arm(0), "@@").replace(arm(1), "%s::%s { .. } => %d" % (EN, v[1], P.BASE + 1)).replace("@@", "%s::%s { .. } => %d" % (EN, v[0], P.BASE + 2))), lambda t: EN not in t),
     ("discriminant read of another place", dict(edit_mir=lambda m: body(m, lambda x: x.replace("discriminant((*_1))", "discriminant(_1)"))), lambda t: EN not in t),
 ]
+# audit round 5 (independent): hostile sources; the source scan must switch the table off
+A5 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neg_cases", "audit5")
+rd = lambda f: open(os.path.join(A5, f)).read()
+ins = lambda extra: (lambda s: s.replace(P.MARKER, extra + "\n" + P.MARKER))
+cases += [
+    ("audit 5 H1/H2: discriminants from include_str!/env! (two builds differ)", dict(edit_src=ins(rd("h1_h2_v16.rs"))), lambda t: len(t) == 0),
+    ("audit 5 H3: `fn v16()` at the crate root with a local enum", dict(extra=rd("h3_h4_lib.rs")), lambda t: len(t) == 0),
+    ("audit 5 H4: decl_macro with a hygienic second enum", dict(edit_src=ins(rd("h3_h4_v16.rs"))), lambda t: len(t) == 0),
+    ("audit 5 H5: include!(\"v16.rs\") at the root and #[path] mod v16", dict(extra=rd("h5_lib.rs")), lambda t: len(t) == 0),
+    ("macro call passing the bare name v16", dict(edit_src=ins("macro_rules! s2m { ($n:ident) => { pub fn $n() {} } }\ns2m!(v16);")), lambda t: len(t) == 0),
+]
 bad = 0
 print("control: %s -> %s" % (EN, base[EN]))
 for name, kw, good in cases:

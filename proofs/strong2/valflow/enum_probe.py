@@ -85,6 +85,57 @@ def probe_text(src_text):
     return "\n".join(out) + "\n", cands
 
 
+
+# ---------------------------------------------------------------- TRUSTED source scan (A15, A16)
+# Audit round 5 (independent agent) broke the first version of this file in two ways:
+#  (a) the table is read from another build than the analysed one, and a crate can tell them
+#      apart at compile time (`include_str!("v16.rs").len()`, `env!("CARGO_MANIFEST_DIR")`) and
+#      make an explicit discriminant depend on it;
+#  (b) `v16::NAME` in MIR is a printed path, not an identity: a function named `v16` at the crate
+#      root with a local enum, a `decl_macro` with hygienic items, or `include!` + `#[path]` give a
+#      second type that prints the same.
+# No fix is possible from the printed MIR alone, so the table is EMPTY (R9 off) unless the crate
+# sources pass this scan. The scan is on raw text, bare words, so that a macro cannot assemble the
+# forbidden name from an argument.
+_BAN = ["include_str", "include_bytes", "include", "e" + "nv", "option_e" + "nv", "column", "module_path",
+        "decl_macro", "macro", "concat_idents", "proc_macro"]
+_BAN_CODE = ["file", "line"]          # allowed in whole-line `//` comments only
+
+
+def source_scan(src_dir, v16_path):
+    """List of offences (empty = pass). `v16_path` is read up to the probe marker only."""
+    import os
+    bad = []
+    if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(src_dir)), "build.rs")):
+        bad.append("build.rs present")
+    for root, _, files in os.walk(src_dir):
+        for f in sorted(files):
+            fp = os.path.join(root, f)
+            text = open(fp, errors="replace").read()
+            if os.path.abspath(fp) == os.path.abspath(v16_path) and MARKER in text:
+                text = text[:text.index(MARKER)]
+            rel = os.path.relpath(fp, src_dir)
+            for w in _BAN:
+                if re.search(r"\b%s\b" % w, text):
+                    bad.append("%s: word `%s`" % (rel, w))
+            if re.search(r"feature\s*\(", text) or re.search(r"#\s*!?\s*\[\s*path\b", text) and rel == "lib.rs":
+                bad.append("%s: `feature(` or `#[path` in lib.rs" % rel)
+            for n, ln in enumerate(text.split("\n"), 1):
+                st = ln.strip()
+                if st.startswith("//"):
+                    continue
+                for w in _BAN_CODE:
+                    if re.search(r"\b%s\b" % w, st):
+                        bad.append("%s:%d: word `%s` outside a whole-line comment" % (rel, n, w))
+                # the name `v16`: only `[pub ]mod v16;` in lib.rs, or as a path segment `v16::`
+                for m in re.finditer(r"\bv16\b", st):
+                    if st[m.end():].lstrip().startswith("::"):
+                        continue
+                    if rel == "lib.rs" and re.fullmatch(r"(pub )?mod v16;", st):
+                        continue
+                    bad.append("%s:%d: the name `v16` used other than as `mod v16;` in lib.rs or `v16::`" % (rel, n))
+    return bad
+
 # ---------------------------------------------------------------- TRUSTED reader
 def table(probe_mir_path, src_probe_path):
     """{NAME: {VARIANT: discriminant}} for every probe whose MIR has exactly the expected shape.
@@ -97,6 +148,8 @@ def table(probe_mir_path, src_probe_path):
     # of that name elsewhere, or a second marker, empties the table).
     import os
     sdir = os.path.dirname(os.path.abspath(src_probe_path))
+    if source_scan(sdir, src_probe_path):
+        return {}
     for root, _, files in os.walk(sdir):
         for f in files:
             fp = os.path.join(root, f)
@@ -175,6 +228,9 @@ if __name__ == "__main__":
         open(sys.argv[3], "w").write(t + p)
         print("probes written: %d" % len(c))
     else:
+        import os
+        for o in source_scan(os.path.dirname(os.path.abspath(sys.argv[3])), sys.argv[3]):
+            print("source scan:", o)
         tb = table(sys.argv[2], sys.argv[3])
         for k in sorted(tb):
             print(k, tb[k])

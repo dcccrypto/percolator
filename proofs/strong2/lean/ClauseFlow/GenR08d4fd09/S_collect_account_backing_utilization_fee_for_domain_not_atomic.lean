@@ -88,7 +88,7 @@ def cfg : Cfg := [
   /- bb66 -/ ⟨[.setD 0 0, .setD 1000000 0], .goto 85⟩,
   /- bb67 -/ ⟨[], .call [69, 1000069] 68 [0, 1] []⟩,
   /- bb68 -/ ⟨[.havoc 96, .havoc 1000096, .write [0], .havoc 69, .havoc 1000069], .call [70, 1000070] 69 [0, 1] []⟩,
-  /- bb69 -/ ⟨[.havoc 97, .havoc 1000097, .write [], .havoc 70, .havoc 1000070, .havoc 32, .havoc 1000032], .call [72, 1000072] 70 [] []⟩,
+  /- bb69 -/ ⟨[.havoc 97, .havoc 1000097, .write [1], .havoc 70, .havoc 1000070, .havoc 32, .havoc 1000032], .call [72, 1000072] 70 [] []⟩,
   /- bb70 -/ ⟨[], .branch 71 72 1000071 1000072 71⟩,
   /- bb71 -/ ⟨[.havoc 72, .havoc 1000072, .copy 73 71, .copy 1000073 1000071], .switch 73 [(0, 72), (1, 73)] (some 3)⟩,
   /- bb72 -/ ⟨[.havoc 71, .havoc 1000071], .goto 75⟩,

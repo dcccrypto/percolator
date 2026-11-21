@@ -60,8 +60,8 @@ def cfg : Cfg := [
   /- bb38 -/ ⟨[.havoc 35, .havoc 1000035, .setD 0 1, .havoc 1000000], .goto 39⟩,
   /- bb39 -/ ⟨[.havoc 35, .havoc 1000035, .havoc 31, .havoc 1000031], .goto 44⟩,
   /- bb40 -/ ⟨[.havoc 44, .havoc 1000044, .havoc 39, .havoc 1000039, .havoc 40, .havoc 1000040], .goto 41⟩,
-  /- bb41 -/ ⟨[.havoc 45, .havoc 1000045, .havoc 38, .havoc 1000038], .call [37, 1000037] 42 [] []⟩,
-  /- bb42 -/ ⟨[.havoc 38, .havoc 1000038, .write [], .havoc 36, .havoc 1000036, .havoc 37, .havoc 1000037, .havoc 41, .havoc 1000041], .call [0, 1000000] 43 [0] [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
+  /- bb41 -/ ⟨[.havoc 45, .havoc 1000045, .havoc 38, .havoc 1000038], .call [37, 1000037] 42 [0] []⟩,
+  /- bb42 -/ ⟨[.havoc 38, .havoc 1000038, .havoc 36, .havoc 1000036, .havoc 37, .havoc 1000037, .havoc 41, .havoc 1000041], .call [0, 1000000] 43 [0] [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
   /- bb43 -/ ⟨[.havoc 41, .havoc 1000041, .havoc 19, .havoc 1000019, .havoc 8, .havoc 1000008], .goto 46⟩,
   /- bb44 -/ ⟨[.havoc 19, .havoc 1000019], .goto 45⟩,
   /- bb45 -/ ⟨[.havoc 8, .havoc 1000008], .goto 46⟩,
@@ -111,11 +111,11 @@ def inv : List (Option AState) := [
   /- bb39 -/ some ⟨[(0, .eq 1)], [⟨[], .chk [] [0]⟩]⟩,
   /- bb40 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb41 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
-  /- bb42 -/ some ⟨[], []⟩,
-  /- bb43 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
+  /- bb42 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
+  /- bb43 -/ some ⟨[], [⟨[], .chk [] [0]⟩, ⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
   /- bb44 -/ some ⟨[(0, .eq 1)], [⟨[], .chk [] [0]⟩]⟩,
   /- bb45 -/ some ⟨[(0, .eq 1)], [⟨[], .chk [] [0]⟩]⟩,
-  /- bb46 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [0] []⟩]⟩
+  /- bb46 -/ some ⟨[], [⟨[], .chk [] [0]⟩, ⟨[(0, .eq 0)], .chk [0] []⟩]⟩
 ]
 
 def goal : Goal := ⟨[⟨[(0, .eq 0)], .chk [0] []⟩], [], [0]⟩

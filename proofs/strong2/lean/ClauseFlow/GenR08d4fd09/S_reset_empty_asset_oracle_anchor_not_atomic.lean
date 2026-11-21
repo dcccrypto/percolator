@@ -9,7 +9,7 @@ MIR blocks: 49, locals: 50. market root: _1; accounts: none
 result = local 0 (0 is Ok); payload = local 1000000 (ghost: integer value or enum discriminant
 of the Ok payload; for Option: None = 0, Some = 1).
 callee summaries used (block, callee), each certified by its own module in this directory:
-  none
+  bb35 MarketGroupV16ViewMut::<'_, T>::set_asset_state
 summary clauses (the goal):
   result = 0: checks [0] hold
 -/
@@ -54,7 +54,7 @@ def cfg : Cfg := [
   /- bb32 -/ ⟨[.havoc 36, .havoc 1000036, .setD 0 1, .havoc 1000000], .goto 33⟩,
   /- bb33 -/ ⟨[.havoc 36, .havoc 1000036, .havoc 32, .havoc 1000032], .goto 45⟩,
   /- bb34 -/ ⟨[.havoc 32, .havoc 1000032], .goto 36⟩,
-  /- bb35 -/ ⟨[.havoc 32, .havoc 1000032, .havoc 30, .havoc 1000030, .havoc 23, .havoc 1000023, .havoc 23, .havoc 1000023, .havoc 23, .havoc 1000023, .havoc 23, .havoc 1000023, .copy 40 23, .copy 1000040 1000023], .call [39, 1000039] 37 [] []⟩,
+  /- bb35 -/ ⟨[.havoc 32, .havoc 1000032, .havoc 30, .havoc 1000030, .havoc 23, .havoc 1000023, .havoc 23, .havoc 1000023, .havoc 23, .havoc 1000023, .havoc 23, .havoc 1000023, .copy 40 23, .copy 1000040 1000023], .call [39, 1000039] 37 [] [⟨[(39, .eq 0)], .chk [] [0]⟩]⟩,
   /- bb36 -/ ⟨[.setD 0 1, .havoc 1000000], .goto 45⟩,
   /- bb37 -/ ⟨[.havoc 40, .havoc 1000040], .branch 38 39 1000038 1000039 38⟩,
   /- bb38 -/ ⟨[.havoc 39, .havoc 1000039, .copy 41 38, .copy 1000041 1000038], .switch 41 [(0, 39), (1, 40)] (some 3)⟩,
@@ -108,12 +108,12 @@ def inv : List (Option AState) := [
   /- bb34 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb35 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb36 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
-  /- bb37 -/ some ⟨[], []⟩,
-  /- bb38 -/ some ⟨[], []⟩,
-  /- bb39 -/ some ⟨[], []⟩,
+  /- bb37 -/ some ⟨[], [⟨[(39, .eq 0)], .chk [] [0]⟩]⟩,
+  /- bb38 -/ some ⟨[], [⟨[(38, .eq 0)], .chk [] [0]⟩]⟩,
+  /- bb39 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb40 -/ some ⟨[], []⟩,
   /- bb41 -/ some ⟨[(0, .eq 1)], []⟩,
-  /- bb42 -/ some ⟨[], []⟩,
+  /- bb42 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb43 -/ some ⟨[], []⟩,
   /- bb44 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
   /- bb45 -/ some ⟨[(0, .eq 1)], [⟨[], .chk [] [0]⟩]⟩,

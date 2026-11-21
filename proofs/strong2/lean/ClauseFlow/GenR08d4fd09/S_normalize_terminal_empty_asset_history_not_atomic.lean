@@ -9,7 +9,7 @@ MIR blocks: 48, locals: 62. market root: _1; accounts: none
 result = local 0 (0 is Ok); payload = local 1000000 (ghost: integer value or enum discriminant
 of the Ok payload; for Option: None = 0, Some = 1).
 callee summaries used (block, callee), each certified by its own module in this directory:
-  none
+  bb33 MarketGroupV16ViewMut::<'_, T>::set_asset_state
 summary clauses (the goal):
   result = 0: checks [0] hold
 -/
@@ -52,7 +52,7 @@ def cfg : Cfg := [
   /- bb30 -/ ⟨[.havoc 39, .havoc 1000039], .call [41, 1000041] 31 [] []⟩,
   /- bb31 -/ ⟨[], .branch 40 41 1000040 1000041 32⟩,
   /- bb32 -/ ⟨[.havoc 41, .havoc 1000041, .copy 42 40, .copy 1000042 1000040], .switch 42 [(0, 33), (1, 34)] (some 3)⟩,
-  /- bb33 -/ ⟨[.havoc 40, .havoc 1000040, .havoc 100001, .havoc 1100001, .copy 46 100001, .copy 1000046 1100001], .call [45, 1000045] 36 [] []⟩,
+  /- bb33 -/ ⟨[.havoc 40, .havoc 1000040, .havoc 100001, .havoc 1100001, .copy 46 100001, .copy 1000046 1100001], .call [45, 1000045] 36 [] [⟨[(45, .eq 0)], .chk [] [0]⟩]⟩,
   /- bb34 -/ ⟨[.havoc 43, .havoc 1000043, .setD 0 1, .havoc 1000000], .goto 35⟩,
   /- bb35 -/ ⟨[.havoc 43, .havoc 1000043, .havoc 40, .havoc 1000040], .goto 44⟩,
   /- bb36 -/ ⟨[.havoc 46, .havoc 1000046], .branch 44 45 1000044 1000045 37⟩,
@@ -60,8 +60,8 @@ def cfg : Cfg := [
   /- bb38 -/ ⟨[.havoc 44, .havoc 1000044, .havoc 56, .havoc 1000056, .havoc 51, .havoc 1000051, .havoc 52, .havoc 1000052], .goto 41⟩,
   /- bb39 -/ ⟨[.havoc 48, .havoc 1000048, .setD 0 1, .havoc 1000000], .goto 40⟩,
   /- bb40 -/ ⟨[.havoc 48, .havoc 1000048, .havoc 44, .havoc 1000044], .goto 44⟩,
-  /- bb41 -/ ⟨[.havoc 57, .havoc 1000057, .havoc 50, .havoc 1000050], .call [49, 1000049] 42 [] []⟩,
-  /- bb42 -/ ⟨[.havoc 50, .havoc 1000050, .write [], .write [], .write [], .write [], .havoc 53, .havoc 1000053], .call [0, 1000000] 43 [0] [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
+  /- bb41 -/ ⟨[.havoc 57, .havoc 1000057, .havoc 50, .havoc 1000050], .call [49, 1000049] 42 [0] []⟩,
+  /- bb42 -/ ⟨[.havoc 50, .havoc 1000050, .havoc 53, .havoc 1000053], .call [0, 1000000] 43 [0] [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
   /- bb43 -/ ⟨[.havoc 53, .havoc 1000053, .havoc 49, .havoc 1000049, .havoc 13, .havoc 1000013], .goto 47⟩,
   /- bb44 -/ ⟨[], .goto 45⟩,
   /- bb45 -/ ⟨[], .goto 46⟩,

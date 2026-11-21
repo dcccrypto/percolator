@@ -1,0 +1,436 @@
+fn v16::<impl at src/v16.rs:9719:1: 9719:41>::begin_zero_oi_residue_resets(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: usize) -> Result<(), V16Error> {
+    debug self => _1;
+    debug asset_index => _2;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+    let mut _3: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>>;
+    let mut _4: core::result::Result<(), v16::V16Error>;
+    let mut _5: isize;
+    let _6: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let _7: v16::AssetStateV16;
+    let mut _8: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, v16::AssetStateV16>;
+    let mut _9: core::result::Result<v16::AssetStateV16, v16::V16Error>;
+    let mut _10: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _11: isize;
+    let _12: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let _13: v16::AssetStateV16;
+    let mut _15: u128;
+    let mut _16: u64;
+    let mut _17: bool;
+    let mut _18: &v16::SideModeV16;
+    let mut _19: u64;
+    let mut _20: u128;
+    let mut _22: u128;
+    let mut _23: u64;
+    let mut _24: bool;
+    let mut _25: &v16::SideModeV16;
+    let mut _26: u64;
+    let mut _27: u128;
+    let mut _28: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>>;
+    let mut _29: core::result::Result<(), v16::V16Error>;
+    let mut _30: isize;
+    let mut _32: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>>;
+    let mut _33: core::result::Result<(), v16::V16Error>;
+    let mut _34: isize;
+    scope 1 {
+        debug residual => _6;
+        scope 2 {
+        }
+    }
+    scope 3 {
+        debug val => const ();
+        scope 4 {
+        }
+    }
+    scope 5 {
+        debug asset => _7;
+        let _14: bool;
+        scope 10 {
+            debug reset_long => _14;
+            let _21: bool;
+            scope 11 {
+                debug reset_short => _21;
+                let _31: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                let _35: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                scope 12 {
+                    debug residual => _31;
+                    scope 13 {
+                    }
+                }
+                scope 14 {
+                    debug val => const ();
+                    scope 15 {
+                    }
+                }
+                scope 16 {
+                    debug residual => _35;
+                    scope 17 {
+                    }
+                }
+                scope 18 {
+                    debug val => const ();
+                    scope 19 {
+                    }
+                }
+            }
+        }
+    }
+    scope 6 {
+        debug residual => _12;
+        scope 7 {
+        }
+    }
+    scope 8 {
+        debug val => _13;
+        scope 9 {
+        }
+    }
+
+    bb0: {
+        StorageLive(_3);
+        StorageLive(_4);
+        _4 = MarketGroupV16ViewMut::<'_, T>::drop_unowned_side_oi(copy _1, copy _2) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        _3 = <Result<(), V16Error> as Try>::branch(move _4) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        StorageDead(_4);
+        _5 = discriminant(_3);
+        switchInt(move _5) -> [0: bb4, 1: bb5, otherwise: bb3];
+    }
+
+    bb3: {
+        unreachable;
+    }
+
+    bb4: {
+        StorageDead(_3);
+        StorageLive(_7);
+        StorageLive(_8);
+        StorageLive(_9);
+        StorageLive(_10);
+        _10 = &(*_1);
+        _9 = MarketGroupV16ViewMut::<'_, T>::asset_state(move _10, copy _2) -> [return: bb7, unwind continue];
+    }
+
+    bb5: {
+        StorageLive(_6);
+        _6 = copy ((_3 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _6) -> [return: bb6, unwind continue];
+    }
+
+    bb6: {
+        StorageDead(_6);
+        StorageDead(_3);
+        goto -> bb50;
+    }
+
+    bb7: {
+        StorageDead(_10);
+        _8 = <Result<AssetStateV16, V16Error> as Try>::branch(move _9) -> [return: bb8, unwind continue];
+    }
+
+    bb8: {
+        StorageDead(_9);
+        _11 = discriminant(_8);
+        switchInt(move _11) -> [0: bb9, 1: bb10, otherwise: bb3];
+    }
+
+    bb9: {
+        _13 = copy ((_8 as Continue).0: v16::AssetStateV16);
+        _7 = copy _13;
+        StorageDead(_8);
+        StorageLive(_15);
+        _15 = copy (_13.23: u128);
+        switchInt(copy _15) -> [0: bb12, otherwise: bb13];
+    }
+
+    bb10: {
+        StorageLive(_12);
+        _12 = copy ((_8 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _12) -> [return: bb11, unwind continue];
+    }
+
+    bb11: {
+        StorageDead(_12);
+        StorageDead(_8);
+        goto -> bb49;
+    }
+
+    bb12: {
+        StorageDead(_15);
+        StorageLive(_16);
+        _16 = copy (_13.31: u64);
+        switchInt(copy _16) -> [0: bb14, otherwise: bb18];
+    }
+
+    bb13: {
+        StorageDead(_15);
+        goto -> bb19;
+    }
+
+    bb14: {
+        StorageDead(_16);
+        StorageLive(_17);
+        StorageLive(_18);
+        _18 = &(_7.43: v16::SideModeV16);
+        _17 = <SideModeV16 as PartialEq>::ne(move _18, const v16::MarketGroupV16ViewMut::<'_, T>::begin_zero_oi_residue_resets::promoted[1]) -> [return: bb15, unwind continue];
+    }
+
+    bb15: {
+        switchInt(move _17) -> [0: bb17, otherwise: bb16];
+    }
+
+    bb16: {
+        StorageDead(_18);
+        StorageLive(_19);
+        _19 = copy (_13.27: u64);
+        switchInt(copy _19) -> [0: bb21, otherwise: bb20];
+    }
+
+    bb17: {
+        StorageDead(_18);
+        goto -> bb19;
+    }
+
+    bb18: {
+        StorageDead(_16);
+        goto -> bb19;
+    }
+
+    bb19: {
+        _14 = const false;
+        goto -> bb23;
+    }
+
+    bb20: {
+        StorageDead(_19);
+        _14 = const true;
+        goto -> bb22;
+    }
+
+    bb21: {
+        StorageDead(_19);
+        StorageLive(_20);
+        _20 = copy (_13.7: u128);
+        _14 = Ne(move _20, const 1000000000000000_u128);
+        StorageDead(_20);
+        goto -> bb22;
+    }
+
+    bb22: {
+        goto -> bb23;
+    }
+
+    bb23: {
+        StorageDead(_17);
+        StorageLive(_22);
+        _22 = copy (_13.24: u128);
+        switchInt(copy _22) -> [0: bb24, otherwise: bb30];
+    }
+
+    bb24: {
+        StorageDead(_22);
+        StorageLive(_23);
+        _23 = copy (_13.32: u64);
+        switchInt(copy _23) -> [0: bb25, otherwise: bb29];
+    }
+
+    bb25: {
+        StorageDead(_23);
+        StorageLive(_24);
+        StorageLive(_25);
+        _25 = &(_7.44: v16::SideModeV16);
+        _24 = <SideModeV16 as PartialEq>::ne(move _25, const v16::MarketGroupV16ViewMut::<'_, T>::begin_zero_oi_residue_resets::promoted[0]) -> [return: bb26, unwind continue];
+    }
+
+    bb26: {
+        switchInt(move _24) -> [0: bb28, otherwise: bb27];
+    }
+
+    bb27: {
+        StorageDead(_25);
+        StorageLive(_26);
+        _26 = copy (_13.28: u64);
+        switchInt(copy _26) -> [0: bb33, otherwise: bb32];
+    }
+
+    bb28: {
+        StorageDead(_25);
+        goto -> bb31;
+    }
+
+    bb29: {
+        StorageDead(_23);
+        goto -> bb31;
+    }
+
+    bb30: {
+        StorageDead(_22);
+        goto -> bb31;
+    }
+
+    bb31: {
+        _21 = const false;
+        StorageDead(_24);
+        switchInt(move _14) -> [0: bb57, otherwise: bb56];
+    }
+
+    bb32: {
+        StorageDead(_26);
+        _21 = const true;
+        StorageDead(_24);
+        switchInt(move _14) -> [0: bb52, otherwise: bb51];
+    }
+
+    bb33: {
+        StorageDead(_26);
+        StorageLive(_27);
+        _27 = copy (_13.8: u128);
+        _21 = Ne(move _27, const 1000000000000000_u128);
+        StorageDead(_27);
+        StorageDead(_24);
+        switchInt(move _14) -> [0: bb40, otherwise: bb34];
+    }
+
+    bb34: {
+        StorageLive(_28);
+        StorageLive(_29);
+        _29 = MarketGroupV16ViewMut::<'_, T>::begin_full_drain_reset_inner(copy _1, copy _2, const SideV16::Long) -> [return: bb35, unwind continue];
+    }
+
+    bb35: {
+        _28 = <Result<(), V16Error> as Try>::branch(move _29) -> [return: bb36, unwind continue];
+    }
+
+    bb36: {
+        StorageDead(_29);
+        _30 = discriminant(_28);
+        switchInt(move _30) -> [0: bb37, 1: bb38, otherwise: bb3];
+    }
+
+    bb37: {
+        StorageDead(_28);
+        goto -> bb40;
+    }
+
+    bb38: {
+        StorageLive(_31);
+        _31 = copy ((_28 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _31) -> [return: bb39, unwind continue];
+    }
+
+    bb39: {
+        StorageDead(_31);
+        StorageDead(_28);
+        goto -> bb48;
+    }
+
+    bb40: {
+        switchInt(move _21) -> [0: bb47, otherwise: bb41];
+    }
+
+    bb41: {
+        StorageLive(_32);
+        StorageLive(_33);
+        _33 = MarketGroupV16ViewMut::<'_, T>::begin_full_drain_reset_inner(move _1, move _2, const SideV16::Short) -> [return: bb42, unwind continue];
+    }
+
+    bb42: {
+        _32 = <Result<(), V16Error> as Try>::branch(move _33) -> [return: bb43, unwind continue];
+    }
+
+    bb43: {
+        StorageDead(_33);
+        _34 = discriminant(_32);
+        switchInt(move _34) -> [0: bb44, 1: bb45, otherwise: bb3];
+    }
+
+    bb44: {
+        StorageDead(_32);
+        goto -> bb47;
+    }
+
+    bb45: {
+        StorageLive(_35);
+        _35 = copy ((_32 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _35) -> [return: bb46, unwind continue];
+    }
+
+    bb46: {
+        StorageDead(_35);
+        StorageDead(_32);
+        goto -> bb48;
+    }
+
+    bb47: {
+        _0 = const Result::<(), V16Error>::Ok(());
+        StorageDead(_7);
+        goto -> bb50;
+    }
+
+    bb48: {
+        goto -> bb49;
+    }
+
+    bb49: {
+        StorageDead(_7);
+        goto -> bb50;
+    }
+
+    bb50: {
+        return;
+    }
+
+    bb51: {
+        StorageLive(_28);
+        StorageLive(_29);
+        _29 = MarketGroupV16ViewMut::<'_, T>::begin_full_drain_reset_inner(copy _1, copy _2, const SideV16::Long) -> [return: bb53, unwind continue];
+    }
+
+    bb52: {
+        goto -> bb41;
+    }
+
+    bb53: {
+        _28 = <Result<(), V16Error> as Try>::branch(move _29) -> [return: bb54, unwind continue];
+    }
+
+    bb54: {
+        StorageDead(_29);
+        _30 = discriminant(_28);
+        switchInt(move _30) -> [0: bb55, 1: bb38, otherwise: bb3];
+    }
+
+    bb55: {
+        StorageDead(_28);
+        goto -> bb52;
+    }
+
+    bb56: {
+        StorageLive(_28);
+        StorageLive(_29);
+        _29 = MarketGroupV16ViewMut::<'_, T>::begin_full_drain_reset_inner(move _1, move _2, const SideV16::Long) -> [return: bb58, unwind continue];
+    }
+
+    bb57: {
+        goto -> bb47;
+    }
+
+    bb58: {
+        _28 = <Result<(), V16Error> as Try>::branch(move _29) -> [return: bb59, unwind continue];
+    }
+
+    bb59: {
+        StorageDead(_29);
+        _30 = discriminant(_28);
+        switchInt(move _30) -> [0: bb60, 1: bb38, otherwise: bb3];
+    }
+
+    bb60: {
+        StorageDead(_28);
+        goto -> bb57;
+    }
+}

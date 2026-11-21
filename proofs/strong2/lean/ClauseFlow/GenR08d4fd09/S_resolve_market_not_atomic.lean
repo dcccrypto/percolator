@@ -29,8 +29,8 @@ def cfg : Cfg := [
   /- bb7 -/ ⟨[.havoc 11, .havoc 1000011, .havoc 9, .havoc 1000009], .switch 9 [(0, 9)] (some 8)⟩,
   /- bb8 -/ ⟨[.havoc 10, .havoc 1000010, .setD 0 1, .havoc 1000000, .havoc 9, .havoc 1000009], .goto 14⟩,
   /- bb9 -/ ⟨[.havoc 10, .havoc 1000010, .havoc 9, .havoc 1000009], .call [12, 1000012] 10 [0] []⟩,
-  /- bb10 -/ ⟨[.havoc 18, .havoc 1000018, .write [], .havoc 12, .havoc 1000012], .call [13, 1000013] 11 [0] []⟩,
-  /- bb11 -/ ⟨[.havoc 19, .havoc 1000019, .write [], .havoc 13, .havoc 1000013], .call [14, 1000014] 12 [0] []⟩,
+  /- bb10 -/ ⟨[.havoc 18, .havoc 1000018, .havoc 12, .havoc 1000012], .call [13, 1000013] 11 [0] []⟩,
+  /- bb11 -/ ⟨[.havoc 19, .havoc 1000019, .havoc 13, .havoc 1000013], .call [14, 1000014] 12 [0] []⟩,
   /- bb12 -/ ⟨[.havoc 20, .havoc 1000020, .write [], .havoc 14, .havoc 1000014, .havoc 21, .havoc 1000021, .write [], .havoc 15, .havoc 1000015], .call [0, 1000000] 13 [0] [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
   /- bb13 -/ ⟨[.havoc 15, .havoc 1000015], .goto 14⟩,
   /- bb14 -/ ⟨[], .ret⟩
@@ -48,8 +48,8 @@ def inv : List (Option AState) := [
   /- bb8 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb9 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb10 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
-  /- bb11 -/ some ⟨[], []⟩,
-  /- bb12 -/ some ⟨[], []⟩,
+  /- bb11 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
+  /- bb12 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb13 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
   /- bb14 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [0] []⟩]⟩
 ]

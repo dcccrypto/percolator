@@ -286,7 +286,7 @@ unsound answers: 0 of 274 cases; imprecise (sound refusals of a true statement):
 
 unsound in total: 0
 
-## Attacks on the R9 probe reader (valflow/enum_probe_unit.py, c38b6b1e probe build)
+## Attacks on the R9 probe reader and source scan (valflow/enum_probe_unit.py, c38b6b1e probe build)
 
 control: ResolvedCloseOutcomeV16 -> {'ProgressOnly': 0, 'Closed': 1}
 - prefix in another source file: rejected (ok)
@@ -298,4 +298,23 @@ control: ResolvedCloseOutcomeV16 -> {'ProgressOnly': 0, 'Closed': 1}
 - argument type of another enum: rejected (ok)
 - arm constants out of sequence in the probe text: rejected (ok)
 - discriminant read of another place: rejected (ok)
-reader attacks accepted: 0 of 9
+- audit 5 H1/H2: discriminants from include_str!/env! (two builds differ): rejected (ok)
+- audit 5 H3: `fn v16()` at the crate root with a local enum: rejected (ok)
+- audit 5 H4: decl_macro with a hygienic second enum: rejected (ok)
+- audit 5 H5: include!("v16.rs") at the root and #[path] mod v16: rejected (ok)
+- macro call passing the bare name v16: rejected (ok)
+reader attacks accepted: 0 of 14
+
+## Audit round 5 (independent agent) on `valflow/enum_probe.py`, first version
+
+18 attacks on real builds. 5 unsound table entries reproduced (H1 to H5, `RULES.md` section 7);
+reproducers in `valflow/neg_cases/audit5/`; all five are refused since `source_scan` was added
+(lines "audit 5" above). The other 13: correct entry, no entry, or build refused.
+
+Ideas the auditor listed as not tried (none of them is covered by a test here):
+`include_bytes!` from another file and `option_env!` (same class as H1/H2; the words are in the
+scan's ban list); `#[path="v16.rs"] mod other;` combined with H3; a generic enum on its own;
+lint-based build refusal; shadowing `u32` at the `v16` top level; forging probe-shaped text inside
+the MIR dump; the R3 `Result<v16::NAME, _>` payload path with the same holes; `#[repr(C)]` /
+`#[repr(u8)]` enums with fields and `#[repr(i128)]`; explicit discriminants that use `cfg!(..)`
+or other constants that might differ between builds.

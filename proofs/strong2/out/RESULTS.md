@@ -2,7 +2,7 @@
 
 Pin: engine: dcccrypto/percolator@c38b6b1e, src/v16.rs blob 7d3edfe86be1a80f49793cf551c39687a8766a4d; rustc 1.99.0-nightly (d0babd8b6 2026-07-15); cargo rustc -j 4 --release --lib -- -Zunpretty=mir -Zinline-mir=no
 
-`lake build`: Build completed successfully (145 jobs).. Modules generated: 87; with `main` on axioms [propext, Quot.sound]: 87.
+`lake build`: Build completed successfully (353 jobs).. Modules generated: 87; with `main` on axioms [propext, Quot.sound]: 87.
 
 ## Ledger rows (statement: every `Ok` return; `est` = the check holds after, `pres` = it holds after if it held before)
 
@@ -81,7 +81,7 @@ MIR sha256 `45f0ed9671e3d808a6c3d83eab81363e8242c2214e5ba0fcc42130eda498d34d`, 2
 
 ## Callee summaries used (each is the goal of its own module)
 
-`result = 0` is `Ok`; `payload` is the integer value or enum discriminant of the `Ok` payload (Option: None = 0, Some = 1; a plain crate enum: its variant index).
+`result = 0` is `Ok`; `payload` is the integer value or enum discriminant of the `Ok` payload (Option: None = 0, Some = 1; a plain crate enum: its discriminant as read from the probe MIR, `ENUMS.txt`).
 
 | Function | Clauses | Module status | Uses |
 |---|---|---|---|
@@ -169,4 +169,4 @@ MIR sha256 `45f0ed9671e3d808a6c3d83eab81363e8242c2214e5ba0fcc42130eda498d34d`, 2
 | `withdraw_fresh_counterparty_backing_not_atomic` | result = 0: checks [0] hold | kernel-checked | `adjust_provider_principal_for_domain` |
 | `withdraw_not_atomic` | result = 0: checks [0, 1] preserved | kernel-checked | none |
 
-Methods analysed: 335. Unsupported (no summary; calls to them are treated as able to write everything): 0. Plain crate enums in the R9 table: 26.
+Methods analysed: 335. Unsupported (no summary; calls to them are treated as able to write everything): 0. Plain crate enums in the R9 table: 27.

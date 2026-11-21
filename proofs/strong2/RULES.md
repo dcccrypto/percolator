@@ -51,7 +51,8 @@ rules list; every other change of `_l` must be a `havoc` of `l` **and of `P(l)`*
 | A12 | The crate defines no item named `Option`, `Some`, `None`, `is_some`, `is_none` (nor any of the sibling's A9 names), under any spelling (raw identifier, macro-generated, split over lines), and no module, alias or extern crate named `core`, `std` or `alloc`. Then a `let` declaration in MIR that prints `core::option::Option<..>`, `core::result::Result<..>`, `core::ops::ControlFlow<..>` means core's type, and the rules below require that printed path. | `valflow/check_assumptions2.py`: scans of the source text across line breaks, of the macro-expanded crate (`-Zunpretty=expanded`) and of the MIR; `out/assumptions_check.txt`. Audit round 3 broke the earlier, weaker form of this check (section 7). |
 | A13 | Memory layout facts of safe Rust: the market header object, the market slot array, the view structs and each account object are pairwise disjoint; distinct top-level fields of the header are disjoint. A store through a pointer derived (by reborrow, projection, or as the result of a call given only that pointer and plain values) from a pointer into one of these regions changes only bytes of that region. | Rust's reference rules together with A1, A2 (no `unsafe`, no raw pointers). |
 | A14 | `valflow/readset.py` over-approximates what each runtime check can read: the set of top-level header fields, and whether slot contents (as opposed to the slice length) are read. Section 4a. | The analysis is conservative by construction (anything not understood gives ALL); its result for this build is in `out/READSET.md` and can be compared with the source of `validate_shape` by eye. |
-| A15 | Appending functions at the end of `src/v16.rs` does not change the discriminants of the enums declared above them, and `discriminant(x)` in MIR is the same number in the probe build and in the analysed build (same compiler, same flags). The name `NAME` at the top level of `v16` is the type MIR prints as `v16::NAME`. | Rust semantics of enum discriminants (a property of the declaration); not checked by a scan. |
+| A15 | For a crate that passes `enum_probe.source_scan`: appending functions at the end of `src/v16.rs` and building in another directory does not change the discriminant of any enum declared above them, and `discriminant(x)` in MIR is the same number in the probe build and in the analysed build (same compiler, same flags). | Argument: the scan forbids the ways found (audit round 5) for a declaration to observe the build: the words `include`, `include_str`, `include_bytes`, `env`, `option_env`, `column`, `module_path`, `macro`, `decl_macro`, `concat_idents`, `proc_macro` anywhere in `src/`, `file` and `line` outside whole-line comments, `feature(`, a `build.rs`. Not proved complete. Dependencies (`bytemuck` and its derive macro, pinned by `Cargo.lock`) are assumed not hostile. |
+| A16 | For a crate that passes the scan, the printed MIR type `v16::NAME` denotes the item `NAME` declared at the top level of the module `v16` (file `src/v16.rs`), the one the appended probe's `NAME` resolves to. | The scan allows the name `v16` only as `[pub ]mod v16;` in `lib.rs` and as a path segment `v16::`, forbids `#[path` in `lib.rs`, `include!` and declarative macros 2.0 (hygienic duplicate items). Function-local and nested-module items print a longer path. Not proved complete. |
 
 ## 4. Added translation rules
 
@@ -75,7 +76,7 @@ small constant).
 | — | `<Result as FromResidual<..>>::from_residual(..)` into `_d` | statement `setD d 1` (then R1), `goto N` | base recognition; A6 |
 | — | a validator call (base recognition, unchanged) | `call [d, P(d)] N same [⟨[d = 0], est holds⟩]` | |
 
-| R9 | `_l = [v16::]NAME::VARIANT[(..)\|{ .. }]` (also as a constant), declared type of `_l` exactly `v16::NAME` | `setD l i`, `i` the discriminant of `VARIANT` | `(NAME, VARIANT) ↦ i` is in the table read by `valflow/enum_probe.py` (TRUSTED reader `table`, `read_probe`) from rustc's MIR of a probe `fn s2_enum_probe_NAME(x: &NAME) -> u32 { match *x { NAME::V0 { .. } => 7001, .., _ => 7000 } }`, compiled in a scratch copy (pinned sources + probes appended to `src/v16.rs`). A probe counts only if its MIR is exactly `_d = discriminant((*_1)); switchInt(move _d) -> [..]` with every target block one constant assignment; the probe prefix must occur nowhere else in the crate sources. The table for this build is `out/ENUMS.txt`. A15. Also inside R3: `Ok(NAME::VARIANT..)` sets the payload ghost to `i` when the local is declared `core::result::Result<v16::NAME, ..>`. |
+| R9 | `_l = [v16::]NAME::VARIANT[(..)\|{ .. }]` (also as a constant), declared type of `_l` exactly `v16::NAME` | `setD l i`, `i` the discriminant of `VARIANT` | `(NAME, VARIANT) ↦ i` is in the table read by `valflow/enum_probe.py` (TRUSTED reader `table`, `read_probe`) from rustc's MIR of a probe `fn s2_enum_probe_NAME(x: &NAME) -> u32 { match *x { NAME::V0 { .. } => 7001, .., _ => 7000 } }`, compiled in a scratch copy (pinned sources + probes appended to `src/v16.rs`). A probe counts only if its MIR is exactly `_d = discriminant((*_1)); switchInt(move _d) -> [..]` with every target block one constant assignment; the probe prefix must occur nowhere else in the crate sources; and the crate sources must pass `enum_probe.source_scan` (TRUSTED), otherwise the table is empty and R9 never fires. The table for this build is `out/ENUMS.txt`. A15, A16. Also inside R3: `Ok(NAME::VARIANT..)` sets the payload ghost to `i` when the local is declared `core::result::Result<v16::NAME, ..>`. |
 | R10 | a store through a pointer, or a call given pointers, confined to a region of the market that a check does not read | the `write` / `call` keeps that check (it is added to `same`) | section 4a |
 
 **R8, callee summaries.** A summary is the goal of the callee's own module: clauses whose guards
@@ -192,5 +193,27 @@ reads slot contents; `validate_with_market` may read 4 header fields and may rea
   file, second marker, prefix before the marker, duplicated probe body, two arms with one
   constant, extra statement in an arm block, argument type of another enum, discriminant read of another place, arm constants out of
   sequence: each empties the table or drops the enum.
-  The new reader was written and attacked by the same session; it has had no independent audit.
+  Reader attacks by the authoring session (`valflow/enum_probe_unit.py`): see the end of
+  `out/NEGATIVE-TESTS.md`.
+- **Audit round 5** (independent agent, 1121c, told to break `enum_probe.py`; 18 attacks on real
+  builds): **5 unsound table entries reproduced** against the first version of the reader.
+  - H1, H2: the table is read from another build than the analysed one. An explicit discriminant
+    computed from `include_str!("v16.rs").len()` or from `env!("CARGO_MANIFEST_DIR")` differs
+    between the two builds.
+  - H3, H4, H5: the printed path `v16::NAME` is not an identity. A function `v16` at the crate
+    root with a local enum, a `decl_macro` defining a hygienic second `NAME`, or `include!` of
+    `v16.rs` at the root plus `#[path] mod v16`, each give a second type printed `v16::NAME`
+    with other discriminants.
+  The other 13 attacks (signed and 64-bit `repr`, niches, `#[non_exhaustive]`, decoys in comments,
+  strings and `cfg`, aliases, nested and function-local homonyms) gave a correct entry, no entry,
+  or a refused build.
+  Response: not a repair of the reading but a restriction. `enum_probe.source_scan` (trusted, raw
+  text, bare words) must pass or the table is empty; assumptions A15 and A16 now say what the
+  scan is meant to exclude. Both engine texts pass the scan (table unchanged: 27 and 25 enums).
+  The five reproducers (`valflow/neg_cases/audit5/`) are refused. **The scan itself has not been
+  audited by anyone but its author**, and the auditor's list of ideas not tried is in
+  `out/NEGATIVE-TESTS.md`. What depends on R9, measured by rerunning the driver with an empty table: the
+  ledger rows (T18 included) and the T15 per-return counts are unchanged on both texts. Lost
+  without R9: module `S_close_resolved_account_not_atomic` (the T15 `Ok(Closed)` theorem), and on
+  `08d4fd09` also the summary `S_realize_one_source_domain_for_resolved_close_not_atomic`.
 - Mutation harness for the checker: `out/MUTANTS.md`.

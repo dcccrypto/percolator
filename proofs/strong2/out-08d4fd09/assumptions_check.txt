@@ -21,7 +21,11 @@ PASS  A4 by-value view `MarketGroupV16View` holds only shared references: ["pub 
 PASS  A4 by-value view `PortfolioV16View` holds only shared references: ["pub header: &'a PortfolioAccountV16Account,"]
 INFO  dependencies of the library: ['bytemuck = { version = "1.23", default-features = false, features = ["derive"] }']
 INFO  `bytemuck` is used through its safe API; its own `unsafe` is outside this crate and is assumed correct.
-PASS  A12 the crate defines or imports-as no item named Option, Some, None, is_some, is_none
-PASS  A12 `Option` is never printed with a crate path in the MIR
+PASS  A9/A12 (strict) no item, alias or import named Try, FromResidual, Infallible, ControlFlow, Result, Ok, Err, Option, Some, None, is_some, is_none; raw identifiers and line breaks included
+PASS  A12 no raw identifier of a trusted name anywhere (`r#Result`, `r#Option`, ...)
+PASS  A12 no module, alias or extern crate named core, std or alloc (a crate module `core` prints like the real one)
+INFO  macro definitions in the source: 1; the name scans above also ran on the macro-expanded crate
+PASS  A12 `Option`/`Result` are never printed with a crate path in the MIR
+PASS  A12 the MIR dump has no body under core::/std::/alloc:: and no constructor body of a trusted enum
 INFO  A10 (a variant's field is read only when the value is of that variant) is a property of rustc's MIR for safe code; it is not checked by a scan. Payload reads in this MIR: 4394
 INFO  A11 (core: Option::None = 0, Some = 1; is_some/is_none; Try::branch keeps the Ok payload) is read from core's source, not checked. is_some/is_none calls in this MIR: 33

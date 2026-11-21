@@ -1,0 +1,229 @@
+fn v16::<impl at src/v16.rs:9719:1: 9719:41>::sync_side_adl_index(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: AssetStateV16, _3: SideV16, _4: u128) -> Result<AssetStateV16, V16Error> {
+    debug self => _1;
+    debug asset => _2;
+    debug side => _3;
+    debug acting_raw_after_q => _4;
+    let mut _0: core::result::Result<v16::AssetStateV16, v16::V16Error>;
+    let _5: u128;
+    let mut _6: isize;
+    let mut _8: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, v16::AssetStateV16>;
+    let mut _9: core::result::Result<v16::AssetStateV16, v16::V16Error>;
+    let mut _10: isize;
+    let mut _13: u128;
+    let mut _14: u128;
+    let mut _15: bool;
+    let mut _16: bool;
+    let mut _17: v16::V16PodU64;
+    let mut _18: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u64>;
+    let mut _19: core::result::Result<u64, v16::V16Error>;
+    let mut _20: core::option::Option<u64>;
+    let mut _21: u64;
+    let mut _22: v16::V16PodU64;
+    let mut _23: isize;
+    let mut _26: &mut v16::MarketGroupV16HeaderAccount;
+    let mut _27: &mut v16::MarketGroupV16HeaderAccount;
+    scope 1 {
+        debug a_before => _5;
+        let _7: v16::AssetStateV16;
+        let _11: core::result::Result<core::convert::Infallible, v16::V16Error>;
+        let _12: v16::AssetStateV16;
+        scope 2 {
+            debug asset => _7;
+            scope 7 {
+                debug a_after => _13;
+                debug raw_basis_sum_q => _14;
+                let _24: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                let _25: u64;
+                scope 8 {
+                    debug residual => _24;
+                    scope 9 {
+                    }
+                }
+                scope 10 {
+                    debug val => _25;
+                    scope 11 {
+                    }
+                }
+            }
+        }
+        scope 3 {
+            debug residual => _11;
+            scope 4 {
+            }
+        }
+        scope 5 {
+            debug val => _12;
+            scope 6 {
+            }
+        }
+    }
+
+    bb0: {
+        _6 = discriminant(_3);
+        switchInt(copy _6) -> [0: bb3, 1: bb2, otherwise: bb1];
+    }
+
+    bb1: {
+        unreachable;
+    }
+
+    bb2: {
+        _5 = copy (_2.8: u128);
+        StorageLive(_7);
+        StorageLive(_8);
+        StorageLive(_9);
+        _9 = V16Core::kernel_sync_side_adl_index(move _2, move _3) -> [return: bb21, unwind continue];
+    }
+
+    bb3: {
+        _5 = copy (_2.7: u128);
+        StorageLive(_7);
+        StorageLive(_8);
+        StorageLive(_9);
+        _9 = V16Core::kernel_sync_side_adl_index(move _2, move _3) -> [return: bb24, unwind continue];
+    }
+
+    bb4: {
+        StorageLive(_11);
+        _11 = copy ((_8 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<AssetStateV16, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _11) -> [return: bb5, unwind continue];
+    }
+
+    bb5: {
+        StorageDead(_11);
+        StorageDead(_8);
+        goto -> bb19;
+    }
+
+    bb6: {
+        StorageLive(_15);
+        _15 = Gt(copy _13, move _5);
+        switchInt(move _15) -> [0: bb17, otherwise: bb7];
+    }
+
+    bb7: {
+        StorageLive(_16);
+        _16 = Gt(copy _14, copy _4);
+        switchInt(move _16) -> [0: bb18, otherwise: bb8];
+    }
+
+    bb8: {
+        StorageLive(_17);
+        StorageLive(_18);
+        StorageLive(_19);
+        StorageLive(_20);
+        StorageLive(_21);
+        StorageLive(_22);
+        _26 = no_retag copy ((*_1).0: &mut v16::MarketGroupV16HeaderAccount);
+        _22 = copy ((*_26).20: v16::V16PodU64);
+        _21 = V16PodU64::get(move _22) -> [return: bb9, unwind continue];
+    }
+
+    bb9: {
+        StorageDead(_22);
+        _20 = core::num::<impl u64>::checked_add(move _21, const 1_u64) -> [return: bb10, unwind continue];
+    }
+
+    bb10: {
+        StorageDead(_21);
+        _19 = Option::<u64>::ok_or::<V16Error>(move _20, const V16Error::CounterOverflow) -> [return: bb11, unwind continue];
+    }
+
+    bb11: {
+        StorageDead(_20);
+        _18 = <Result<u64, V16Error> as Try>::branch(move _19) -> [return: bb12, unwind continue];
+    }
+
+    bb12: {
+        StorageDead(_19);
+        _23 = discriminant(_18);
+        switchInt(move _23) -> [0: bb13, 1: bb14, otherwise: bb1];
+    }
+
+    bb13: {
+        _25 = copy ((_18 as Continue).0: u64);
+        _17 = V16PodU64::new(move _25) -> [return: bb16, unwind continue];
+    }
+
+    bb14: {
+        StorageLive(_24);
+        _24 = copy ((_18 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<AssetStateV16, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _24) -> [return: bb15, unwind continue];
+    }
+
+    bb15: {
+        StorageDead(_24);
+        StorageDead(_17);
+        StorageDead(_18);
+        StorageDead(_16);
+        StorageDead(_15);
+        goto -> bb19;
+    }
+
+    bb16: {
+        _27 = no_retag copy ((*_1).0: &mut v16::MarketGroupV16HeaderAccount);
+        ((*_27).20: v16::V16PodU64) = move _17;
+        StorageDead(_17);
+        StorageDead(_18);
+        goto -> bb18;
+    }
+
+    bb17: {
+        goto -> bb18;
+    }
+
+    bb18: {
+        StorageDead(_16);
+        StorageDead(_15);
+        _0 = Result::<AssetStateV16, V16Error>::Ok(copy _12);
+        StorageDead(_7);
+        goto -> bb20;
+    }
+
+    bb19: {
+        StorageDead(_7);
+        goto -> bb20;
+    }
+
+    bb20: {
+        return;
+    }
+
+    bb21: {
+        _8 = <Result<AssetStateV16, V16Error> as Try>::branch(move _9) -> [return: bb22, unwind continue];
+    }
+
+    bb22: {
+        StorageDead(_9);
+        _10 = discriminant(_8);
+        switchInt(move _10) -> [0: bb23, 1: bb4, otherwise: bb1];
+    }
+
+    bb23: {
+        _12 = copy ((_8 as Continue).0: v16::AssetStateV16);
+        _7 = copy _12;
+        StorageDead(_8);
+        _13 = copy (_12.8: u128);
+        _14 = copy (_12.26: u128);
+        goto -> bb6;
+    }
+
+    bb24: {
+        _8 = <Result<AssetStateV16, V16Error> as Try>::branch(move _9) -> [return: bb25, unwind continue];
+    }
+
+    bb25: {
+        StorageDead(_9);
+        _10 = discriminant(_8);
+        switchInt(move _10) -> [0: bb26, 1: bb4, otherwise: bb1];
+    }
+
+    bb26: {
+        _12 = copy ((_8 as Continue).0: v16::AssetStateV16);
+        _7 = copy _12;
+        StorageDead(_8);
+        _13 = copy (_12.7: u128);
+        _14 = copy (_12.25: u128);
+        goto -> bb6;
+    }
+}

@@ -9,7 +9,7 @@ MIR blocks: 105, locals: 120. market root: _1; accounts: _2 (mut)
 result = local 0 (0 is Ok); payload = local 1000000 (ghost: integer value or enum discriminant
 of the Ok payload; for Option: None = 0, Some = 1).
 callee summaries used (block, callee), each certified by its own module in this directory:
-  none
+  bb33 MarketGroupV16ViewMut::<'_, T>::settle_negative_pnl_from_principal_core_not_atomic
 summary clauses (the goal):
   result = 0: checks [0, 1] preserved
 -/
@@ -52,7 +52,7 @@ def cfg : Cfg := [
   /- bb30 -/ ⟨[], .switch 34 [(0, 31)] (some 33)⟩,
   /- bb31 -/ ⟨[.setD 0 1, .havoc 1000000, .havoc 34, .havoc 1000034, .havoc 33, .havoc 1000033, .havoc 31, .havoc 1000031], .goto 102⟩,
   /- bb32 -/ ⟨[.havoc 32, .havoc 1000032], .goto 33⟩,
-  /- bb33 -/ ⟨[.havoc 34, .havoc 1000034, .havoc 33, .havoc 1000033, .havoc 31, .havoc 1000031], .call [36, 1000036] 34 [] []⟩,
+  /- bb33 -/ ⟨[.havoc 34, .havoc 1000034, .havoc 33, .havoc 1000033, .havoc 31, .havoc 1000031], .call [36, 1000036] 34 [] [⟨[(36, .eq 0), (1000036, .eq 0)], .chk [] [1]⟩]⟩,
   /- bb34 -/ ⟨[], .branch 35 36 1000035 1000036 35⟩,
   /- bb35 -/ ⟨[.havoc 36, .havoc 1000036, .copy 37 35, .copy 1000037 1000035], .switch 37 [(0, 36), (1, 37)] (some 6)⟩,
   /- bb36 -/ ⟨[.copy 39 1000035, .havoc 1000039, .havoc 39, .havoc 1000039, .havoc 35, .havoc 1000035, .havoc 108, .havoc 1000108, .havoc 42, .havoc 1000042], .call [41, 1000041] 39 [0, 1] []⟩,
@@ -97,8 +97,8 @@ def cfg : Cfg := [
   /- bb75 -/ ⟨[.havoc 80, .havoc 1000080, .setD 0 1, .havoc 1000000], .goto 76⟩,
   /- bb76 -/ ⟨[.havoc 80, .havoc 1000080, .havoc 74, .havoc 1000074], .goto 98⟩,
   /- bb77 -/ ⟨[.havoc 116, .havoc 1000116, .write [0], .havoc 82, .havoc 1000082], .call [83, 1000083] 78 [0, 1] []⟩,
-  /- bb78 -/ ⟨[.havoc 117, .havoc 1000117, .write [], .havoc 83, .havoc 1000083], .call [84, 1000084] 79 [0, 1] []⟩,
-  /- bb79 -/ ⟨[.havoc 118, .havoc 1000118, .write [], .havoc 84, .havoc 1000084], .call [90, 1000090] 80 [0, 1] []⟩,
+  /- bb78 -/ ⟨[.havoc 117, .havoc 1000117, .write [1], .havoc 83, .havoc 1000083], .call [84, 1000084] 79 [0, 1] []⟩,
+  /- bb79 -/ ⟨[.havoc 118, .havoc 1000118, .write [1], .havoc 84, .havoc 1000084], .call [90, 1000090] 80 [0, 1] []⟩,
   /- bb80 -/ ⟨[], .branch 89 90 1000089 1000090 81⟩,
   /- bb81 -/ ⟨[.havoc 90, .havoc 1000090, .copy 91 89, .copy 1000091 1000089], .switch 91 [(0, 82), (1, 83)] (some 6)⟩,
   /- bb82 -/ ⟨[.copy 93 1000089, .havoc 1000093, .copy 88 93, .copy 1000088 1000093, .havoc 93, .havoc 1000093, .havoc 87, .havoc 1000087], .call [86, 1000086] 85 [0, 1] []⟩,
@@ -161,9 +161,9 @@ def inv : List (Option AState) := [
   /- bb31 -/ some ⟨[], [⟨[], .chk [1] [0]⟩]⟩,
   /- bb32 -/ some ⟨[], [⟨[], .chk [1] [0]⟩]⟩,
   /- bb33 -/ some ⟨[], [⟨[], .chk [1] [0]⟩]⟩,
-  /- bb34 -/ some ⟨[], []⟩,
-  /- bb35 -/ some ⟨[], []⟩,
-  /- bb36 -/ some ⟨[], []⟩,
+  /- bb34 -/ some ⟨[], [⟨[(36, .eq 0), (1000036, .eq 0)], .chk [1] []⟩]⟩,
+  /- bb35 -/ some ⟨[], [⟨[(35, .eq 0), (1000035, .eq 0)], .chk [1] []⟩]⟩,
+  /- bb36 -/ some ⟨[], [⟨[(1000035, .eq 0)], .chk [1] []⟩]⟩,
   /- bb37 -/ some ⟨[], []⟩,
   /- bb38 -/ some ⟨[(0, .eq 1)], []⟩,
   /- bb39 -/ some ⟨[], []⟩,

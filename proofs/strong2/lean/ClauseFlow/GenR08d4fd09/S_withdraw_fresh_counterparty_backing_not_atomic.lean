@@ -160,7 +160,7 @@ def cfg : Cfg := [
   /- bb138 -/ ⟨[.havoc 135, .havoc 1000135], .call [139, 1000139] 141 [0] []⟩,
   /- bb139 -/ ⟨[.havoc 138, .havoc 1000138, .setD 0 1, .havoc 1000000], .goto 140⟩,
   /- bb140 -/ ⟨[.havoc 138, .havoc 1000138, .havoc 135, .havoc 1000135], .goto 151⟩,
-  /- bb141 -/ ⟨[.havoc 151, .havoc 1000151, .write [], .havoc 139, .havoc 1000139], .call [140, 1000140] 142 [0] []⟩,
+  /- bb141 -/ ⟨[.havoc 151, .havoc 1000151, .havoc 139, .havoc 1000139], .call [140, 1000140] 142 [0] []⟩,
   /- bb142 -/ ⟨[.havoc 152, .havoc 1000152, .write [], .havoc 140, .havoc 1000140, .havoc 143, .havoc 1000143], .call [142, 1000142] 143 [0] []⟩,
   /- bb143 -/ ⟨[.havoc 143, .havoc 1000143], .branch 141 142 1000141 1000142 144⟩,
   /- bb144 -/ ⟨[.havoc 142, .havoc 1000142, .copy 144 141, .copy 1000144 1000141], .switch 144 [(0, 145), (1, 146)] (some 3)⟩,

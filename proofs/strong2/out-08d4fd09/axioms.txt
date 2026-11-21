@@ -18,19 +18,48 @@
 'ClauseFlow.GenR08d4fd09.S_credit_backing_provider_earnings_not_atomic.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_credit_domain_insurance_budgets_not_atomic.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_credit_domain_insurance_budget_not_atomic.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_update_resolved_payout_blocker_total.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_set_pending_domain_loss_barrier_count.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_set_asset_state.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_drop_unowned_side_oi.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_begin_full_drain_reset_inner.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_begin_zero_oi_residue_resets.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_begin_legless_asset_resets.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_cure_and_cancel_close_with_cert_not_atomic.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_cure_and_cancel_close_not_atomic.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_deposit_domain_insurance_not_atomic.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_deposit_fresh_counterparty_backing_not_atomic.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_deposit_not_atomic.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_deregister_empty_materialized_portfolio_not_atomic.main' depends on axioms: [propext,
+ Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_execute_batch_with_fee_loss_stale_scoped_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_execute_trade_with_fee_loss_stale_scoped_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_finalize_side_reset_not_atomic.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_commit_asset_set_epoch_bump.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_force_asset_recovery_not_atomic.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_force_close_recovery_pair_not_atomic.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_sync_side_adl_index.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_retain_leg_as_pending_obligation.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_clear_leg_at_slot_inner.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_clear_forfeited_leg.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_mark_account_b_stale.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_mark_leg_b_stale.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_set_account_pnl_after_principal_settlement.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_settle_negative_pnl_from_principal_core_not_atomic.main' depends on axioms: [propext,
+ Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_settle_negative_pnl_from_principal_not_atomic.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_begin_close_progress_ledger.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_declare_permissionless_recovery.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_ensure_close_progress_not_expired.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_advance_close_progress_ledger.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_consume_domain_insurance_for_negative_pnl.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_forfeit_recovery_leg_not_atomic.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_mark_asset_drain_only_not_atomic.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_recredit_terminal_claim_free_residual_for_asset_not_atomic.main' depends on axioms: [propext,
+ Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_register_empty_materialized_portfolio_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_reset_empty_asset_oracle_anchor_not_atomic.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_resolve_market_not_atomic.main' depends on axioms: [propext, Quot.sound]
@@ -57,6 +86,7 @@
  Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_release_source_credit_lien_from_counterparty_terminal_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_set_insurance_reservation_for_domain.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_release_source_credit_lien_from_insurance_terminal_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_release_account_source_credit_lien_for_domain_not_atomic.main' depends on axioms: [propext,
@@ -65,6 +95,12 @@
  Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_attach_leg_at_slot.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_resize_leg_same_side_at_slot.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_apply_position_delta_with_lookup_inner.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_apply_position_delta_with_lookup.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_apply_position_delta.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.GenR08d4fd09.S_detach_solvent_active_legs_for_resolved_close.main' depends on axioms: [propext, Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_realize_one_source_domain_for_resolved_close_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
 'ClauseFlow.GenR08d4fd09.S_clear_fully_diluted_resolved_receipt_if_terminal.main' depends on axioms: [propext,
