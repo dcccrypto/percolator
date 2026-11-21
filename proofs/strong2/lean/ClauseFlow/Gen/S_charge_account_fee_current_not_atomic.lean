@@ -82,7 +82,7 @@ def inv : List (Option AState) := [
   /- bb26 -/ some ⟨[], []⟩,
   /- bb27 -/ some ⟨[(0, .eq 1)], []⟩,
   /- bb28 -/ some ⟨[(0, .eq 1)], []⟩,
-  /- bb29 -/ some ⟨[], [⟨[(0, .eq 0), (1000000, .ne 1)], .chk [] [0, 1]⟩, ⟨[(0, .eq 0), (1000000, .ne 0)], .bot⟩]⟩,
+  /- bb29 -/ some ⟨[], [⟨[(0, .eq 0), (1000000, .ne 0)], .bot⟩, ⟨[(0, .eq 0), (1000000, .ne 1)], .chk [] [0, 1]⟩]⟩,
   /- bb30 -/ some ⟨[], [⟨[(0, .eq 0), (1000000, .eq 0), (1000000, .ne 1)], .chk [] [0, 1]⟩]⟩
 ]
 
@@ -97,5 +97,13 @@ theorem main {W : Type} (chk : Nat → W → Bool) {w0 w1 : W} {b : Block} {env1
     (hret : Returns chk [] cfg w0 b w1 env1) :
     ∀ c, c ∈ goal.cls → Clause.sat chk w0 w1 env1 c :=
   checkCert_sound chk cert hret
+
+/-- Every `Ok` return with payload = 0: checks [] hold, checks [0, 1] are preserved (0 = validate_shape, k = validate_with_market of account k). -/
+theorem row {W : Type} (chk : Nat → W → Bool) {w0 w1 : W} {b : Block} {env1 : Env}
+    (hret : Returns chk [] cfg w0 b w1 env1) (h0 : env1 0 = 0) (h1 : env1 1000000 = 0) :
+    (chk 0 w0 = true → chk 0 w1 = true) ∧ (chk 1 w0 = true → chk 1 w1 = true) := by
+  have h := main chk hret ⟨[(0, .eq 0), (1000000, .eq 0)], .chk [] [0, 1]⟩ (by simp [goal])
+  have h2 := h (by intro g hg; simp at hg; rcases hg with rfl | rfl <;> first | exact h0 | exact h1)
+  exact ⟨h2.2 0 (by simp), h2.2 1 (by simp)⟩
 
 end ClauseFlow.Gen.S_charge_account_fee_current_not_atomic

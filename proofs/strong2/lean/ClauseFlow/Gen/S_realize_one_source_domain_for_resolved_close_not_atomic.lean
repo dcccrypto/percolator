@@ -105,7 +105,7 @@ def cfg : Cfg := [
   /- bb83 -/ ⟨[.havoc 92, .havoc 1000092, .setD 0 1, .havoc 1000000], .goto 84⟩,
   /- bb84 -/ ⟨[.havoc 92, .havoc 1000092, .havoc 88, .havoc 1000088], .goto 163⟩,
   /- bb85 -/ ⟨[.havoc 88, .havoc 1000088, .setD 0 1, .havoc 1000000], .goto 163⟩,
-  /- bb86 -/ ⟨[.havoc 88, .havoc 1000088, .havoc 87, .havoc 1000087, .copy 96 71, .copy 1000096 1000071, .havoc 97, .havoc 1000097], .call [95, 1000095] 87 [] [⟨[(95, .eq 0), (1000095, .eq 0)], .bot⟩]⟩,
+  /- bb86 -/ ⟨[.havoc 88, .havoc 1000088, .havoc 87, .havoc 1000087, .copy 96 71, .copy 1000096 1000071, .setD 97 1, .havoc 1000097], .call [95, 1000095] 87 [] [⟨[(95, .eq 0), (1000095, .eq 0)], .bot⟩]⟩,
   /- bb87 -/ ⟨[.havoc 97, .havoc 1000097, .havoc 96, .havoc 1000096], .branch 94 95 1000094 1000095 88⟩,
   /- bb88 -/ ⟨[.havoc 95, .havoc 1000095, .copy 98 94, .copy 1000098 1000094], .switch 98 [(0, 89), (1, 90)] (some 3)⟩,
   /- bb89 -/ ⟨[.copy 100 1000094, .havoc 1000100, .havoc 100, .havoc 1000100, .havoc 94, .havoc 1000094], .goto 93⟩,
@@ -367,7 +367,7 @@ def inv : List (Option AState) := [
   /- bb168 -/ some ⟨[(0, .eq 1)], []⟩,
   /- bb169 -/ some ⟨[(0, .eq 1)], [⟨[], .chk [] [0]⟩]⟩,
   /- bb170 -/ some ⟨[(0, .eq 1)], []⟩,
-  /- bb171 -/ some ⟨[], [⟨[(0, .eq 0), (1000000, .ne 1)], .chk [] [0]⟩, ⟨[(0, .eq 0), (1000000, .ne 0)], .bot⟩]⟩,
+  /- bb171 -/ some ⟨[], [⟨[(0, .eq 0), (1000000, .ne 0)], .bot⟩, ⟨[(0, .eq 0), (1000000, .ne 1)], .chk [] [0]⟩]⟩,
   /- bb172 -/ some ⟨[], [⟨[(0, .eq 0), (1000000, .ne 1)], .chk [] [0]⟩]⟩,
   /- bb173 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩
 ]
@@ -383,5 +383,13 @@ theorem main {W : Type} (chk : Nat → W → Bool) {w0 w1 : W} {b : Block} {env1
     (hret : Returns chk [] cfg w0 b w1 env1) :
     ∀ c, c ∈ goal.cls → Clause.sat chk w0 w1 env1 c :=
   checkCert_sound chk cert hret
+
+/-- Every `Ok` return with payload = 0: checks [] hold, checks [0] are preserved (0 = validate_shape, k = validate_with_market of account k). -/
+theorem row {W : Type} (chk : Nat → W → Bool) {w0 w1 : W} {b : Block} {env1 : Env}
+    (hret : Returns chk [] cfg w0 b w1 env1) (h0 : env1 0 = 0) (h1 : env1 1000000 = 0) :
+    (chk 0 w0 = true → chk 0 w1 = true) := by
+  have h := main chk hret ⟨[(0, .eq 0), (1000000, .eq 0)], .chk [] [0]⟩ (by simp [goal])
+  have h2 := h (by intro g hg; simp at hg; rcases hg with rfl | rfl <;> first | exact h0 | exact h1)
+  exact h2.2 0 (by simp)
 
 end ClauseFlow.Gen.S_realize_one_source_domain_for_resolved_close_not_atomic

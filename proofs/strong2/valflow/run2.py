@@ -3,6 +3,7 @@
 target rows. Nothing is "proved" by this script: a result counts only if its Lean module
 compiles (run_strong2.sh builds them and records the result)."""
 import argparse
+import csv
 import json
 import os
 import re
@@ -70,9 +71,9 @@ class Provider:
         self.order.append(path)
         return r["summary"]
 
-    def analyse(self, path, exempt=()):
+    def analyse(self, path, exempt=(), assume=None):
         fn = self.fns[path]
-        tr = E.T2(fn, self)
+        tr = E.T2(fn, self, assume)
         ir = tr.translate()
         ok_only = fn.ret.startswith("Result<")
         inv = E.fixpoint2(ir, tr.checks, exempt)
@@ -105,7 +106,8 @@ class Provider:
                         cls.append((gv, ((), (k,))))
         cls = merge(cls)
         summ = {"args": B.roles_of(fn), "cls": cls, "checks": tr.checks, "ok_only": ok_only} if cls else None
-        return {"summary": summ, "ir": ir, "inv": inv, "tr": tr, "fn": fn, "cls": cls, "ok_only": ok_only}
+        return {"summary": summ, "ir": ir, "inv": inv, "tr": tr, "fn": fn, "cls": cls, "ok_only": ok_only,
+                "g0": g0, "exempt": tuple(exempt)}
 
 
 def merge(cls):
@@ -155,6 +157,24 @@ def doc_for(r, path, pin, sha, used, note=""):
                "\n".join("  bb%d %s" % u for u in used) or "  none", note))
 
 
+def rows_for(r):
+    """Row theorems to state for a module whose goal is r["cls"]."""
+    out = []
+    for gs, c in r["cls"]:
+        if c == "bot":
+            continue
+        extra = [g for g in gs if g not in r["g0"]]
+        if not extra:
+            text = "Every %sreturn:" % ("`Ok` " if r["ok_only"] else "")
+        else:
+            text = "Every %sreturn with %s:" % ("`Ok` " if r["ok_only"] else "", " and ".join(
+                "%s %s %d" % ("payload" if g[0] == PO else "value", "=" if g[1] == "eq" else "≠", g[2]) for g in extra))
+        text += " checks %s hold, checks %s are preserved (0 = validate_shape, k = validate_with_market of account k)." % (
+            list(c[0]), list(c[1]))
+        out.append((list(gs), list(c[0]), list(c[1]), text))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mir", required=True)
@@ -166,22 +186,25 @@ def main():
     ap.add_argument("--pin", required=True)
     ap.add_argument("--genns", default="Gen")
     ap.add_argument("--clean", action="store_true", help="remove generated .lean files of an earlier run from --gen")
-    ap.add_argument("--targets", default="T18:convert_released_pnl_to_capital_not_atomic,T15:close_resolved_account_not_atomic")
+    ap.add_argument("--ledger", default=os.path.join(HERE, "..", "..", "novel", "ledger", "proof_ledger_08d4fd09.tsv"))
+    ap.add_argument("--sibling", default=None, help="the sibling run's ledger_results.tsv for the same revision")
+    ap.add_argument("--t15", default="close_resolved_account_not_atomic")
     a = ap.parse_args()
 
     fns, unsupported = B.load(a.mir, a.src)
+    E.ENUMS.clear()
+    E.ENUMS.update(E.enum_table(a.src))
     prov = Provider(fns)
     prov.unsupported.update(unsupported)
-    os.makedirs(a.gen, exist_ok=True)
+    for d in (a.gen, a.mirdir, a.out):
+        os.makedirs(d, exist_ok=True)
     if a.clean:
         for f in os.listdir(a.gen):
             if f.endswith(".lean"):
                 os.remove(os.path.join(a.gen, f))
-    os.makedirs(a.mirdir, exist_ok=True)
-    os.makedirs(a.out, exist_ok=True)
-    results = {"targets": {}, "summaries": {}, "pin": a.pin}
+    results = {"pin": a.pin, "enums": len(E.ENUMS), "summaries": {}, "t15": {}}
     modules = []
-    needed = []   # callee paths whose summaries a target (transitively) used
+    needed = []
 
     def need(path):
         if path in needed or path not in prov.done:
@@ -190,94 +213,161 @@ def main():
             need(q)
         needed.append(path)
 
-    for spec in a.targets.split(","):
-        row, name = spec.split(":")
-        path = P + name
-        if path not in fns:
-            results["targets"][row] = {"fn": name, "status": "not a method of the market view in this MIR"}
-            continue
-        try:
-            r = prov.analyse(path)
-        except X.Unsupported as e:
-            results["targets"][row] = {"fn": name, "status": "unsupported: %s" % e}
-            continue
-        fn, tr, ir, inv = r["fn"], r["tr"], r["ir"], r["inv"]
+    def write_mir(fn):
         hdr, body = fn.hdr_body
         text, sha = E.fn_text_sha(hdr, body)
-        open(os.path.join(a.mirdir, name + ".mir"), "w").write(text)
-        lines = span_lines(a.spans_mir, name)
-        info = {"fn": name, "mir_sha256": sha, "blocks": len(fn.blocks), "ir_blocks": len(ir),
-                "checks": tr.checks, "accounts": tr.accounts, "summary_clauses": [describe_cl(c) for c in r["cls"]],
-                "uses": sorted(set(q for _, q in tr.used2)), "rows": {}}
-        for _, q in tr.used2:
-            need(q)
-        ok_sites = sorted(b for b, (st, t) in enumerate(ir) if ("setD", 0, 0) in st and inv[b] is not None)
-        info["ok_sites"] = {str(b): lines.get(b) for b in ok_sites}
+        open(os.path.join(a.mirdir, fn.name + ".mir"), "w").write(text)
+        return sha
+
+    # ---- ledger rows -------------------------------------------------------------------
+    sib = {}
+    if a.sibling and os.path.exists(a.sibling):
+        for r in csv.reader(open(a.sibling), delimiter="\t"):
+            sib[r[0]] = r[4]
+    led = [["row", "function", "ledger_class", "strong2", "sibling", "lean_module"]]
+    for r in list(csv.reader(open(a.ledger), delimiter="\t"))[1:]:
+        m = re.match(r"^(T\d+)\.(header|account)$", r[0])
+        if not m:
+            continue
+        name = r[2]
+        cm = re.match(r"\[([a-z-]+)\]", r[6])
+        klass = cm.group(1) if cm else ""
+        path = P + name
+        if path not in fns:
+            led.append([r[0], name, klass, "no-mir", sib.get(r[0], ""), ""])
+            continue
+        prov.summary(path)
+        if path in prov.unsupported or path not in prov.done:
+            led.append([r[0], name, klass, "unsupported", sib.get(r[0], ""), ""])
+            continue
+        d = prov.done[path]
+        ks = [0] if m.group(2) == "header" else [k for k in d["tr"].checks if k >= 1]
+        if not ks:
+            led.append([r[0], name, klass, "no-account-argument", sib.get(r[0], ""), ""])
+            continue
+        g0 = d["g0"]
+        if all(E.ret_entailed(d["ir"], d["inv"], (g0, ((k,), ()))) for k in ks):
+            res = "est"
+        elif all(E.ret_entailed(d["ir"], d["inv"], (g0, ((), (k,)))) for k in ks):
+            res = "pres"
+        else:
+            res = "open"
+        if res != "open":
+            need(path)
+        led.append([r[0], name, klass, res, sib.get(r[0], ""), "S_" + name if res != "open" else ""])
+    with open(os.path.join(a.out, "ledger_results.tsv"), "w") as f:
+        csv.writer(f, delimiter="\t", lineterminator="\n").writerows(led)
+
+    # ---- T15: partial rows, the Closed outcome, and the reduction to assumed callees ----
+    path = P + a.t15
+    if path in fns and path in prov.done:
+        d = prov.done[path]
+        need(path)
+        fn, tr = d["fn"], d["tr"]
+        sha = write_mir(fn)
+        lines = span_lines(a.spans_mir, a.t15)
+        ok_sites = sorted(b for b, (st, t) in enumerate(d["ir"]) if ("setD", 0, 0) in st and d["inv"][b] is not None)
+        t15 = {"fn": a.t15, "mir_sha256": sha, "blocks": len(fn.blocks),
+               "ok_sites": {str(b): lines.get(b) for b in ok_sites}, "rows": {}}
+        g0 = d["g0"]
+        callees = []
+        for b in range(len(fn.blocks)):
+            term = fn.blocks[b][1]
+            if " -> " in term:
+                sa = X.split_assign(term.rsplit(" -> ", 1)[0])
+                if sa is not None:
+                    try:
+                        fp, _ = X.split_call(sa[1])
+                    except X.Unsupported:
+                        continue
+                    if fp in fns and fp not in callees:
+                        callees.append(fp)
         for suffix, k in ((".header", 0), (".account", 1)):
             if k not in tr.checks:
                 continue
-            g0 = ((0, "eq", 0),)
+            cl = (g0, ((), (k,)))
             entry = {}
-            kind = None
-            if E.ret_entailed(ir, inv, (g0, ((k,), ()))):
-                kind, row_cl, rowarg = "est", (g0, ((k,), ())), ([k], [])
-            elif E.ret_entailed(ir, inv, (g0, ((), (k,)))):
-                kind, row_cl, rowarg = "pres", (g0, ((), (k,))), ([], [k])
-            ns = "%s_%s" % (row, suffix[1:])
-            if kind is not None:
-                bad = E.verify(ir, inv, [row_cl], tr.checks)
-                entry = {"status": "whole row, %s" % kind, "module": ns, "exempt": [], "mirror_problems": len(bad)}
-                doc = doc_for(r, path, a.pin, sha, sorted(set(tr.used2)),
-                              "row %s%s: every Ok return; no excluded block, no assumed callee." % (row, suffix))
-                open(os.path.join(a.gen, ns + ".lean"), "w").write(
-                    E.emit_lean(a.genns, ns, doc, ir, inv, [row_cl], [], tr.checks, row=rowarg))
-                modules.append(ns)
+            if E.ret_entailed(d["ir"], d["inv"], cl):
+                entry["whole"] = "S_" + a.t15
             else:
-                # which Ok sites are open, and the same analysis with them excluded
-                cl = (g0, ((), (k,)))
-                sites = E.open_ok_sites(ir, inv, cl)
-                r2 = Provider.analyse(prov, path, exempt=tuple(sites))
-                ir2, inv2 = r2["ir"], r2["inv"]
-                ok2 = E.ret_entailed(ir2, inv2, cl, tuple(sites))
-                bad = E.verify(ir2, inv2, [cl], tr.checks, tuple(sites))
-                entry = {"status": "partial: Ok returns outside the excluded blocks, pres" if ok2 else "open",
-                         "module": ns + "_checked_paths" if ok2 else None,
-                         "exempt": sites, "exempt_lines": {str(b): lines.get(b) for b in sites},
-                         "proved_ok_sites": len(ok_sites) - len(sites), "ok_sites": len(ok_sites),
-                         "mirror_problems": len(bad)}
+                sites = E.open_ok_sites(d["ir"], d["inv"], cl)
+                r2 = prov.analyse(path, exempt=tuple(sites))
+                ok2 = E.ret_entailed(r2["ir"], r2["inv"], cl, tuple(sites))
+                entry.update({"exempt": sites, "exempt_lines": {str(b): lines.get(b) for b in sites},
+                              "proved_ok_sites": len(ok_sites) - len(sites), "n_ok_sites": len(ok_sites),
+                              "checked_paths_module": None})
                 if ok2:
+                    ns = "T15_%s_checked_paths" % suffix[1:]
                     doc = doc_for(r2, path, a.pin, sha, sorted(set(r2["tr"].used2)),
-                                  "row %s%s, PARTIAL: executions that do not pass through block(s) %s\n"
+                                  "row T15%s, PARTIAL: executions that do not pass through block(s) %s\n"
                                   "(source lines of their `Ok(..)`: %s)." % (
-                                      row, suffix, sites, ", ".join("bb%d → v16.rs:%s" % (b, lines.get(b)) for b in sites)))
-                    open(os.path.join(a.gen, ns + "_checked_paths.lean"), "w").write(
-                        E.emit_lean(a.genns, ns + "_checked_paths", doc, ir2, inv2, [cl], sites, tr.checks, row=([], [k])))
-                    modules.append(ns + "_checked_paths")
-            info["rows"][row + suffix] = entry
-        results["targets"][row] = info
+                                      suffix, sites, ", ".join("bb%d → v16.rs:%s" % (b, lines.get(b)) for b in sites)))
+                    open(os.path.join(a.gen, ns + ".lean"), "w").write(
+                        E.emit_lean(a.genns, ns, doc, r2["ir"], r2["inv"], [cl], sites, tr.checks,
+                                    row=[(list(g0), [], [k], "Every `Ok` return: check %d is preserved." % k)]))
+                    modules.append(ns)
+                    entry["checked_paths_module"] = ns
+                    for _, q in r2["tr"].used2:
+                        need(q)
+                # reduction: the smallest set of direct callees (greedy) whose assumed preservation
+                # of this check closes the row
+                def assume_for(cs):
+                    A = {}
+                    for q in cs:
+                        gq = ((0, "eq", 0),) if fns[q].ret.startswith("Result<") else ()
+                        A[q] = [(gq, ((), (k,)))]
+                    return A
+                cur = list(callees)
+                r3 = prov.analyse(path, assume=assume_for(cur))
+                if E.ret_entailed(r3["ir"], r3["inv"], cl):
+                    for q in list(callees):
+                        trial = [x for x in cur if x != q]
+                        rt = prov.analyse(path, assume=assume_for(trial))
+                        if E.ret_entailed(rt["ir"], rt["inv"], cl):
+                            cur = trial
+                    r3 = prov.analyse(path, assume=assume_for(cur))
+                    used_assumed = sorted(set(q for _, q in r3["tr"].used_assumed))
+                    ns = "T15_%s_conditional" % suffix[1:]
+                    doc = doc_for(r3, path, a.pin, sha, sorted(set(r3["tr"].used2)),
+                                  "row T15%s, CONDITIONAL. ASSUMED (not proved) for each callee below: if it returns Ok\n"
+                                  "and check %d held before the call, it holds after. These assumptions are built into\n"
+                                  "the abstract program (extra post-clauses at the call sites):\n%s" % (
+                                      suffix, k, "\n".join("  ASSUMED %s" % q for q in used_assumed)))
+                    open(os.path.join(a.gen, ns + ".lean"), "w").write(
+                        E.emit_lean(a.genns, ns, doc, r3["ir"], r3["inv"], [cl], [], tr.checks,
+                                    row=[(list(g0), [], [k], "IF the ASSUMED callee contracts in this file's header hold: "
+                                          "every `Ok` return preserves check %d." % k)]))
+                    modules.append(ns)
+                    entry["conditional_module"] = ns
+                    entry["assumed"] = [q[len(P):] for q in used_assumed]
+                    for _, q in r3["tr"].used2:
+                        need(q)
+                else:
+                    entry["conditional_module"] = None
+            t15["rows"]["T15" + suffix] = entry
+        results["t15"] = t15
 
-    # modules for every summary a target used, callees first
+    # ---- one module per function whose summary is used or is a ledger row ----
     for path in needed:
         r = prov.done[path]
         if not r["cls"]:
             continue
         fn, tr = r["fn"], r["tr"]
         name = path[len(P):]
-        hdr, body = fn.hdr_body
-        text, sha = E.fn_text_sha(hdr, body)
-        open(os.path.join(a.mirdir, name + ".mir"), "w").write(text)
+        sha = write_mir(fn)
         bad = E.verify(r["ir"], r["inv"], r["cls"], tr.checks)
         ns = "S_" + name
         doc = doc_for(r, path, a.pin, sha, sorted(set(tr.used2)),
                       "summary clauses (the goal):\n" + "\n".join("  " + describe_cl(c) for c in r["cls"]))
         open(os.path.join(a.gen, ns + ".lean"), "w").write(
-            E.emit_lean(a.genns, ns, doc, r["ir"], r["inv"], r["cls"], [], tr.checks))
+            E.emit_lean(a.genns, ns, doc, r["ir"], r["inv"], r["cls"], [], tr.checks, row=rows_for(r)))
         modules.append(ns)
         results["summaries"][name] = {"clauses": [describe_cl(c) for c in r["cls"]], "raw": r["cls"],
                                       "mir_sha256": sha, "blocks": len(fn.blocks), "mirror_problems": len(bad),
                                       "uses": sorted(set(q[len(P):] for _, q in tr.used2))}
     results["unsupported"] = prov.unsupported
     results["analysed_methods"] = len(prov.done)
+    results["modules"] = modules
     allf = os.path.join(os.path.dirname(a.gen.rstrip("/")), "All%s.lean" % a.genns)
     with open(allf, "w") as f:
         for m in modules:
@@ -286,9 +376,16 @@ def main():
         for m in modules:
             f.write("#print axioms ClauseFlow.%s.%s.main\n" % (a.genns, m))
     json.dump(results, open(os.path.join(a.out, "run.json"), "w"), indent=1, sort_keys=True, default=str)
-    for row, info in results["targets"].items():
-        print(row, json.dumps(info.get("rows", info), sort_keys=True))
-    print("modules: %d; summaries used: %d; methods analysed: %d" % (len(modules), len(results["summaries"]), len(prov.done)))
+    n = {}
+    for r in led[1:]:
+        n[r[3]] = n.get(r[3], 0) + 1
+    print("ledger rows:", json.dumps(n, sort_keys=True))
+    newly = [r[0] for r in led[1:] if r[3] in ("est", "pres") and r[4] not in ("est", "pres")]
+    lost = [r[0] for r in led[1:] if r[4] in ("est", "pres") and r[3] not in ("est", "pres")]
+    print("rows this run closes that the sibling run left open:", newly)
+    print("rows the sibling run closed that this run does not:", lost)
+    print("T15:", json.dumps(results["t15"].get("rows", {}), sort_keys=True))
+    print("modules: %d; methods analysed: %d; plain crate enums: %d" % (len(modules), len(prov.done), len(E.ENUMS)))
 
 
 if __name__ == "__main__":

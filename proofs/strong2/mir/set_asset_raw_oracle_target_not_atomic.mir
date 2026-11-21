@@ -1,0 +1,30 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::set_asset_raw_oracle_target_not_atomic(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: usize, _3: u64) -> Result<(), V16Error> {
+    debug self => _1;
+    debug asset_index => _2;
+    debug raw_oracle_target_price => _3;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+    let mut _4: &[(usize, u64)];
+    let _5: &[(usize, u64); 1];
+    let _6: [(usize, u64); 1];
+    let mut _7: (usize, u64);
+
+    bb0: {
+        StorageLive(_4);
+        StorageLive(_5);
+        StorageLive(_6);
+        StorageLive(_7);
+        _7 = (copy _2, copy _3);
+        _6 = [move _7];
+        StorageDead(_7);
+        _5 = &_6;
+        _4 = copy _5 as &[(usize, u64)] (PointerCoercion(Unsize, Implicit));
+        _0 = MarketGroupV16ViewMut::<'_, T>::set_asset_raw_oracle_targets_not_atomic(move _1, move _4) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        StorageDead(_4);
+        StorageDead(_6);
+        StorageDead(_5);
+        return;
+    }
+}

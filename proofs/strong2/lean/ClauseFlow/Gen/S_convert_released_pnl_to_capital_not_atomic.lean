@@ -11,10 +11,12 @@ of the Ok payload; for Option: None = 0, Some = 1).
 callee summaries used (block, callee), each certified by its own module in this directory:
   bb8 MarketGroupV16ViewMut::<'_, T>::release_account_source_credit_liens_if_unneeded_not_atomic
   bb19 MarketGroupV16ViewMut::<'_, T>::convert_released_pnl_to_capital_core_not_atomic
-row T18.account: every Ok return; no excluded block, no assumed callee.
+summary clauses (the goal):
+  result = 0: checks [0, 1] preserved
+  result = 0 ∧ payload = 1: checks [0, 1] hold
 -/
 
-namespace ClauseFlow.Gen.T18_account
+namespace ClauseFlow.Gen.S_convert_released_pnl_to_capital_not_atomic
 
 open ClauseFlow
 
@@ -38,7 +40,7 @@ def cfg : Cfg := [
   /- bb16 -/ ⟨[.havoc 21, .havoc 1000021, .havoc 19, .havoc 1000019], .call [17, 1000017] 17 [0, 1] []⟩,
   /- bb17 -/ ⟨[.havoc 18, .havoc 1000018], .branch 16 17 1000016 1000017 18⟩,
   /- bb18 -/ ⟨[.havoc 17, .havoc 1000017, .copy 22 16, .copy 1000022 1000016], .switch 22 [(0, 19), (1, 20)] (some 4)⟩,
-  /- bb19 -/ ⟨[.havoc 20, .havoc 1000020, .havoc 19, .havoc 1000019, .havoc 16, .havoc 1000016, .havoc 26, .havoc 1000026], .call [25, 1000025] 22 [] [⟨[(25, .eq 0), (1000025, .eq 0)], .chk [] [0, 1]⟩]⟩,
+  /- bb19 -/ ⟨[.havoc 20, .havoc 1000020, .havoc 19, .havoc 1000019, .havoc 16, .havoc 1000016, .setD 26 0, .havoc 1000026], .call [25, 1000025] 22 [] [⟨[(25, .eq 0), (1000025, .eq 0)], .chk [] [0, 1]⟩]⟩,
   /- bb20 -/ ⟨[.havoc 23, .havoc 1000023, .setD 0 1, .havoc 1000000], .goto 21⟩,
   /- bb21 -/ ⟨[.havoc 23, .havoc 1000023, .havoc 20, .havoc 1000020, .havoc 19, .havoc 1000019, .havoc 16, .havoc 1000016], .goto 48⟩,
   /- bb22 -/ ⟨[.havoc 26, .havoc 1000026], .branch 24 25 1000024 1000025 23⟩,
@@ -122,7 +124,7 @@ def inv : List (Option AState) := [
   /- bb48 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [] [0, 1]⟩, ⟨[(0, .eq 0), (1000000, .ne 0)], .chk [0, 1] []⟩]⟩
 ]
 
-def goal : Goal := ⟨[⟨[(0, .eq 0)], .chk [] [1]⟩], [], [0, 1]⟩
+def goal : Goal := ⟨[⟨[(0, .eq 0)], .chk [] [0, 1]⟩, ⟨[(0, .eq 0), (1000000, .eq 1)], .chk [0, 1] []⟩], [], [0, 1]⟩
 
 theorem cert : checkCert goal cfg inv = true := by decide +kernel
 
@@ -134,12 +136,20 @@ theorem main {W : Type} (chk : Nat → W → Bool) {w0 w1 : W} {b : Block} {env1
     ∀ c, c ∈ goal.cls → Clause.sat chk w0 w1 env1 c :=
   checkCert_sound chk cert hret
 
-/-- The ledger row: every `Ok` return. -/
+/-- Every `Ok` return: checks [] hold, checks [0, 1] are preserved (0 = validate_shape, k = validate_with_market of account k). -/
 theorem row {W : Type} (chk : Nat → W → Bool) {w0 w1 : W} {b : Block} {env1 : Env}
-    (hret : Returns chk [] cfg w0 b w1 env1) (hok : env1 0 = 0) :
-    (chk 1 w0 = true → chk 1 w1 = true) := by
-  have h := main chk hret ⟨[(0, .eq 0)], .chk [] [1]⟩ (by simp [goal])
-  have h2 := h (by intro g hg; simp at hg; subst hg; exact hok)
-  exact h2.2 1 (by simp)
+    (hret : Returns chk [] cfg w0 b w1 env1) (h0 : env1 0 = 0) :
+    (chk 0 w0 = true → chk 0 w1 = true) ∧ (chk 1 w0 = true → chk 1 w1 = true) := by
+  have h := main chk hret ⟨[(0, .eq 0)], .chk [] [0, 1]⟩ (by simp [goal])
+  have h2 := h (by intro g hg; simp at hg; rcases hg with rfl <;> first | exact h0)
+  exact ⟨h2.2 0 (by simp), h2.2 1 (by simp)⟩
 
-end ClauseFlow.Gen.T18_account
+/-- Every `Ok` return with payload = 1: checks [0, 1] hold, checks [] are preserved (0 = validate_shape, k = validate_with_market of account k). -/
+theorem row2 {W : Type} (chk : Nat → W → Bool) {w0 w1 : W} {b : Block} {env1 : Env}
+    (hret : Returns chk [] cfg w0 b w1 env1) (h0 : env1 0 = 0) (h1 : env1 1000000 = 1) :
+    chk 0 w1 = true ∧ chk 1 w1 = true := by
+  have h := main chk hret ⟨[(0, .eq 0), (1000000, .eq 1)], .chk [0, 1] []⟩ (by simp [goal])
+  have h2 := h (by intro g hg; simp at hg; rcases hg with rfl | rfl <;> first | exact h0 | exact h1)
+  exact ⟨h2.1 0 (by simp), h2.1 1 (by simp)⟩
+
+end ClauseFlow.Gen.S_convert_released_pnl_to_capital_not_atomic

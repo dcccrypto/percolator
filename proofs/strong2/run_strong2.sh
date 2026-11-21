@@ -12,8 +12,8 @@ WORK=${WORK:-/Users/khubair/agent-work/e2e-proofs-1121/scratch/s2work}
 LEAN_TC=${LEAN_TC:-/Users/khubair/agent-work/e2e-proofs-1121/lean-tc/lean-4.34.0-darwin_aarch64}
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/Users/khubair/agent-work/e2e-proofs-1121/tgt-strong2-mir}
 SRC=$WORK/src-$REV
-if [ "$REV" = c38b6b1e ]; then OUT=$HERE/out; GENNS=Gen; MIRDIR=$HERE/mir
-else OUT=$HERE/out-$REV; GENNS=GenR$REV; MIRDIR=$HERE/mir-$REV; fi
+if [ "$REV" = c38b6b1e ]; then OUT=$HERE/out; GENNS=Gen; MIRDIR=$HERE/mir; SIB=out-c38b6b1e
+else OUT=$HERE/out-$REV; GENNS=GenR$REV; MIRDIR=$HERE/mir-$REV; SIB=out; fi
 GENDIR=$HERE/lean/ClauseFlow/$GENNS
 mkdir -p "$SRC" "$WORK/mir" "$OUT" "$MIRDIR" "$GENDIR"
 git -C "$REPO" archive "$REV" Cargo.toml Cargo.lock src | tar -x -C "$SRC"
@@ -40,7 +40,7 @@ python3 "$HERE/valflow/check_assumptions2.py" "$SRC" "$WORK/mir/$REV.mir" >> "$O
 
 # generated files are rewritten by run2.py; stale modules of an earlier run are removed by it
 python3 "$HERE/valflow/run2.py" --mir "$WORK/mir/$REV.mir" --spans-mir "$WORK/mir/$REV.spans.mir" \
-  --src "$SRC/src/v16.rs" --gen "$GENDIR" --mirdir "$MIRDIR" --out "$OUT" --genns $GENNS --clean \
+  --src "$SRC/src/v16.rs" --gen "$GENDIR" --mirdir "$MIRDIR" --out "$OUT" --genns $GENNS --clean --sibling "$HERE/../novel/$SIB/ledger_results.tsv" \
   --pin "engine: $ENGINE@$REV, src/v16.rs blob $V16; $RUSTC; $FLAGS" > "$OUT/run.txt"
 cat "$OUT/run.txt"
 ( cd "$HERE/lean" && PATH="$LEAN_TC/bin:$PATH" lake build 2>&1 | grep -v '^info: toolchain' > "$OUT/lake_build.log"; tail -1 "$OUT/lake_build.log" )

@@ -1,0 +1,16 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::execute_batch_with_fee_loss_stale_scoped_not_atomic(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: &mut PortfolioV16ViewMut<'_>, _3: &mut PortfolioV16ViewMut<'_>, _4: &[TradeRequestV16], _5: bool) -> Result<BatchTradeOutcomeV16, V16Error> {
+    debug self => _1;
+    debug long_account => _2;
+    debug short_account => _3;
+    debug requests => _4;
+    debug taker_is_long_account => _5;
+    let mut _0: core::result::Result<v16::BatchTradeOutcomeV16, v16::V16Error>;
+
+    bb0: {
+        _0 = MarketGroupV16ViewMut::<'_, T>::execute_batch_band_scoped_not_atomic(move _1, move _2, move _3, move _4, move _5, const false) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}

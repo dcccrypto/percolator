@@ -1,0 +1,9 @@
+engine: aeyakovenko/percolator
+revision: 08d4fd09bf8f5c7acec4dedc060fe66eab21431d
+src/v16.rs blob: a4674830cfcd5eeaa6cb39696a0620db7c5b0a9b
+src/wide_math.rs blob: e57bba6bbb9695ff90cd113ab1838f2a89238bed
+src/lib.rs blob: e8b29dbb24c382e9f17ca125ef9bde40d47c39ae
+rustc: rustc 1.99.0-nightly (d0babd8b6 2026-07-15)
+mir command: cargo rustc -j 4 --release --lib -- -Zunpretty=mir -Zinline-mir=no
+lean: Lean (version 4.34.0, arm64-apple-darwin24.6.0, commit 293d5d0c0c3f3dded4688b3ccd6a33939ac5102b, Release)
+full MIR dump sha256: fd9ede9d60f27d35d8049ca644e5438dd4d274ba3c386695de3250af0d64a549 (316600 lines)

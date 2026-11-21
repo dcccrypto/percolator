@@ -1,0 +1,426 @@
+fn v16::<impl at src/v16.rs:9719:1: 9719:41>::add_account_source_positive_pnl_not_atomic(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: &mut PortfolioV16ViewMut<'_>, _3: usize, _4: u128) -> Result<(), V16Error> {
+    debug self => _1;
+    debug account => _2;
+    debug domain => _3;
+    debug amount => _4;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+    let mut _5: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>>;
+    let mut _6: core::result::Result<(), v16::V16Error>;
+    let mut _7: &v16::PortfolioV16ViewMut<'_>;
+    let _8: &v16::MarketGroupV16View<'_, T>;
+    let _9: v16::MarketGroupV16View<'_, T>;
+    let mut _10: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _11: isize;
+    let _12: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let mut _13: bool;
+    let mut _14: &v16::MarketModeV16;
+    let _15: v16::MarketModeV16;
+    let mut _16: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, v16::MarketModeV16>;
+    let mut _17: core::result::Result<v16::MarketModeV16, v16::V16Error>;
+    let mut _18: u8;
+    let mut _19: isize;
+    let _20: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let _21: v16::MarketModeV16;
+    let mut _22: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, i128>;
+    let mut _23: core::result::Result<i128, v16::V16Error>;
+    let mut _24: core::result::Result<i128, core::num::TryFromIntError>;
+    let mut _25: isize;
+    let _26: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let _27: i128;
+    let mut _28: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, i128>;
+    let mut _29: core::result::Result<i128, v16::V16Error>;
+    let mut _30: core::option::Option<i128>;
+    let mut _31: i128;
+    let mut _32: v16::V16PodI128;
+    let mut _33: isize;
+    let mut _36: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>>;
+    let mut _37: core::result::Result<(), v16::V16Error>;
+    let mut _38: isize;
+    let mut _40: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>>;
+    let mut _41: core::result::Result<(), v16::V16Error>;
+    let mut _42: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _43: isize;
+    let mut _45: &v16::PortfolioV16ViewMut<'_>;
+    let _46: &v16::MarketGroupV16View<'_, T>;
+    let _47: v16::MarketGroupV16View<'_, T>;
+    let mut _48: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _49: &mut v16::MarketGroupV16HeaderAccount;
+    let mut _50: &mut v16::PortfolioAccountV16Account;
+    let mut _51: &mut v16::PortfolioAccountV16Account;
+    scope 1 {
+        debug residual => _12;
+        scope 2 {
+        }
+    }
+    scope 3 {
+        debug val => const ();
+        scope 4 {
+        }
+    }
+    scope 5 {
+        debug residual => _20;
+        scope 6 {
+        }
+    }
+    scope 7 {
+        debug val => _21;
+        scope 8 {
+        }
+    }
+    scope 9 {
+        debug delta => _27;
+        let _34: core::result::Result<core::convert::Infallible, v16::V16Error>;
+        let _35: i128;
+        scope 14 {
+            debug new_pnl => _35;
+            let _39: core::result::Result<core::convert::Infallible, v16::V16Error>;
+            let _44: core::result::Result<core::convert::Infallible, v16::V16Error>;
+            scope 19 {
+                debug residual => _39;
+                scope 20 {
+                }
+            }
+            scope 21 {
+                debug val => const ();
+                scope 22 {
+                }
+            }
+            scope 23 {
+                debug residual => _44;
+                scope 24 {
+                }
+            }
+            scope 25 {
+                debug val => const ();
+                scope 26 {
+                }
+            }
+        }
+        scope 15 {
+            debug residual => _34;
+            scope 16 {
+            }
+        }
+        scope 17 {
+            debug val => _35;
+            scope 18 {
+            }
+        }
+    }
+    scope 10 {
+        debug residual => _26;
+        scope 11 {
+        }
+    }
+    scope 12 {
+        debug val => _27;
+        scope 13 {
+        }
+    }
+
+    bb0: {
+        StorageLive(_5);
+        StorageLive(_6);
+        StorageLive(_7);
+        _7 = &(*_2);
+        StorageLive(_8);
+        StorageLive(_9);
+        StorageLive(_10);
+        _10 = &(*_1);
+        _9 = MarketGroupV16ViewMut::<'_, T>::as_view(move _10) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        StorageDead(_10);
+        _8 = &_9;
+        _6 = PortfolioV16ViewMut::<'_>::validate_with_market::<T>(move _7, move _8) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        StorageDead(_7);
+        _5 = <Result<(), V16Error> as Try>::branch(move _6) -> [return: bb3, unwind continue];
+    }
+
+    bb3: {
+        StorageDead(_6);
+        _11 = discriminant(_5);
+        switchInt(move _11) -> [0: bb5, 1: bb6, otherwise: bb4];
+    }
+
+    bb4: {
+        unreachable;
+    }
+
+    bb5: {
+        StorageDead(_9);
+        StorageDead(_8);
+        StorageDead(_5);
+        StorageLive(_13);
+        StorageLive(_14);
+        StorageLive(_15);
+        StorageLive(_16);
+        StorageLive(_17);
+        StorageLive(_18);
+        _49 = no_retag copy ((*_1).0: &mut v16::MarketGroupV16HeaderAccount);
+        _18 = copy ((*_49).33: u8);
+        _17 = decode_market_mode(move _18) -> [return: bb8, unwind continue];
+    }
+
+    bb6: {
+        StorageLive(_12);
+        _12 = copy ((_5 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _12) -> [return: bb7, unwind continue];
+    }
+
+    bb7: {
+        StorageDead(_12);
+        StorageDead(_9);
+        StorageDead(_8);
+        StorageDead(_5);
+        goto -> bb46;
+    }
+
+    bb8: {
+        StorageDead(_18);
+        _16 = <Result<MarketModeV16, V16Error> as Try>::branch(move _17) -> [return: bb9, unwind continue];
+    }
+
+    bb9: {
+        StorageDead(_17);
+        _19 = discriminant(_16);
+        switchInt(move _19) -> [0: bb10, 1: bb11, otherwise: bb4];
+    }
+
+    bb10: {
+        StorageLive(_21);
+        _21 = copy ((_16 as Continue).0: v16::MarketModeV16);
+        _15 = copy _21;
+        StorageDead(_21);
+        _14 = &_15;
+        _13 = <MarketModeV16 as PartialEq>::ne(move _14, const v16::MarketGroupV16ViewMut::<'_, T>::add_account_source_positive_pnl_not_atomic::promoted[0]) -> [return: bb13, unwind continue];
+    }
+
+    bb11: {
+        StorageLive(_20);
+        _20 = copy ((_16 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _20) -> [return: bb12, unwind continue];
+    }
+
+    bb12: {
+        StorageDead(_20);
+        StorageDead(_16);
+        StorageDead(_15);
+        StorageDead(_14);
+        goto -> bb45;
+    }
+
+    bb13: {
+        switchInt(move _13) -> [0: bb15, otherwise: bb14];
+    }
+
+    bb14: {
+        StorageDead(_16);
+        StorageDead(_15);
+        StorageDead(_14);
+        _0 = const Result::<(), V16Error>::Err(V16Error::LockActive);
+        goto -> bb45;
+    }
+
+    bb15: {
+        StorageDead(_16);
+        StorageDead(_15);
+        StorageDead(_14);
+        StorageDead(_13);
+        switchInt(copy _4) -> [0: bb16, otherwise: bb17];
+    }
+
+    bb16: {
+        _0 = const Result::<(), V16Error>::Ok(());
+        goto -> bb46;
+    }
+
+    bb17: {
+        StorageLive(_22);
+        StorageLive(_23);
+        StorageLive(_24);
+        _24 = <i128 as TryFrom<u128>>::try_from(move _4) -> [return: bb18, unwind continue];
+    }
+
+    bb18: {
+        _23 = Result::<i128, TryFromIntError>::map_err::<V16Error, {closure@src/v16.rs:14599:52: 14599:55}>(move _24, const ZeroSized: {closure@src/v16.rs:14599:52: 14599:55}) -> [return: bb19, unwind continue];
+    }
+
+    bb19: {
+        StorageDead(_24);
+        _22 = <Result<i128, V16Error> as Try>::branch(move _23) -> [return: bb20, unwind continue];
+    }
+
+    bb20: {
+        StorageDead(_23);
+        _25 = discriminant(_22);
+        switchInt(move _25) -> [0: bb21, 1: bb22, otherwise: bb4];
+    }
+
+    bb21: {
+        _27 = copy ((_22 as Continue).0: i128);
+        StorageDead(_22);
+        StorageLive(_28);
+        StorageLive(_29);
+        StorageLive(_30);
+        StorageLive(_31);
+        StorageLive(_32);
+        _50 = no_retag copy ((*_2).0: &mut v16::PortfolioAccountV16Account);
+        _32 = copy ((*_50).3: v16::V16PodI128);
+        _31 = V16PodI128::get(move _32) -> [return: bb24, unwind continue];
+    }
+
+    bb22: {
+        StorageLive(_26);
+        _26 = copy ((_22 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _26) -> [return: bb23, unwind continue];
+    }
+
+    bb23: {
+        StorageDead(_26);
+        StorageDead(_22);
+        goto -> bb44;
+    }
+
+    bb24: {
+        StorageDead(_32);
+        _30 = core::num::<impl i128>::checked_add(move _31, move _27) -> [return: bb25, unwind continue];
+    }
+
+    bb25: {
+        StorageDead(_31);
+        _29 = Option::<i128>::ok_or::<V16Error>(move _30, const V16Error::ArithmeticOverflow) -> [return: bb26, unwind continue];
+    }
+
+    bb26: {
+        StorageDead(_30);
+        _28 = <Result<i128, V16Error> as Try>::branch(move _29) -> [return: bb27, unwind continue];
+    }
+
+    bb27: {
+        StorageDead(_29);
+        _33 = discriminant(_28);
+        switchInt(move _33) -> [0: bb28, 1: bb29, otherwise: bb4];
+    }
+
+    bb28: {
+        _35 = copy ((_28 as Continue).0: i128);
+        StorageDead(_28);
+        StorageLive(_36);
+        StorageLive(_37);
+        _37 = MarketGroupV16ViewMut::<'_, T>::set_account_pnl_with_source(copy _1, copy _2, move _35, move _3) -> [return: bb31, unwind continue];
+    }
+
+    bb29: {
+        StorageLive(_34);
+        _34 = copy ((_28 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _34) -> [return: bb30, unwind continue];
+    }
+
+    bb30: {
+        StorageDead(_34);
+        StorageDead(_28);
+        goto -> bb43;
+    }
+
+    bb31: {
+        _36 = <Result<(), V16Error> as Try>::branch(move _37) -> [return: bb32, unwind continue];
+    }
+
+    bb32: {
+        StorageDead(_37);
+        _38 = discriminant(_36);
+        switchInt(move _38) -> [0: bb33, 1: bb34, otherwise: bb4];
+    }
+
+    bb33: {
+        StorageDead(_36);
+        _51 = no_retag copy ((*_2).0: &mut v16::PortfolioAccountV16Account);
+        (((*_51).18: v16::HealthCertV16Account).10: u8) = const 0_u8;
+        StorageLive(_40);
+        StorageLive(_41);
+        StorageLive(_42);
+        _42 = &(*_1);
+        _41 = MarketGroupV16ViewMut::<'_, T>::validate_shape(move _42) -> [return: bb36, unwind continue];
+    }
+
+    bb34: {
+        StorageLive(_39);
+        _39 = copy ((_36 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _39) -> [return: bb35, unwind continue];
+    }
+
+    bb35: {
+        StorageDead(_39);
+        StorageDead(_36);
+        goto -> bb43;
+    }
+
+    bb36: {
+        StorageDead(_42);
+        _40 = <Result<(), V16Error> as Try>::branch(move _41) -> [return: bb37, unwind continue];
+    }
+
+    bb37: {
+        StorageDead(_41);
+        _43 = discriminant(_40);
+        switchInt(move _43) -> [0: bb38, 1: bb39, otherwise: bb4];
+    }
+
+    bb38: {
+        StorageDead(_40);
+        StorageLive(_45);
+        _45 = &(*_2);
+        StorageLive(_46);
+        StorageLive(_47);
+        StorageLive(_48);
+        _48 = &(*_1);
+        _47 = MarketGroupV16ViewMut::<'_, T>::as_view(move _48) -> [return: bb41, unwind continue];
+    }
+
+    bb39: {
+        StorageLive(_44);
+        _44 = copy ((_40 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _44) -> [return: bb40, unwind continue];
+    }
+
+    bb40: {
+        StorageDead(_44);
+        StorageDead(_40);
+        goto -> bb43;
+    }
+
+    bb41: {
+        StorageDead(_48);
+        _46 = &_47;
+        _0 = PortfolioV16ViewMut::<'_>::validate_with_market::<T>(move _45, move _46) -> [return: bb42, unwind continue];
+    }
+
+    bb42: {
+        StorageDead(_45);
+        StorageDead(_47);
+        StorageDead(_46);
+        goto -> bb46;
+    }
+
+    bb43: {
+        goto -> bb44;
+    }
+
+    bb44: {
+        goto -> bb46;
+    }
+
+    bb45: {
+        StorageDead(_13);
+        goto -> bb46;
+    }
+
+    bb46: {
+        return;
+    }
+}

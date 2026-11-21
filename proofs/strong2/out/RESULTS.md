@@ -2,45 +2,134 @@
 
 Pin: engine: dcccrypto/percolator@c38b6b1e, src/v16.rs blob 7d3edfe86be1a80f49793cf551c39687a8766a4d; rustc 1.99.0-nightly (d0babd8b6 2026-07-15); cargo rustc -j 4 --release --lib -- -Zunpretty=mir -Zinline-mir=no
 
-`lake build`: Build completed successfully (25 jobs).
+`lake build`: Build completed successfully (78 jobs).. Modules generated: 56; with `main` on axioms [propext, Quot.sound]: 56.
 
-## Rows
+## Ledger rows (statement: every `Ok` return; `est` = the check holds after, `pres` = it holds after if it held before)
 
-| Row | Function | Result | Lean module | Status | Excluded Ok sites |
-|---|---|---|---|---|---|
-| T15.account | `close_resolved_account_not_atomic` | partial: Ok returns outside the excluded blocks, pres (4 of 7 `Ok(..)` sites) | `T15_account_checked_paths` | kernel-checked | bb104 → v16.rs:26631, bb113 → v16.rs:26634, bb55 → v16.rs:26614 |
-| T15.header | `close_resolved_account_not_atomic` | partial: Ok returns outside the excluded blocks, pres (5 of 7 `Ok(..)` sites) | `T15_header_checked_paths` | kernel-checked | bb104 → v16.rs:26631, bb113 → v16.rs:26634 |
-| T18.account | `convert_released_pnl_to_capital_not_atomic` | whole row, pres | `T18_account` | kernel-checked | none |
-| T18.header | `convert_released_pnl_to_capital_not_atomic` | whole row, pres | `T18_header` | kernel-checked | none |
+- `.header` rows kernel-checked: **34** (24 est, 10 pres)
+- `.account` rows kernel-checked: **13** (9 est, 4 pres)
+- of these, rows the sibling run (`proofs/novel`) left open on the same text: **T18.header, T18.account**
+- rows the sibling run closed that this run does not: none
 
-For each target: MIR sha256, blocks, and the callee summaries its abstract program uses.
+| Row | Function | Class | This run | Sibling | Lean theorem | Status |
+|---|---|---|---|---|---|---|
+| T06.header | `add_account_source_positive_pnl_not_atomic` | final | pres | pres | `S_add_account_source_positive_pnl_not_atomic.row` | kernel-checked |
+| T06.account | `add_account_source_positive_pnl_not_atomic` | - | est | est | `S_add_account_source_positive_pnl_not_atomic.row` | kernel-checked |
+| T11.header | `canonicalize_retired_empty_asset_slot_not_atomic` | final | est | est | `S_canonicalize_retired_empty_asset_slot_not_atomic.row` | kernel-checked |
+| T13.header | `charge_account_backing_fee_not_atomic` | final | pres | pres | `S_charge_account_backing_fee_not_atomic.row` | kernel-checked |
+| T13.account | `charge_account_backing_fee_not_atomic` | - | pres | pres | `S_charge_account_backing_fee_not_atomic.row` | kernel-checked |
+| T14.header | `claim_resolved_payout_topup_not_atomic` | final | est | est | `S_claim_resolved_payout_topup_not_atomic.row` | kernel-checked |
+| T14.account | `claim_resolved_payout_topup_not_atomic` | - | est | est | `S_claim_resolved_payout_topup_not_atomic.row` | kernel-checked |
+| T18.header | `convert_released_pnl_to_capital_not_atomic` | final | pres | open | `S_convert_released_pnl_to_capital_not_atomic.row` | kernel-checked |
+| T18.account | `convert_released_pnl_to_capital_not_atomic` | - | pres | open | `S_convert_released_pnl_to_capital_not_atomic.row` | kernel-checked |
+| T21.header | `credit_account_from_insurance_not_atomic` | final | pres | pres | `S_credit_account_from_insurance_not_atomic.row` | kernel-checked |
+| T21.account | `credit_account_from_insurance_not_atomic` | - | pres | pres | `S_credit_account_from_insurance_not_atomic.row` | kernel-checked |
+| T22.header | `credit_backing_provider_earnings_not_atomic` | final | pres | pres | `S_credit_backing_provider_earnings_not_atomic.row` | kernel-checked |
+| T23.header | `credit_domain_insurance_budget_not_atomic` | delegates | est | est | `S_credit_domain_insurance_budget_not_atomic.row` | kernel-checked |
+| T24.header | `credit_domain_insurance_budgets_not_atomic` | final | est | est | `S_credit_domain_insurance_budgets_not_atomic.row` | kernel-checked |
+| T25.header | `cure_and_cancel_close_not_atomic` | final | est | est | `S_cure_and_cancel_close_not_atomic.row` | kernel-checked |
+| T25.account | `cure_and_cancel_close_not_atomic` | - | est | est | `S_cure_and_cancel_close_not_atomic.row` | kernel-checked |
+| T26.header | `deposit_domain_insurance_not_atomic` | final | est | est | `S_deposit_domain_insurance_not_atomic.row` | kernel-checked |
+| T27.header | `deposit_fresh_counterparty_backing_not_atomic` | final | est | est | `S_deposit_fresh_counterparty_backing_not_atomic.row` | kernel-checked |
+| T28.header | `deposit_not_atomic` | final | pres | pres | `S_deposit_not_atomic.row` | kernel-checked |
+| T28.account | `deposit_not_atomic` | - | est | est | `S_deposit_not_atomic.row` | kernel-checked |
+| T30.header | `execute_batch_with_fee_loss_stale_scoped_not_atomic` | final | est | est | `S_execute_batch_with_fee_loss_stale_scoped_not_atomic.row` | kernel-checked |
+| T30.account | `execute_batch_with_fee_loss_stale_scoped_not_atomic` | - | est | est | `S_execute_batch_with_fee_loss_stale_scoped_not_atomic.row` | kernel-checked |
+| T31.header | `execute_trade_with_fee_loss_stale_scoped_not_atomic` | delegates | est | est | `S_execute_trade_with_fee_loss_stale_scoped_not_atomic.row` | kernel-checked |
+| T31.account | `execute_trade_with_fee_loss_stale_scoped_not_atomic` | - | est | est | `S_execute_trade_with_fee_loss_stale_scoped_not_atomic.row` | kernel-checked |
+| T34.header | `force_asset_recovery_not_atomic` | final | est | est | `S_force_asset_recovery_not_atomic.row` | kernel-checked |
+| T35.header | `force_close_recovery_pair_not_atomic` | delegates | est | est | `S_force_close_recovery_pair_not_atomic.row` | kernel-checked |
+| T35.account | `force_close_recovery_pair_not_atomic` | - | est | est | `S_force_close_recovery_pair_not_atomic.row` | kernel-checked |
+| T43.header | `mark_asset_drain_only_not_atomic` | final | pres | pres | `S_mark_asset_drain_only_not_atomic.row` | kernel-checked |
+| T46.header | `recredit_terminal_claim_free_residual_for_asset_not_atomic` | final | est | est | `S_recredit_terminal_claim_free_residual_for_asset_not_atomic.row` | kernel-checked |
+| T48.header | `release_account_source_credit_liens_if_unneeded_not_atomic` | - | est | est | `S_release_account_source_credit_liens_if_unneeded_not_atomic.row` | kernel-checked |
+| T48.account | `release_account_source_credit_liens_if_unneeded_not_atomic` | - | est | est | `S_release_account_source_credit_liens_if_unneeded_not_atomic.row` | kernel-checked |
+| T49.header | `release_source_credit_lien_from_counterparty_not_atomic` | - | est | est | `S_release_source_credit_lien_from_counterparty_not_atomic.row` | kernel-checked |
+| T50.header | `release_source_credit_lien_from_insurance_not_atomic` | - | est | est | `S_release_source_credit_lien_from_insurance_not_atomic.row` | kernel-checked |
+| T52.header | `reset_empty_asset_oracle_anchor_not_atomic` | final | est | est | `S_reset_empty_asset_oracle_anchor_not_atomic.row` | kernel-checked |
+| T53.header | `resolve_market_not_atomic` | final | est | est | `S_resolve_market_not_atomic.row` | kernel-checked |
+| T54.header | `restart_empty_asset_preserving_insurance_budget_not_atomic` | final | est | est | `S_restart_empty_asset_preserving_insurance_budget_not_atomic.row` | kernel-checked |
+| T55.header | `retire_empty_asset_not_atomic` | final | est | est | `S_retire_empty_asset_not_atomic.row` | kernel-checked |
+| T56.header | `retire_terminal_unbudgeted_insurance_not_atomic` | final | est | est | `S_retire_terminal_unbudgeted_insurance_not_atomic.row` | kernel-checked |
+| T57.header | `set_asset_raw_oracle_target_not_atomic` | delegates | est | est | `S_set_asset_raw_oracle_target_not_atomic.row` | kernel-checked |
+| T58.header | `set_asset_raw_oracle_targets_not_atomic` | final | est | est | `S_set_asset_raw_oracle_targets_not_atomic.row` | kernel-checked |
+| T59.header | `sync_account_fee_to_slot_not_atomic` | final | pres | pres | `S_sync_account_fee_to_slot_not_atomic.row` | kernel-checked |
+| T59.account | `sync_account_fee_to_slot_not_atomic` | - | est | est | `S_sync_account_fee_to_slot_not_atomic.row` | kernel-checked |
+| T60.header | `withdraw_backing_provider_earnings_not_atomic` | final | pres | pres | `S_withdraw_backing_provider_earnings_not_atomic.row` | kernel-checked |
+| T61.header | `withdraw_domain_insurance_not_atomic` | final | est | est | `S_withdraw_domain_insurance_not_atomic.row` | kernel-checked |
+| T62.header | `withdraw_fresh_counterparty_backing_not_atomic` | final | est | est | `S_withdraw_fresh_counterparty_backing_not_atomic.row` | kernel-checked |
+| T63.header | `withdraw_not_atomic` | final | pres | pres | `S_withdraw_not_atomic.row` | kernel-checked |
+| T63.account | `withdraw_not_atomic` | - | pres | pres | `S_withdraw_not_atomic.row` | kernel-checked |
 
-- T15 `close_resolved_account_not_atomic`: MIR sha256 `45f0ed9671e3d808a6c3d83eab81363e8242c2214e5ba0fcc42130eda498d34d`, 257 blocks; uses: `clear_fully_diluted_resolved_receipt_if_terminal`, `expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic`, `prepare_one_source_domain_for_resolved_close_not_atomic`, `realize_one_source_domain_for_resolved_close_not_atomic`, `sync_account_fee_to_slot_not_atomic`
-- T18 `convert_released_pnl_to_capital_not_atomic`: MIR sha256 `5c7737fcb443166aa0e5d651a54c88b4a51491da28f19c9901c21d0ca1d1ead0`, 49 blocks; uses: `convert_released_pnl_to_capital_core_not_atomic`, `release_account_source_credit_liens_if_unneeded_not_atomic`
+Open in this run (function is in the MIR): T01.header, T02.header, T09.header, T10.header, T15.header, T15.account, T29.header, T29.account, T32.header, T33.header, T36.header, T36.account, T37.header, T37.account, T42.header, T42.account, T44.header, T44.account, T45.header, T45.account, T47.header, T47.account
 
-## Callee summaries used, each certified by its own module
+## T15 `close_resolved_account_not_atomic`
 
-A summary is a list of clauses about the callee's return: `result = 0` is `Ok`; `payload` is the
-integer value or enum discriminant of the `Ok` payload (Option: None = 0, Some = 1).
+MIR sha256 `45f0ed9671e3d808a6c3d83eab81363e8242c2214e5ba0fcc42130eda498d34d`, 257 blocks. `Ok(..)` assignments (block → source line): bb22 → v16.rs:26594, bb41 → v16.rs:26605, bb55 → v16.rs:26614, bb104 → v16.rs:26631, bb113 → v16.rs:26634, bb139 → v16.rs:26641, bb240 → v16.rs:26702.
 
-| Callee | Clauses | Module status | Uses |
+- `S_close_resolved_account_not_atomic` (kernel-checked), whole function, no exclusion, no assumption: result = 0 ∧ payload = 1: checks [0, 1] hold
+- T15.account partial: 4 of 7 `Ok(..)` sites; excluded: bb104 → v16.rs:26631, bb113 → v16.rs:26634, bb55 → v16.rs:26614. `T15_account_checked_paths.row` (kernel-checked)
+- T15.account reduction: whole row IF these callees preserve the check on `Ok` (ASSUMED, not proved): `detach_solvent_active_legs_for_resolved_close`, `expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic`, `prepare_one_source_domain_for_resolved_close_not_atomic`, `settle_account_side_effects_not_atomic`, `settle_negative_pnl_from_principal_not_atomic`, `settle_resolved_bankruptcy_negative_pnl`. `T15_account_conditional.row` (kernel-checked)
+- T15.header partial: 5 of 7 `Ok(..)` sites; excluded: bb104 → v16.rs:26631, bb113 → v16.rs:26634. `T15_header_checked_paths.row` (kernel-checked)
+- T15.header reduction: whole row IF these callees preserve the check on `Ok` (ASSUMED, not proved): `detach_solvent_active_legs_for_resolved_close`, `settle_account_side_effects_not_atomic`, `settle_negative_pnl_from_principal_not_atomic`, `settle_resolved_bankruptcy_negative_pnl`. `T15_header_conditional.row` (kernel-checked)
+
+## Callee summaries used (each is the goal of its own module)
+
+`result = 0` is `Ok`; `payload` is the integer value or enum discriminant of the `Ok` payload (Option: None = 0, Some = 1; a plain crate enum: its variant index).
+
+| Function | Clauses | Module status | Uses |
 |---|---|---|---|
+| `add_account_source_positive_pnl_not_atomic` | result = 0: checks [1] hold; checks [0] preserved | kernel-checked | none |
 | `apply_released_pnl_conversion_core_not_atomic` | result = 0 ∧ payload = 0: impossible | kernel-checked | `apply_released_pnl_conversion_with_consumption_core_not_atomic` |
 | `apply_released_pnl_conversion_with_consumption_core_not_atomic` | result = 0 ∧ payload = 0: impossible | kernel-checked | none |
+| `canonicalize_retired_empty_asset_slot_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
+| `charge_account_backing_fee_not_atomic` | result = 0: checks [0, 1] preserved<br>result = 0 ∧ payload = 1: checks [0, 1] hold | kernel-checked | none |
 | `charge_account_fee_current_not_atomic` | result = 0 ∧ payload = 0: checks [0, 1] preserved | kernel-checked | none |
+| `claim_resolved_payout_topup_not_atomic` | result = 0: checks [0, 1] hold | kernel-checked | none |
 | `clear_fully_diluted_resolved_receipt_if_terminal` | result = 0: checks [0] preserved | kernel-checked | none |
+| `close_resolved_account_not_atomic` | result = 0 ∧ payload = 1: checks [0, 1] hold | kernel-checked | `clear_fully_diluted_resolved_receipt_if_terminal`, `expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic`, `prepare_one_source_domain_for_resolved_close_not_atomic`, `realize_one_source_domain_for_resolved_close_not_atomic`, `sync_account_fee_to_slot_not_atomic` |
 | `collect_account_backing_utilization_fee_for_domain_not_atomic` | result = 0 ∧ payload = 0: checks [0] preserved | kernel-checked | none |
 | `convert_released_pnl_to_capital_core_not_atomic` | result = 0 ∧ payload = 0: checks [0, 1] preserved | kernel-checked | `apply_released_pnl_conversion_core_not_atomic` |
+| `convert_released_pnl_to_capital_not_atomic` | result = 0: checks [0, 1] preserved<br>result = 0 ∧ payload = 1: checks [0, 1] hold | kernel-checked | `convert_released_pnl_to_capital_core_not_atomic`, `release_account_source_credit_liens_if_unneeded_not_atomic` |
+| `credit_account_from_insurance_not_atomic` | result = 0: checks [0, 1] preserved | kernel-checked | none |
+| `credit_backing_provider_earnings_not_atomic` | result = 0: checks [0] preserved | kernel-checked | none |
+| `credit_domain_insurance_budget_not_atomic` | result = 0: checks [0] hold | kernel-checked | `credit_domain_insurance_budgets_not_atomic` |
+| `credit_domain_insurance_budgets_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
+| `cure_and_cancel_close_not_atomic` | result = 0: checks [0, 1] hold | kernel-checked | `cure_and_cancel_close_with_cert_not_atomic` |
+| `cure_and_cancel_close_with_cert_not_atomic` | result = 0: checks [0, 1] hold | kernel-checked | none |
+| `deposit_domain_insurance_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
+| `deposit_fresh_counterparty_backing_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
+| `deposit_not_atomic` | result = 0: checks [1] hold; checks [0] preserved | kernel-checked | none |
+| `execute_batch_band_scoped_not_atomic` | result = 0: checks [0, 1, 2] hold | kernel-checked | none |
+| `execute_batch_with_fee_loss_stale_scoped_not_atomic` | result = 0: checks [0, 1, 2] hold | kernel-checked | `execute_batch_band_scoped_not_atomic` |
+| `execute_trade_with_fee_loss_stale_scoped_not_atomic` | result = 0: checks [0, 1, 2] hold | kernel-checked | `execute_batch_with_fee_loss_stale_scoped_not_atomic` |
 | `expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic` | result = 0 ∧ payload = 0: checks [0, 1] preserved | kernel-checked | none |
+| `force_asset_recovery_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
+| `force_close_recovery_pair_not_atomic` | result = 0 ∧ payload = 0: impossible<br>result = 0: checks [0, 1, 2] hold | kernel-checked | `execute_trade_with_fee_loss_stale_scoped_not_atomic` |
+| `mark_asset_drain_only_not_atomic` | result = 0: checks [0] preserved | kernel-checked | none |
+| `normalize_terminal_empty_asset_history_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
 | `prepare_one_source_domain_for_resolved_close_not_atomic` | result = 0: checks [0] preserved<br>result = 0 ∧ payload = 1: checks [0, 1] hold | kernel-checked | `collect_account_backing_utilization_fee_for_domain_not_atomic`, `release_account_source_credit_lien_for_domain_not_atomic`, `retire_source_credit_lien_from_counterparty_impaired_not_atomic` |
 | `realize_one_source_domain_for_resolved_close_not_atomic` | result = 0 ∧ payload = 0: checks [0] preserved | kernel-checked | `apply_released_pnl_conversion_with_consumption_core_not_atomic` |
+| `recredit_terminal_claim_free_residual_for_asset_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
 | `release_account_source_credit_lien_for_domain_not_atomic` | result = 0: checks [0] preserved | kernel-checked | `release_source_credit_lien_from_counterparty_terminal_not_atomic`, `release_source_credit_lien_from_insurance_not_atomic`, `release_source_credit_lien_from_insurance_terminal_not_atomic` |
 | `release_account_source_credit_liens_if_unneeded_core_not_atomic` | result = 0: checks [0, 1] hold | kernel-checked | `collect_account_backing_utilization_fee_for_domain_not_atomic`, `release_account_source_credit_lien_for_domain_not_atomic`, `retire_source_credit_lien_from_counterparty_impaired_not_atomic` |
 | `release_account_source_credit_liens_if_unneeded_not_atomic` | result = 0: checks [0, 1] hold | kernel-checked | `release_account_source_credit_liens_if_unneeded_core_not_atomic` |
+| `release_source_credit_lien_from_counterparty_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
 | `release_source_credit_lien_from_counterparty_terminal_not_atomic` | result = 0: checks [0] preserved | kernel-checked | none |
 | `release_source_credit_lien_from_insurance_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
 | `release_source_credit_lien_from_insurance_terminal_not_atomic` | result = 0: checks [0] preserved | kernel-checked | none |
+| `reset_empty_asset_oracle_anchor_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
+| `resolve_market_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
+| `restart_empty_asset_preserving_insurance_budget_not_atomic` | result = 0: checks [0] hold | kernel-checked | `normalize_terminal_empty_asset_history_not_atomic` |
+| `retire_empty_asset_not_atomic` | result = 0: checks [0] hold | kernel-checked | `normalize_terminal_empty_asset_history_not_atomic` |
 | `retire_source_credit_lien_from_counterparty_impaired_not_atomic` | result = 0: checks [0] preserved | kernel-checked | none |
+| `retire_terminal_unbudgeted_insurance_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
+| `set_asset_raw_oracle_target_not_atomic` | result = 0: checks [0] hold | kernel-checked | `set_asset_raw_oracle_targets_not_atomic` |
+| `set_asset_raw_oracle_targets_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
 | `sync_account_fee_to_slot_not_atomic` | result = 0: checks [1] hold; checks [0] preserved<br>result = 0 ∧ payload = 1: checks [0] hold | kernel-checked | `charge_account_fee_current_not_atomic` |
+| `withdraw_backing_provider_earnings_not_atomic` | result = 0: checks [0] preserved | kernel-checked | none |
+| `withdraw_domain_insurance_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
+| `withdraw_fresh_counterparty_backing_not_atomic` | result = 0: checks [0] hold | kernel-checked | none |
+| `withdraw_not_atomic` | result = 0: checks [0, 1] preserved | kernel-checked | none |
 
-Methods analysed to find these: 188. Unsupported (no summary; calls to them are treated as able to write everything): 0.
+Methods analysed: 335. Unsupported (no summary; calls to them are treated as able to write everything): 0. Plain crate enums in the R9 table: 26.

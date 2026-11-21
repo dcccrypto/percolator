@@ -69,6 +69,61 @@ def enum_variant(rhs, enum, variants):
     return None, None
 
 
+ENUMS = {}   # R9: crate enum name -> variant names in declaration order (filled by run2.enum_table)
+
+
+def enum_table(src_path):
+    """Plain enums of src/v16.rs: declared at top level without generics, no explicit
+    discriminant, no attribute on a variant, name unique in the file. Variant index = discriminant."""
+    lines = open(src_path).read().split("\n")
+    out, seen, bad = {}, {}, set()
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^(?:pub(?:\([a-z]+\))? )?enum (\w+) \{$", lines[i])
+        m2 = re.match(r"^\s*(?:pub(?:\([a-z]+\))? )?enum (\w+)", lines[i])
+        if m2:
+            seen[m2.group(1)] = seen.get(m2.group(1), 0) + 1
+        if not m:
+            i += 1
+            continue
+        name, vs, ok, depth = m.group(1), [], True, 1
+        i += 1
+        while i < len(lines) and depth > 0:
+            ln = lines[i]
+            st = ln.strip()
+            if depth == 1 and st and not st.startswith("//"):
+                vm = re.match(r"^    (\w+)\s*(\{.*\}|\(.*\)|\{|\()?\s*,?$", ln)
+                if st == "}":
+                    pass
+                elif st.startswith("#["):
+                    ok = False
+                elif vm and "=" not in st.split("{")[0].split("(")[0]:
+                    vs.append(vm.group(1))
+                else:
+                    ok = False
+            depth += ln.count("{") + ln.count("(") - ln.count("}") - ln.count(")")
+            i += 1
+        if ok and vs:
+            out[name] = vs
+        else:
+            bad.add(name)
+    return {k: v for k, v in out.items() if seen.get(k) == 1 and k not in bad}
+
+
+def crate_enum_variant(r, want):
+    """Index of the variant if r is `[const ][v16::]NAME::VARIANT[(..)|{ .. }]` for the enum
+    NAME == want of the table; else None."""
+    r = r.strip()
+    if r.startswith("const "):
+        r = r[6:]
+    if r.startswith("v16::"):
+        r = r[5:]
+    m = re.fullmatch(r"(\w+)::(\w+)(?: \{.*\}|\(.*\))?", r)
+    if not m or m.group(1) != want or want not in ENUMS or m.group(2) not in ENUMS[want]:
+        return None
+    return ENUMS[want].index(m.group(2))
+
+
 def is_option_pred(fnpath, name):
     """Exactly `Option::<ARGS>::is_some` / `is_none` with ARGS bracket-matched."""
     if not fnpath.startswith("Option::<"):
@@ -80,9 +135,11 @@ def is_option_pred(fnpath, name):
 class T2(X.Translator):
     """provider: object with .summary(fnpath) -> None | {"args": roles, "cls": [clause]}"""
 
-    def __init__(self, fn, provider=None):
+    def __init__(self, fn, provider=None, assume=None):
         super().__init__(fn, {})
         self.provider = provider
+        self.assume = assume or {}   # callee path -> extra clauses, ASSUMED (only in *_conditional modules)
+        self.used_assumed = []
         self.used2 = []   # (block, fnpath)
         self.cur = None   # (block, index of the statement being translated)
 
@@ -156,6 +213,12 @@ class T2(X.Translator):
                     pay = ("const", cv)
                 elif ov is not None:
                     pay = ("const", 0 if ov == "None" else 1)
+                else:
+                    # R9: a variant of a plain crate enum, when it is the Result's Ok type
+                    tm = re.match(r"core::result::Result<v16::(\w+), ", self.decl(l))
+                    ci = crate_enum_variant(inner, tm.group(1)) if tm else None
+                    if ci is not None:
+                        pay = ("const", ci)
             stmts.append(("okv", l, pay))
             return
         # R4: Option variants
@@ -163,6 +226,13 @@ class T2(X.Translator):
         if v is not None and self.decl(l).startswith("core::option::Option<"):
             stmts.append(("setD", l, 0 if v == "None" else 1))
             return
+        # R9: a variant of a plain crate enum
+        tm = re.fullmatch(r"v16::(\w+)", self.decl(l))
+        if tm:
+            ci = crate_enum_variant(r, tm.group(1))
+            if ci is not None:
+                stmts.append(("setD", l, ci))
+                return
         # R5: comparison of an integer/bool local with a constant
         m = re.fullmatch(r"(Eq|Ne)\((.*)\)", r)
         if m:
@@ -259,6 +329,12 @@ class T2(X.Translator):
             post.append((((dl, "eq", 0),), (tuple(est), ())))
         else:
             sm = self.provider.summary(fnpath) if self.provider is not None else None
+            if fnpath in self.assume:
+                # An ASSUMED contract, stated directly about this call site and this function's
+                # own check numbers. Only *_conditional modules have any; it is a hypothesis.
+                for gs, c in self.assume[fnpath]:
+                    post.append((tuple((dl if g[0] == 0 else PO + dl, g[1], g[2]) for g in gs), c))
+                self.used_assumed.append((b, fnpath))
             if sm is not None:
                 # R8: the callee's certified clauses speak about its market and account arguments
                 roles = sm["args"]
@@ -746,9 +822,31 @@ def fixpoint2(ir, init, exempt=()):
                 if len(raws) > 1:
                     cc += [c for c in gen_cands(nr) if all(g[0] in live[b] for g in c[0])]
         cf = list(dict.fromkeys(cf))
-        cc = list(dict.fromkeys(cc))
+        # one check per candidate clause: a join may keep "preserved" where one side has "holds"
+        atoms = []
+        for gs, c in cc:
+            if c == "bot":
+                atoms.append((gs, c))
+                continue
+            for k in c[0]:
+                atoms.append((gs, ((k,), ())))
+            for k in tuple(c[0]) + tuple(c[1]):
+                atoms.append((gs, ((), (k,))))
+        cc = list(dict.fromkeys(atoms))
         facts = [f for f in cf if all(entails(r, fact_cl(f)) for r in raws)]
-        cls = [c for c in cc if all(entails(r, c) for r in raws)]
+        kept = [c for c in cc if all(entails(r, c) for r in raws)]
+        by, order = {}, []
+        for gs, c in kept:
+            if gs not in by:
+                by[gs] = [set(), set(), False]
+                order.append(gs)
+            if c == "bot":
+                by[gs][2] = True
+            else:
+                by[gs][0] |= set(c[0])
+                by[gs][1] |= set(c[1])
+        cls = [(gs, "bot") if by[gs][2] else (gs, (tuple(sorted(by[gs][0])), tuple(sorted(by[gs][1] - by[gs][0]))))
+               for gs in order]
         # drop clauses that follow from the kept facts and the other kept clauses (smaller certificate)
         st = St(facts, cls)
         st = prune(st)
@@ -913,17 +1011,22 @@ def emit_lean(genns, ns, doc, ir, inv, goal_cls, exempt, init, row=None, decide_
              "    (hret : Returns chk %s cfg w0 b w1 env1) :\n"
              "    ∀ c, c ∈ goal.cls → Clause.sat chk w0 w1 env1 c :=\n"
              "  checkCert_sound chk cert hret\n" % L(exempt))
-    if row is not None:
-        est, pres = row
+    for ri, rw in enumerate(row or []):
+        guards, est, pres, text = rw
+        nm = "row" if ri == 0 else "row%d" % (ri + 1)
         concl = ["chk %d w1 = true" % k for k in est] + ["(chk %d w0 = true → chk %d w1 = true)" % (k, k) for k in pres]
-        cl = ((((0, "eq", 0),), (tuple(est), tuple(pres))))
-        o.append("/-- The ledger row: every `Ok` return%s. -/" % (
-            " that does not pass through block(s) %s" % L(exempt) if exempt else ""))
-        o.append("theorem row {W : Type} (chk : Nat → W → Bool) {w0 w1 : W} {b : Block} {env1 : Env}\n"
-                 "    (hret : Returns chk %s cfg w0 b w1 env1) (hok : env1 0 = 0) :\n    %s := by"
-                 % (L(exempt), " ∧ ".join(concl)))
+        cl = (tuple(guards), (tuple(est), tuple(pres)))
+        hyps = " ".join("(h%d : env1 %d %s %d)" % (i, g[0], "=" if g[1] == "eq" else "≠", g[2]) for i, g in enumerate(guards))
+        o.append("/-- %s%s -/" % (text, " Executions that do not pass through block(s) %s." % L(exempt) if exempt else ""))
+        o.append("theorem %s {W : Type} (chk : Nat → W → Bool) {w0 w1 : W} {b : Block} {env1 : Env}\n"
+                 "    (hret : Returns chk %s cfg w0 b w1 env1) %s :\n    %s := by"
+                 % (nm, L(exempt), hyps, " ∧ ".join(concl)))
         o.append("  have h := main chk hret %s (by simp [goal])" % lean_cl(cl))
-        o.append("  have h2 := h (by intro g hg; simp at hg; subst hg; exact hok)")
+        if guards:
+            o.append("  have h2 := h (by intro g hg; simp at hg; rcases hg with %s <;> first %s)" % (
+                " | ".join(["rfl"] * len(guards)), " ".join("| exact h%d" % i for i in range(len(guards)))))
+        else:
+            o.append("  have h2 := h (by intro g hg; simp at hg)")
         parts = ["h2.1 %d (by simp)" % k for k in est] + ["h2.2 %d (by simp)" % k for k in pres]
         o.append("  exact ⟨%s⟩" % ", ".join(parts) if len(parts) > 1 else "  exact %s" % parts[0])
         o.append("")

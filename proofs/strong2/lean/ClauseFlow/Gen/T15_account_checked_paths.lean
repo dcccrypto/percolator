@@ -45,7 +45,7 @@ def cfg : Cfg := [
   /- bb19 -/ ⟨[.havoc 25, .havoc 1000025, .havoc 23, .havoc 1000023], .call [22, 1000022] 20 [0, 1] []⟩,
   /- bb20 -/ ⟨[], .switch 22 [(0, 23)] (some 21)⟩,
   /- bb21 -/ ⟨[.havoc 24, .havoc 1000024, .havoc 23, .havoc 1000023], .goto 22⟩,
-  /- bb22 -/ ⟨[.setD 0 0, .havoc 1000000, .havoc 22, .havoc 1000022, .havoc 20, .havoc 1000020, .havoc 19, .havoc 1000019], .goto 254⟩,
+  /- bb22 -/ ⟨[.setD 0 0, .setD 1000000 0, .havoc 22, .havoc 1000022, .havoc 20, .havoc 1000020, .havoc 19, .havoc 1000019], .goto 254⟩,
   /- bb23 -/ ⟨[.havoc 24, .havoc 1000024, .havoc 23, .havoc 1000023, .havoc 22, .havoc 1000022, .havoc 20, .havoc 1000020, .havoc 19, .havoc 1000019], .goto 24⟩,
   /- bb24 -/ ⟨[.havoc 13, .havoc 1000013, .havoc 33, .havoc 1000033], .call [32, 1000032] 25 [0, 1] []⟩,
   /- bb25 -/ ⟨[.havoc 33, .havoc 1000033, .havoc 31, .havoc 1000031], .call [30, 1000030] 26 [] [⟨[(30, .eq 0), (1000030, .eq 0)], .chk [] [0]⟩]⟩,
@@ -64,7 +64,7 @@ def cfg : Cfg := [
   /- bb38 -/ ⟨[.havoc 47, .havoc 1000047, .havoc 45, .havoc 1000045], .call [43, 1000043] 39 [0, 1] [⟨[(43, .eq 0)], .chk [1] []⟩]⟩,
   /- bb39 -/ ⟨[.havoc 44, .havoc 1000044], .branch 42 43 1000042 1000043 40⟩,
   /- bb40 -/ ⟨[.havoc 43, .havoc 1000043, .copy 48 42, .copy 1000048 1000042], .switch 48 [(0, 41), (1, 42)] (some 3)⟩,
-  /- bb41 -/ ⟨[.havoc 46, .havoc 1000046, .havoc 45, .havoc 1000045, .havoc 42, .havoc 1000042, .setD 0 0, .havoc 1000000], .goto 253⟩,
+  /- bb41 -/ ⟨[.havoc 46, .havoc 1000046, .havoc 45, .havoc 1000045, .havoc 42, .havoc 1000042, .setD 0 0, .setD 1000000 0], .goto 253⟩,
   /- bb42 -/ ⟨[.havoc 49, .havoc 1000049, .setD 0 1, .havoc 1000000], .goto 43⟩,
   /- bb43 -/ ⟨[.havoc 49, .havoc 1000049, .havoc 46, .havoc 1000046, .havoc 45, .havoc 1000045, .havoc 42, .havoc 1000042], .goto 253⟩,
   /- bb44 -/ ⟨[.havoc 32, .havoc 1000032, .havoc 31, .havoc 1000031, .havoc 29, .havoc 1000029, .havoc 28, .havoc 1000028, .havoc 27, .havoc 1000027, .havoc 26, .havoc 1000026, .havoc 250, .havoc 1000250, .havoc 53, .havoc 1000053], .call [52, 1000052] 45 [0, 1] []⟩,
@@ -78,7 +78,7 @@ def cfg : Cfg := [
   /- bb52 -/ ⟨[.havoc 60, .havoc 1000060], .call [59, 1000059] 53 [0, 1] [⟨[(59, .eq 0)], .chk [0] []⟩]⟩,
   /- bb53 -/ ⟨[.havoc 60, .havoc 1000060], .branch 58 59 1000058 1000059 54⟩,
   /- bb54 -/ ⟨[.havoc 59, .havoc 1000059, .copy 61 58, .copy 1000061 1000058], .switch 61 [(0, 55), (1, 56)] (some 3)⟩,
-  /- bb55 -/ ⟨[.havoc 58, .havoc 1000058, .setD 0 0, .havoc 1000000], .goto 252⟩,
+  /- bb55 -/ ⟨[.havoc 58, .havoc 1000058, .setD 0 0, .setD 1000000 0], .goto 252⟩,
   /- bb56 -/ ⟨[.havoc 62, .havoc 1000062, .setD 0 1, .havoc 1000000], .goto 57⟩,
   /- bb57 -/ ⟨[.havoc 62, .havoc 1000062, .havoc 58, .havoc 1000058], .goto 252⟩,
   /- bb58 -/ ⟨[.havoc 66, .havoc 1000066], .call [64, 1000064] 59 [] [⟨[(64, .eq 0)], .chk [1] [0]⟩, ⟨[(64, .eq 0), (1000064, .eq 1)], .chk [0] []⟩]⟩,
@@ -127,7 +127,7 @@ def cfg : Cfg := [
   /- bb101 -/ ⟨[.havoc 102, .havoc 1000102, .havoc 98, .havoc 1000098], .goto 251⟩,
   /- bb102 -/ ⟨[.havoc 98, .havoc 1000098], .goto 104⟩,
   /- bb103 -/ ⟨[.havoc 98, .havoc 1000098, .havoc 89, .havoc 1000089, .havoc 86, .havoc 1000086, .havoc 257, .havoc 1000257, .havoc 106, .havoc 1000106], .call [105, 1000105] 105 [0, 1] []⟩,
-  /- bb104 -/ ⟨[.setD 0 0, .havoc 1000000], .goto 251⟩,
+  /- bb104 -/ ⟨[.setD 0 0, .setD 1000000 0], .goto 251⟩,
   /- bb105 -/ ⟨[.havoc 106, .havoc 1000106, .havoc 104, .havoc 1000104], .switch 104 [(0, 114)] (some 106)⟩,
   /- bb106 -/ ⟨[.havoc 105, .havoc 1000105, .havoc 109, .havoc 1000109], .call [108, 1000108] 107 [0, 1] []⟩,
   /- bb107 -/ ⟨[.havoc 109, .havoc 1000109], .branch 107 108 1000107 1000108 108⟩,
@@ -136,7 +136,7 @@ def cfg : Cfg := [
   /- bb110 -/ ⟨[.havoc 111, .havoc 1000111, .setD 0 1, .havoc 1000000], .goto 111⟩,
   /- bb111 -/ ⟨[.havoc 111, .havoc 1000111, .havoc 107, .havoc 1000107], .goto 250⟩,
   /- bb112 -/ ⟨[.havoc 107, .havoc 1000107], .goto 115⟩,
-  /- bb113 -/ ⟨[.havoc 107, .havoc 1000107, .setD 0 0, .havoc 1000000], .goto 250⟩,
+  /- bb113 -/ ⟨[.havoc 107, .havoc 1000107, .setD 0 0, .setD 1000000 0], .goto 250⟩,
   /- bb114 -/ ⟨[.havoc 105, .havoc 1000105], .goto 115⟩,
   /- bb115 -/ ⟨[.havoc 104, .havoc 1000104], .call [114, 1000114] 116 [] [⟨[(114, .eq 0), (1000114, .eq 0)], .chk [] [0]⟩]⟩,
   /- bb116 -/ ⟨[], .branch 113 114 1000113 1000114 117⟩,
@@ -162,7 +162,7 @@ def cfg : Cfg := [
   /- bb136 -/ ⟨[.havoc 136, .havoc 1000136, .havoc 134, .havoc 1000134], .call [132, 1000132] 137 [0, 1] [⟨[(132, .eq 0)], .chk [1] []⟩]⟩,
   /- bb137 -/ ⟨[.havoc 133, .havoc 1000133], .branch 131 132 1000131 1000132 138⟩,
   /- bb138 -/ ⟨[.havoc 132, .havoc 1000132, .copy 137 131, .copy 1000137 1000131], .switch 137 [(0, 139), (1, 140)] (some 3)⟩,
-  /- bb139 -/ ⟨[.havoc 135, .havoc 1000135, .havoc 134, .havoc 1000134, .havoc 131, .havoc 1000131, .setD 0 0, .havoc 1000000], .goto 256⟩,
+  /- bb139 -/ ⟨[.havoc 135, .havoc 1000135, .havoc 134, .havoc 1000134, .havoc 131, .havoc 1000131, .setD 0 0, .setD 1000000 0], .goto 256⟩,
   /- bb140 -/ ⟨[.havoc 138, .havoc 1000138, .setD 0 1, .havoc 1000000], .goto 141⟩,
   /- bb141 -/ ⟨[.havoc 138, .havoc 1000138, .havoc 135, .havoc 1000135, .havoc 134, .havoc 1000134, .havoc 131, .havoc 1000131], .goto 256⟩,
   /- bb142 -/ ⟨[.setD 164 0, .havoc 1000164, .havoc 258, .havoc 1000258, .havoc 141, .havoc 1000141], .call [140, 1000140] 143 [0, 1] []⟩,
@@ -263,7 +263,7 @@ def cfg : Cfg := [
   /- bb237 -/ ⟨[.havoc 245, .havoc 1000245, .havoc 243, .havoc 1000243], .call [241, 1000241] 238 [0, 1] [⟨[(241, .eq 0)], .chk [1] []⟩]⟩,
   /- bb238 -/ ⟨[.havoc 242, .havoc 1000242], .branch 240 241 1000240 1000241 239⟩,
   /- bb239 -/ ⟨[.havoc 241, .havoc 1000241, .copy 246 240, .copy 1000246 1000240], .switch 246 [(0, 240), (1, 241)] (some 3)⟩,
-  /- bb240 -/ ⟨[.havoc 244, .havoc 1000244, .havoc 243, .havoc 1000243, .havoc 240, .havoc 1000240, .havoc 248, .havoc 1000248, .setD 0 0, .copy 1000000 248, .havoc 248, .havoc 1000248, .havoc 197, .havoc 1000197, .havoc 176, .havoc 1000176, .havoc 167, .havoc 1000167, .havoc 165, .havoc 1000165], .goto 256⟩,
+  /- bb240 -/ ⟨[.havoc 244, .havoc 1000244, .havoc 243, .havoc 1000243, .havoc 240, .havoc 1000240, .setD 248 1, .havoc 1000248, .setD 0 0, .copy 1000000 248, .havoc 248, .havoc 1000248, .havoc 197, .havoc 1000197, .havoc 176, .havoc 1000176, .havoc 167, .havoc 1000167, .havoc 165, .havoc 1000165], .goto 256⟩,
   /- bb241 -/ ⟨[.havoc 247, .havoc 1000247, .setD 0 1, .havoc 1000000], .goto 242⟩,
   /- bb242 -/ ⟨[.havoc 247, .havoc 1000247, .havoc 244, .havoc 1000244, .havoc 243, .havoc 1000243, .havoc 240, .havoc 1000240], .goto 244⟩,
   /- bb243 -/ ⟨[.havoc 226, .havoc 1000226, .havoc 225, .havoc 1000225, .havoc 222, .havoc 1000222], .goto 244⟩,
@@ -536,8 +536,8 @@ def inv : List (Option AState) := [
   /- bb250 -/ some ⟨[(0, .eq 1)], []⟩,
   /- bb251 -/ some ⟨[(0, .eq 1)], []⟩,
   /- bb252 -/ some ⟨[(0, .eq 1)], []⟩,
-  /- bb253 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [0, 1] []⟩]⟩,
-  /- bb254 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [0, 1] []⟩]⟩,
+  /- bb253 -/ some ⟨[], [⟨[(0, .eq 0), (1000000, .ne 0)], .bot⟩, ⟨[(0, .eq 0), (1000000, .ne 1)], .chk [0, 1] []⟩]⟩,
+  /- bb254 -/ some ⟨[], [⟨[(0, .eq 0), (1000000, .ne 0)], .bot⟩, ⟨[(0, .eq 0), (1000000, .ne 1)], .chk [0, 1] []⟩]⟩,
   /- bb255 -/ some ⟨[(0, .eq 1)], [⟨[], .chk [] [0, 1]⟩]⟩,
   /- bb256 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [0, 1] []⟩]⟩
 ]
@@ -554,12 +554,12 @@ theorem main {W : Type} (chk : Nat → W → Bool) {w0 w1 : W} {b : Block} {env1
     ∀ c, c ∈ goal.cls → Clause.sat chk w0 w1 env1 c :=
   checkCert_sound chk cert hret
 
-/-- The ledger row: every `Ok` return that does not pass through block(s) [55, 104, 113]. -/
+/-- Every `Ok` return: check 1 is preserved. Executions that do not pass through block(s) [55, 104, 113]. -/
 theorem row {W : Type} (chk : Nat → W → Bool) {w0 w1 : W} {b : Block} {env1 : Env}
-    (hret : Returns chk [55, 104, 113] cfg w0 b w1 env1) (hok : env1 0 = 0) :
+    (hret : Returns chk [55, 104, 113] cfg w0 b w1 env1) (h0 : env1 0 = 0) :
     (chk 1 w0 = true → chk 1 w1 = true) := by
   have h := main chk hret ⟨[(0, .eq 0)], .chk [] [1]⟩ (by simp [goal])
-  have h2 := h (by intro g hg; simp at hg; subst hg; exact hok)
+  have h2 := h (by intro g hg; simp at hg; rcases hg with rfl <;> first | exact h0)
   exact h2.2 1 (by simp)
 
 end ClauseFlow.Gen.T15_account_checked_paths
