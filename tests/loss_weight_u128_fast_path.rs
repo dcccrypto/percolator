@@ -102,7 +102,13 @@ fn loss_weight_fast_path_matches_u512_on_validated_leg_domain() {
     }
     // small bases (exact-division and remainder cases are dense here)
     for abs in 0..2_000u128 {
-        for a in [MIN_A_SIDE, MIN_A_SIDE + 1, ADL_ONE / 2 + 1, ADL_ONE - 1, ADL_ONE] {
+        for a in [
+            MIN_A_SIDE,
+            MIN_A_SIDE + 1,
+            ADL_ONE / 2 + 1,
+            ADL_ONE - 1,
+            ADL_ONE,
+        ] {
             check(abs, a);
         }
     }
