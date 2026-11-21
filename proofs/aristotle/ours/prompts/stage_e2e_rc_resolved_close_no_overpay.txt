@@ -1,0 +1,23 @@
+First task on a new project. The folder is a small Rust crate cut out of a larger risk engine (dcccrypto/percolator, src/v16.rs at revision c38b6b1e). aristotle/resolved_close_spec.md describes it: which file is engine code copied byte for byte (src/resolved_payout.rs, src/wide_math.rs), which file is a transcription I wrote (src/resolved_payout/close_path.rs), every difference between that transcription and the engine, the invariant Inv, and the properties RC1 to RC7.
+
+What it is about. After a market is resolved, accounts are closed one at a time, by anyone, in any order. Each close pays the account its capital plus a share of a fixed pool (snapshot_residual) and then sets the account's capital to zero whatever was actually paid; the payout is capped by the vault. I want to know that, for any number of accounts and any order of closes, the shares together never exceed the pool, so the cap never cuts a payout, nobody's capital is zeroed unpaid, and the insurance stays in the vault.
+
+What is already established, so that you do not redo it:
+- Bounded model checking (Kani) covers this path for one or two accounts with bounded amounts: the harnesses are named in aristotle/resolved_close_spec.md. It cannot quantify over the number of accounts or the length of a close sequence. That gap is this task and nothing else is.
+- The arithmetic of src/wide_math.rs was proved in an earlier project on the upstream engine, in particular that wide_mul_div_floor_u128(a, b, d) returns floor(a*b/d) when d > 0 and the quotient fits in u128. This file is a later revision of that one (it differs in three places, none of them in that function or in what it calls, as far as a text comparison shows), so treat that contract as an explicit hypothesis here (say so in each result that uses it) and do not spend this task proving the long division again.
+
+In this task prove these properties of aristotle/resolved_close_spec.md, in this order, then stop:
+
+- RC1: under Inv, the receipts are together owed at most snapshot_residual at the ledger's rate. It is pure arithmetic about kernel_recompute_resolved_payout_rate and resolved_receipt_claimable_against_ledger, for a slice of any length.
+- RC2: one call of close_resolved_payout_tail from an Inv state keeps Inv, pays exactly capital plus the receipt's unpaid share, and changes nothing else.
+- RC4: close_all on any slice and any order keeps Inv and pays exactly the capital that left plus what was added to the receipts. It needs a loop invariant; RC2 is the step.
+- RC5: when the order covers every account.
+- RC7: the same as RC2 for claim_resolved_payout_topup_core.
+- RC3: from an Inv state, under the stated condition, the close never returns Err and no execution of it panics. (Not termination, which I understand cannot be stated: only that it cannot end in Err or in a panic.)
+- RC6: two orders that are permutations of each other give the same result.
+
+Finish and record one property before starting the next, so that finished results are kept if the task is stopped early. This task has a fixed size: if a property does not yield after a serious attempt, record it as unresolved with the obstacle in one or two sentences and go on to the next one.
+
+Properties are for all slice lengths and all values the types allow, about calls that return Ok, unless they say otherwise (RC3). Verify the bodies as built with overflow checks on (the crate's release profile). Sums in the properties are mathematical integers, not u128.
+
+Report each property under its label, proved or refuted with a concrete counterexample (the pool, the accounts and the order). Do not weaken a statement silently: if Inv is too weak for a property, or a property is false as written, that is the most useful result of this task; state the version that does hold and go on with that one. List every library function whose documented behaviour a proof assumes instead of covering by its body, and say for each result whether it used the wide_mul_div_floor_u128 contract as a hypothesis. Do not work on any other function of the crate in this task.

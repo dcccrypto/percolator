@@ -1,0 +1,17 @@
+[package]
+name = "percolator-resolved-close-slice"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The resolved-payout value path of the percolator v2.2 engine (src/v16.rs at c38b6b1e), cut out for verification."
+
+[lib]
+name = "percolator_resolved_close_slice"
+path = "src/lib.rs"
+
+[dependencies]
+
+# Same as the engine's deployed profile (Cargo.toml of dcccrypto/percolator): overflow checks are on.
+[profile.release]
+opt-level = 3
+overflow-checks = true
