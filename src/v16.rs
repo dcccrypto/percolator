@@ -6591,6 +6591,12 @@ impl<'a> PortfolioV16View<'a> {
         while slot_index < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = self.source_domains()[slot_index];
             if source.has_default_sparse_tag() && !source.is_occupied() {
+                // An all-zero rest of the table is default slots only: every remaining iteration
+                // would take this same `continue`. One byte compare instead of ~100 CU per slot.
+                #[cfg(not(kani))]
+                if source_domain_tail_is_zero(self.source_domains(), slot_index + 1) {
+                    break;
+                }
                 slot_index += 1;
                 continue;
             }
@@ -6703,9 +6709,13 @@ impl<'a> PortfolioV16View<'a> {
         let mut sum = 0u128;
         let mut d = 0usize;
         while d < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            sum = sum
-                .checked_add(self.source_domains()[d].source_claim_bound_num.get())
-                .ok_or(V16Error::ArithmeticOverflow)?;
+            let bound = self.source_domains()[d].source_claim_bound_num.get();
+            // An all-zero rest of the table adds nothing.
+            #[cfg(not(kani))]
+            if bound == 0 && source_domain_tail_is_zero(self.source_domains(), d) {
+                break;
+            }
+            sum = sum.checked_add(bound).ok_or(V16Error::ArithmeticOverflow)?;
             d += 1;
         }
         Ok(sum)
@@ -10794,6 +10804,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(asset.stale_account_count_long.get() != 0 || asset.stale_account_count_short.get() != 0)
     }
 
+    /// upstream 5e3af071 `release_provider_principal_after`: fresh reserved backing that leaves
+    /// a domain without being consumed (an expiry or an impairment; a withdrawal subtracts its
+    /// own amount) takes provider principal with it, so the S10 mirror never counts principal
+    /// the provider has lost. Consumption moves backing to `spent` and leaves principal alone.
+    fn release_provider_principal_after(
+        &mut self,
+        domain: usize,
+        reserved_before: u128,
+        reserved_after: u128,
+    ) -> V16Result<()> {
+        let left = reserved_before.saturating_sub(reserved_after);
+        if left == 0 {
+            return Ok(());
+        }
+        self.adjust_provider_principal_for_domain(domain, left, false)
+    }
+
     /// S10: `delta` is added to (`add`) or saturating-subtracted from the principal mirror.
     fn adjust_provider_principal_for_domain(
         &mut self,
@@ -11693,13 +11720,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             0
         };
+        let source_before = self.source_credit_for_domain(domain)?;
         let (bucket, source) = V16Core::prepare_counterparty_backing_expiry_delta(
             self.backing_bucket_for_domain(domain)?,
-            self.source_credit_for_domain(domain)?,
+            source_before,
             now_slot,
         )?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
+        self.release_provider_principal_after(
+            domain,
+            source_before.fresh_reserved_backing_num,
+            source.fresh_reserved_backing_num,
+        )?;
         self.refresh_source_credit_domain_after_mutation(domain)?;
         if snapshot_captured {
             // upstream a7577b0b: principal released after the terminal snapshot
@@ -12047,9 +12080,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if amount == 0 {
             return Ok(());
         }
+        let source_before = self.source_credit_for_domain(domain)?;
         let (bucket, source) = V16Core::prepare_counterparty_lien_impair_delta(
             self.backing_bucket_for_domain(domain)?,
-            self.source_credit_for_domain(domain)?,
+            source_before,
             amount,
         )?;
         let (source, next_risk_epoch) = V16Core::prepare_source_credit_domain_recompute_for_epoch(
@@ -12065,6 +12099,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         .validate()?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
+        self.release_provider_principal_after(
+            domain,
+            source_before.fresh_reserved_backing_num,
+            source.fresh_reserved_backing_num,
+        )?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         Ok(())
     }
@@ -16109,12 +16148,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// beyond provider principal. Fork adaptation of upstream 72bfb065's
     /// `loser_paid_backing_num` (needed by 1683b11d): the provider principal here is the
     /// fork's S10 mirror (`provider_principal_for_domain`), not upstream's
-    /// `provider_principal_{long,short}_num`. Known difference: upstream lowers its
-    /// principal when backing leaves by expiry or impairment
-    /// (`release_provider_principal_after`); the S10 mirror moves only on deposit, withdraw
-    /// and the wholly-empty reset. After an expiry the mirror can read high, so this
-    /// returns less (never more) than upstream's value, and less liened twin backing
-    /// moves with a loss (it is un-pledged in place, the pre-1683b11d behaviour).
+    /// `provider_principal_{long,short}_num`. Like upstream's principal, the mirror falls
+    /// when backing leaves by expiry or impairment (`release_provider_principal_after`,
+    /// upstream 5e3af071, ported in #382).
     fn loser_paid_backing_num(&self, domain: usize) -> V16Result<u128> {
         let reserved = self
             .source_credit_for_domain(domain)?
@@ -16984,7 +17020,50 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // claims instead of recreating ownerless source backing. Impaired
             // provider buckets likewise leave new losses as junior support.
             // (upstream 0b861efb)
-            self.credit_post_snapshot_residual_not_atomic(amount)?;
+            //
+            // upstream 5e3af071: except for what a provider fronted here and was not
+            // repaid. That part of the late debt is owed to the provider, so a terminal
+            // domain that is not Impaired takes min(provider receivable, provider
+            // principal - fresh reserved backing) as backing, until the payout snapshot
+            // is captured. The receivable alone over-counts (it includes consumed
+            // loser-paid backing), so it is capped by what the provider is still out.
+            // v2.2: "principal" is the S10 mirror; the source part is rounded UP to a
+            // whole atom (as in the creditor-final split below) and booked only if the
+            // bucket can take backing now.
+            let refill_atoms = if self.backing_bucket_for_domain(domain)?.status
+                != BackingBucketStatusV16::Impaired
+                && !decode_bool(self.header.payout_snapshot_captured)?
+                && self.loss_domain_accepts_realized_backing(domain)?
+            {
+                let source = self.source_credit_for_domain(domain)?;
+                let refill_num = source.provider_receivable_num.min(
+                    self.provider_principal_for_domain(domain)?
+                        .saturating_sub(source.fresh_reserved_backing_num),
+                );
+                amount.min(
+                    refill_num
+                        .checked_add(BOUND_SCALE - 1)
+                        .ok_or(V16Error::ArithmeticOverflow)?
+                        / BOUND_SCALE,
+                )
+            } else {
+                0
+            };
+            if refill_atoms != 0 {
+                let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
+                self.add_fresh_counterparty_backing_unchecked(
+                    domain,
+                    refill_atoms
+                        .checked_mul(BOUND_SCALE)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                    expiry_slot,
+                )?;
+            }
+            self.credit_post_snapshot_residual_not_atomic(
+                amount
+                    .checked_sub(refill_atoms)
+                    .ok_or(V16Error::CounterUnderflow)?,
+            )?;
         } else {
             // F-LIVE-2 (v22live; upstream 13ebf86b / #216, narrowed): in Live, an Impaired bucket
             // (a lapsed one that still carries liens) cannot take new backing. The loss then stays
@@ -28951,6 +29030,30 @@ pub struct PortfolioSourceDomainV16Account {
     pub source_lien_impaired_capital_at_risk_fee_revenue: V16PodU128,
 }
 
+/// True iff every slot in `domains[from..]` is all-zero bytes, i.e. equal to
+/// `PortfolioSourceDomainV16Account::default()` (Pod, no padding). One overlapping compare
+/// (`b[0] == 0 && b[..n-1] == b[1..]`, a single `sol_memcmp_` on SBF) instead of walking up to 32
+/// slots of 196 bytes field by field. `from >= PORTFOLIO_SOURCE_DOMAIN_CAP` is an empty tail.
+#[inline]
+fn source_domain_tail_is_zero(
+    domains: &[PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
+    from: usize,
+) -> bool {
+    if from >= PORTFOLIO_SOURCE_DOMAIN_CAP {
+        return true;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(&domains[from..]);
+    bytes[0] == 0 && bytes[..bytes.len() - 1] == bytes[1..]
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn source_domain_tail_is_zero_for_test(
+    domains: &[PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
+    from: usize,
+) -> bool {
+    source_domain_tail_is_zero(domains, from)
+}
+
 impl PortfolioSourceDomainV16Account {
     #[inline]
     pub fn is_occupied(self) -> bool {
@@ -30321,6 +30424,29 @@ fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     if a_basis == 0 {
         return Err(V16Error::InvalidLeg);
     }
+    // ceil(abs_basis_q * SOCIAL_WEIGHT_SCALE / a_basis). This runs on every active-leg decode
+    // (`validate_active_leg`), so it is hot. The U512 multiply + U256 divide costs ~1.8k CU on
+    // SBF; a validated basis is at most MAX_POSITION_ABS_Q (1e14) and SOCIAL_WEIGHT_SCALE is
+    // 1e15, so the product fits u128 and `mul_div_ceil_u128_or_wide` computes the same quotient
+    // natively (it falls back to the same U256 path when the product does not fit).
+    // An unscaled side (a_basis == SOCIAL_WEIGHT_SCALE, no ADL yet) divides exactly:
+    // ceil(x * S / S) == x for every x, and x always fits u128.
+    // Kani keeps the original U512 computation for the general case (same pattern as the
+    // bit-serial division in wide_math), so existing proofs see the arithmetic they were written
+    // against; tests/loss_weight_u128_fast_path.rs pins the two paths together.
+    if a_basis == SOCIAL_WEIGHT_SCALE {
+        return Ok(abs_basis_q);
+    }
+    #[cfg(not(kani))]
+    return V16Core::mul_div_ceil_u128_or_wide(abs_basis_q, SOCIAL_WEIGHT_SCALE, a_basis);
+    #[cfg(kani)]
+    return loss_weight_for_basis_wide(abs_basis_q, a_basis);
+}
+
+/// The original U512 loss-weight computation (a_basis != 0): the Kani path above and the
+/// reference for the differential test.
+#[cfg(any(kani, feature = "fuzz"))]
+fn loss_weight_for_basis_wide(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     checked_mul_div_ceil_u256(
         U256::from_u128(abs_basis_q),
         U256::from_u128(SOCIAL_WEIGHT_SCALE),
@@ -30328,6 +30454,24 @@ fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     )
     .and_then(|v| v.try_into_u128())
     .ok_or(V16Error::ArithmeticOverflow)
+}
+
+/// Test hooks for `tests/loss_weight_u128_fast_path.rs` (`--features fuzz`): the production loss
+/// weight, and the U512 computation it replaced (kept verbatim; also the Kani path above).
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn loss_weight_for_basis_for_test(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
+    loss_weight_for_basis(abs_basis_q, a_basis)
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn loss_weight_for_basis_wide_reference_for_test(
+    abs_basis_q: u128,
+    a_basis: u128,
+) -> V16Result<u128> {
+    if a_basis == 0 {
+        return Err(V16Error::InvalidLeg);
+    }
+    loss_weight_for_basis_wide(abs_basis_q, a_basis)
 }
 
 #[cfg(any(kani, feature = "fuzz"))]

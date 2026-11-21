@@ -271,6 +271,8 @@ Provider withdrawals of counterparty backing keep the domain at the full credit 
 
 **Resolved surplus withdrawal** (upstream c3988149). After resolution, forfeited Fresh principal raises the common payout rate of haircut receipts, so external withdrawal must not take backing that a claim could still receive. `withdraw_resolved_counterparty_backing_surplus_not_atomic` allows a domain's provider to withdraw, at any time before expiry and regardless of open portfolios, at most `floor((fresh_unliened − reserve) / BOUND_SCALE)` atoms, where `reserve = positive_claim_bound_num(domain) + need`. Here `need = BOUND_SCALE · max(0, ceil(B / BOUND_SCALE) − R)`, with `R` the ledger's `snapshot_residual` and `B = terminal_claim_exact_receipts_num + terminal_claim_bound_unreceipted_num`. Before snapshot capture, it uses `(residual(), pnl_pos_bound_tot_num)`, only on a payout-ready market with no source claims. Otherwise the call is rejected. The ordinary withdrawal checks still apply. Because `R` never falls and `B` never rises after capture, `need` never grows. Expiry of the kept reserve alone sets the rate to full, so every claimant receives exactly what expiry of the whole bucket would have paid, and the surplus would only have reached insurance recredit or unallocated surplus. Each bucket keeps the whole `need` independently of other buckets, so the rule does not depend on provider exit order. The kept reserve stays pledged until it expires or the need falls to zero.
 
+In Resolved mode a loss booked into a terminal domain (no claim and no creditor leg left) funds the junior pool, except that a domain that is not Impaired first takes, until the payout snapshot is captured, what repays its provider: min(provider receivable, provider principal - fresh reserved backing). The provider that fronted a winner's gain is owed the loser's payment whichever account closes first. (upstream 5e3af071)
+
 ```text
 R_i = scheduled_remaining + pending_remaining
 if sched_present: 0 < sched_remaining <= sched_anchor, cfg_h_min <= sched_horizon <= cfg_h_max, sched_release <= sched_anchor
@@ -1226,9 +1228,8 @@ sits where the loss is owed. For face in the twin domain `T` only the share its
 losers paid in follows, `burned face * loser_paid_T / claims_T`, rounded up to a
 whole atom and never more than the lien's backing or `T`'s loser-paid backing,
 so what a provider fronted stays with the provider (v2.2: `loser_paid_T` is `T`'s
-fresh reserved backing beyond the S10 provider-principal mirror; that mirror does
-not fall on expiry or impairment as upstream's principal does, so after an expiry
-`loser_paid_T` can read lower than upstream's and less backing moves). Nothing is consumed while
+fresh reserved backing beyond the S10 provider-principal mirror, which falls on expiry
+or impairment as upstream's principal does). Nothing is consumed while
 either side of either asset has a pending domain-loss barrier, while the face's
 bucket is not Fresh and unlapsed, or while `L`'s bucket cannot accept fresh
 principal; the lien is then un-pledged in place (or retired, for an impaired

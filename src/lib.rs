@@ -104,6 +104,10 @@ pub use v16::{
 #[cfg(all(not(kani), feature = "fork-facade"))]
 pub use v16::kani_active_bitmap_set;
 
+// Loss-weight u128 path vs. the U512 computation it replaced (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::{loss_weight_for_basis_for_test, loss_weight_for_basis_wide_reference_for_test};
+
 // ADL effective-quantity kernels for the fuzz targets (kani builds get them from the blanket re-export).
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::{
@@ -137,3 +141,7 @@ pub use v16::STRESS_ENVELOPE_TRIGGER_BPS_E9;
 // Matrix row 38: wide_math is made pub mod under fork-facade (see mod declaration above)
 // so the wrapper can use percolator::wide_math::U256 in expected_source_credit_rate_num.
 // The module is private by default (frozen surface); fork-facade elevates it to pub.
+
+// Source-domain all-zero tail check (test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::source_domain_tail_is_zero_for_test;
