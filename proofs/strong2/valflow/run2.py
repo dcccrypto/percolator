@@ -192,12 +192,14 @@ def main():
     ap.add_argument("--sibling", default=None, help="the sibling run's ledger_results.tsv for the same revision")
     ap.add_argument("--t15", default="close_resolved_account_not_atomic")
     ap.add_argument("--mutants", action="store_true", help="also generate the checker mutation harness")
+    ap.add_argument("--enum-probe-mir", required=True, help="MIR of the scratch copy with the R9 probes (enum_probe.py)")
+    ap.add_argument("--enum-probe-src", required=True, help="src/v16.rs of that scratch copy")
     ap.add_argument("--no-frame", action="store_true", help="switch rule R10 (read-set frame) off")
     a = ap.parse_args()
 
     fns, unsupported = B.load(a.mir, a.src)
     E.ENUMS.clear()
-    E.ENUMS.update(E.enum_table(a.src))
+    E.ENUMS.update(E.enum_table(a.enum_probe_mir, a.enum_probe_src))
     os.makedirs(a.out, exist_ok=True)
     rs = RS.compute(a.mir, a.src)
     E.READ = None

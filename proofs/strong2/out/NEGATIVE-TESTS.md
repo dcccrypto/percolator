@@ -157,6 +157,84 @@
 | a3_f10b | [audit 3] R2: matches!(r, Ok(0)) on a writing callee's result | pres 0 | refused | refused | ok |
 | a3_f12 | [audit 3] R8: callee swallows a failed validation into Ok(0) after write | pres 0 | refused | refused | ok |
 | a3_f12b | [audit 3] R8: same, caller returns on c == 1 only | pres 0 | refused | refused | ok |
+| a4_h1 | [audit 4] [H1] call given the whole header returns &mut c_tot; `p.bytes = [0xff;16]` (store `(*p).0`) read as header field 0 | pres 0 | refused | refused | ok |
+| a4_h1a | [audit 4] same store asked for the account check (c_tot not read by it) | pres 1 | certified | refused | imprecise |
+| a4_h1ctl | [audit 4] same pointer, whole-value store `*p = ..` | pres 0 | refused | refused | ok |
+| a4_h1ok | [audit 4] helper returns &mut materialized_portfolio_count, `.bytes` written (harmless) | pres 0 | certified | refused | imprecise |
+| a4_h2 | [audit 4] [H1] helper returns &mut header.config; config.max_portfolio_assets (config field 0) = 0 | pres 0 | refused | refused | ok |
+| a4_h2a | [audit 4] [H1] helper returns &mut header.config; config.h_max (config field 5) = 0; account check decodes config | pres 1 | refused | refused | ok |
+| a4_h3 | [audit 4] [H1] &mut cfg.asset_activation_cooldown_slots (config field 19) from a call-result pointer, given to a writer | pres 0 | refused | refused | ok |
+| a4_h3b | [audit 4] [H1] &mut cfg.h_max (config field 5) from a call-result pointer, given to a writer; account check | pres 1 | refused | refused | ok |
+| a4_h3c | [audit 4] [H1] mem::take(&mut cfg.max_portfolio_assets) through a call-result pointer | pres 0 | refused | refused | ok |
+| a4_h4 | [audit 4] [H1] bytemuck only: from_bytes_mut(&mut bytes_of_mut(header)[off..off+16]).bytes = [0xff;16] at c_tot | pres 0 | refused | refused | ok |
+| a4_h5 | [audit 4] [H1] FnOnce closure owning the header pointer returns &mut c_tot; `.bytes` written | pres 0 | refused | refused | ok |
+| a4_h6 | [audit 4] [H1] Option<&mut header>.map(|h| &mut h.c_tot); `.bytes` written | pres 0 | refused | refused | ok |
+| a4_b1 | [audit 4] Option<&mut u64> is Some(unread) or Some(slot_last) | pres 0 | refused | refused | ok |
+| a4_b1r | [audit 4] Option<&mut u64> = Some(&mut slot_last), written through | pres 0 | refused | refused | ok |
+| a4_b1ok | [audit 4] Option<&mut u64> = Some(&mut materialized_portfolio_count) (harmless) | pres 0 | certified | certified | ok |
+| a4_b2 | [audit 4] other.header.c_tot written (self untouched) | pres 0 | certified | certified | ok |
+| a4_b2s | [audit 4] mem::swap(&mut self.header, &mut other.header) | pres 0 | refused | refused | ok |
+| a4_b2m | [audit 4] mem::swap(&mut self.markets, &mut other.markets) (slice length changes) | pres 0 | refused | refused | ok |
+| a4_b2x | [audit 4] swap(self.unread field, other.slot_last) (harmless for self) | pres 0 | certified | certified | ok |
+| a4_b2y | [audit 4] swap(self.slot_last, other.unread field) | pres 0 | refused | refused | ok |
+| a4_b2z | [audit 4] header pointers swapped, then an unread field written | pres 0 | refused | refused | ok |
+| a4_b3 | [audit 4] `let mut p` reassigned from unread to slot_last | pres 0 | refused | refused | ok |
+| a4_b4 | [audit 4] struct of two field pointers, the read one written | pres 0 | refused | refused | ok |
+| a4_b4ok | [audit 4] struct of two unread field pointers (harmless) | pres 0 | certified | certified | ok |
+| a4_b4h | [audit 4] struct holding the whole header pointer, c_tot written | pres 0 | refused | refused | ok |
+| a4_b4t | [audit 4] tuple of two field pointers, the read one written | pres 0 | refused | refused | ok |
+| a4_b5 | [audit 4] FnMut closure capturing &mut c_tot | pres 0 | refused | refused | ok |
+| a4_b5m | [audit 4] FnOnce closure owning &mut c_tot | pres 0 | refused | refused | ok |
+| a4_b5ok | [audit 4] FnOnce closure owning &mut materialized_portfolio_count (harmless) | pres 0 | certified | certified | ok |
+| a4_b5h | [audit 4] closure capturing an unread and a read field of the header | pres 0 | refused | refused | ok |
+| a4_b5w | [audit 4] closure owning the whole header pointer writes slot_last | pres 0 | refused | refused | ok |
+| a4_b6 | [audit 4] callee (method) writes c_tot, returns Ok(0) | pres 0 | refused | refused | ok |
+| a4_b6ok | [audit 4] callee (method) writes an unread field (harmless) | pres 0 | certified | certified | ok |
+| a4_b6p | [audit 4] writing method called through a fn pointer | pres 0 | refused | refused | ok |
+| a4_b6q | [audit 4] writing method called as Self::m(&mut *self) | pres 0 | refused | refused | ok |
+| a4_b6r | [audit 4] writing method called through a reborrow chain | pres 0 | refused | refused | ok |
+| a4_b7 | [audit 4] header.current_slot written; account check reads it | pres 1 | refused | refused | ok |
+| a4_b7g | [audit 4] header.market_group_id[3] ^= 1; account check reads it | pres 1 | refused | refused | ok |
+| a4_b7g#pres0 | [audit 4] header.market_group_id[3] ^= 1; validate_shape does not read it | pres 0 | certified | certified | ok |
+| a4_b7c | [audit 4] header.config.h_max = 0; account check decodes config | pres 1 | refused | refused | ok |
+| a4_b7t | [audit 4] header.c_tot written; the account check does not read it | pres 1 | certified | certified | ok |
+| a4_b7t#pres0 | [audit 4] header.c_tot written | pres 0 | refused | refused | ok |
+| a4_b7s | [audit 4] slots written by a helper; account check reads slots | pres 1 | refused | refused | ok |
+| a4_b7s#pres0 | [audit 4] slots written by a helper; validate_shape reads only the length | pres 0 | certified | certified | ok |
+| a4_b7i | [audit 4] slots written in an iter_mut loop; account check reads slots | pres 1 | refused | refused | ok |
+| a4_b7m | [audit 4] helper given &mut header.current_slot | pres 1 | refused | refused | ok |
+| a4_b7u | [audit 4] `let m = &mut header.mode; *m = 77` | pres 1 | refused | refused | ok |
+| a4_b7cp | [audit 4] market_group_id.copy_from_slice | pres 1 | refused | refused | ok |
+| a4_b7cp#pres0 | [audit 4] market_group_id.copy_from_slice (not read by validate_shape) | pres 0 | certified | certified | ok |
+| a4_b8 | [audit 4] helper given two field pointers, one read | pres 0 | refused | refused | ok |
+| a4_b8ok | [audit 4] helper given two unread field pointers (harmless) | pres 0 | certified | certified | ok |
+| a4_b9 | [audit 4] helper returns one of two field pointers (unread / read) | pres 0 | refused | refused | ok |
+| a4_b9i | [audit 4] identity helper on &mut slot_last, then written | pres 0 | refused | refused | ok |
+| a4_b9ok | [audit 4] identity helper on an unread field, then written (harmless) | pres 0 | certified | certified | ok |
+| a4_b10 | [audit 4] mem::replace(&mut slot_last, MAX) | pres 0 | refused | refused | ok |
+| a4_b11 | [audit 4] nested fields of resolved_payout_ledger (top-level field 41, read) | pres 0 | refused | refused | ok |
+| a4_b11p | [audit 4] pointer chain into resolved_payout_ledger.snapshot_residual.bytes[0] | pres 0 | refused | refused | ok |
+| a4_b12 | [audit 4] long reborrow chain ending at c_tot | pres 0 | refused | refused | ok |
+| a4_b12ok | [audit 4] long reborrow chain ending at an unread field (harmless) | pres 0 | certified | certified | ok |
+| a4_b13 | [audit 4] through `&mut &mut header` | pres 0 | refused | refused | ok |
+| a4_b14 | [audit 4] *self.header = zeroed() | pres 0 | refused | refused | ok |
+| a4_b14o | [audit 4] *self.header = *other.header | pres 0 | refused | refused | ok |
+| a4_b15 | [audit 4] helper given an unread field pointer and the slot slice (harmless for validate_shape) | pres 0 | certified | certified | ok |
+| a4_b15a | [audit 4] same, account check reads slots | pres 1 | refused | refused | ok |
+| a4_b16 | [audit 4] associated fn (a, b): a.header.c_tot written, check 0 is about a | pres 0 | refused | refused | ok |
+| a4_b16s | [audit 4] associated fn (a: &View, b: &mut View): b.header.c_tot written, check 0 is about a | pres 0 | certified | certified | ok |
+| a4_b17 | [audit 4] array of two unread field pointers written in a loop (harmless) | pres 0 | certified | refused | imprecise |
+| a4_b18 | [audit 4] destructuring pattern binds an unread and a read field | pres 0 | refused | refused | ok |
+| a4_b19 | [audit 4] pointer chosen per loop iteration | pres 0 | refused | refused | ok |
+| a4_b20 | [audit 4] slot written through split_first_mut (harmless for validate_shape) | pres 0 | certified | certified | ok |
+| a4_b21 | [audit 4] a read field then an unread one, stored from call results | pres 0 | refused | refused | ok |
+| a4_b22 | [audit 4] mem::swap(unread, slot_last) through named pointers | pres 0 | refused | refused | ok |
+| a4_e1 | [audit 4] [H2] R9: #[repr(u8)] enum, tuple variants `Clean(u8) = (1), Wrote(u8) = (0)`; the Wrote arm returns unchecked | pres 0 | refused | refused | ok |
+| a4_e2 | [audit 4] [H2] R9: explicit discriminant after a multi-line tuple variant | pres 0 | refused | refused | ok |
+| a4_e3 | [audit 4] [H3] R9: block-commented decoy with the opposite order; real enum has its attribute on the `enum` line | pres 0 | refused | refused | ok |
+| a4_e5 | [audit 4] [H3] R9: cfg(any()) decoy; real enum declared `pub(in crate) enum` | pres 0 | refused | refused | ok |
+| a4_e4 | [audit 4] R9 control: honest plain enum, the arm of the writing variant returns unchecked | pres 0 | refused | refused | ok |
+| a4_e4ok | [audit 4] R9 control: honest plain enum, the writing variant's arm validates | pres 0 | certified | certified | ok |
 | audit_a1 | [sibling audit] HOLE 1 (fixed): reborrow of the market stored into a second market argument, then written | est 0 | refused | refused (rejected as unsupported): store of a possibly non-plain value through a pointer: ((*_2 | ok |
 | audit_a1s | [sibling audit] HOLE 1 (fixed): reborrow stored into an `Option<&mut Header>` argument, then written | est 0 | refused | refused (rejected as unsupported): store of a possibly non-plain value through a pointer: (*_2) | ok |
 | audit_a2 | [sibling audit] HOLE 1 (fixed): reborrow of account 1 stored into account 2, then written | est 1 | refused | refused (rejected as unsupported): store of a possibly non-plain value through a pointer: ((*_3 | ok |
@@ -197,7 +275,7 @@
 | r2_c4 | [sibling audit] ROUND 2 HOLE 1 (fixed): caller of the above through its summary | est 0 | refused | refused | ok |
 | audit_c5w | [sibling audit] same, then a header write | est 0 | refused | refused | ok |
 
-unsound answers: 0 of 196 cases; imprecise (sound refusals of a true statement): 5
+unsound answers: 0 of 274 cases; imprecise (sound refusals of a true statement): 8
 
 ## Unit tests
 
@@ -207,3 +285,17 @@ unsound answers: 0 of 196 cases; imprecise (sound refusals of a true statement):
 - audit 3 homonym_h2_lib.rs appended to src/lib.rs: check_assumptions2.py exit 1 -> ok (rejected)
 
 unsound in total: 0
+
+## Attacks on the R9 probe reader (valflow/enum_probe_unit.py, c38b6b1e probe build)
+
+control: ResolvedCloseOutcomeV16 -> {'ProgressOnly': 0, 'Closed': 1}
+- prefix in another source file: rejected (ok)
+- second marker line: rejected (ok)
+- prefix before the marker: rejected (ok)
+- duplicated probe body in the MIR: rejected (ok)
+- two arms return one constant: rejected (ok)
+- extra statement in an arm block: rejected (ok)
+- argument type of another enum: rejected (ok)
+- arm constants out of sequence in the probe text: rejected (ok)
+- discriminant read of another place: rejected (ok)
+reader attacks accepted: 0 of 9

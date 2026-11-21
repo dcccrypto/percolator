@@ -1,6 +1,6 @@
 {
  "analysed_methods": 335,
- "enums": 26,
+ "enums": 27,
  "modules": [
   "T15_header_checked_paths",
   "T15_header_conditional",
@@ -90,6 +90,44 @@
   "S_clear_fully_diluted_resolved_receipt_if_terminal",
   "S_close_resolved_account_not_atomic"
  ],
+ "mutants": {
+  "C-claim": [
+   3488,
+   3488,
+   0,
+   0
+  ],
+  "C-dead": [
+   119,
+   119,
+   0,
+   0
+  ],
+  "C-entry": [
+   140,
+   140,
+   0,
+   0
+  ],
+  "P-guard": [
+   1196,
+   207,
+   989,
+   115
+  ],
+  "P-noest": [
+   137,
+   136,
+   1,
+   88
+  ],
+  "P-write": [
+   119,
+   111,
+   8,
+   108
+  ]
+ },
  "pin": "engine: dcccrypto/percolator@c38b6b1e, src/v16.rs blob 7d3edfe86be1a80f49793cf551c39687a8766a4d; rustc 1.99.0-nightly (d0babd8b6 2026-07-15); cargo rustc -j 4 --release --lib -- -Zunpretty=mir -Zinline-mir=no",
  "summaries": {
   "add_account_source_positive_pnl_not_atomic": {

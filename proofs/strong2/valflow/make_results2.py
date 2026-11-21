@@ -67,7 +67,7 @@ if t:
                   "(a write the row depends on is not behind such a callee)." % name)
 print("\n## Callee summaries used (each is the goal of its own module)\n")
 print("`result = 0` is `Ok`; `payload` is the integer value or enum discriminant of the `Ok` payload "
-      "(Option: None = 0, Some = 1; a plain crate enum: its variant index).\n")
+      "(Option: None = 0, Some = 1; a plain crate enum: its discriminant as read from the probe MIR, `ENUMS.txt`).\n")
 print("| Function | Clauses | Module status | Uses |")
 print("|---|---|---|---|")
 for name, s in sorted(r["summaries"].items()):

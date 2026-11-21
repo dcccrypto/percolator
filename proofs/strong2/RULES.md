@@ -51,6 +51,7 @@ rules list; every other change of `_l` must be a `havoc` of `l` **and of `P(l)`*
 | A12 | The crate defines no item named `Option`, `Some`, `None`, `is_some`, `is_none` (nor any of the sibling's A9 names), under any spelling (raw identifier, macro-generated, split over lines), and no module, alias or extern crate named `core`, `std` or `alloc`. Then a `let` declaration in MIR that prints `core::option::Option<..>`, `core::result::Result<..>`, `core::ops::ControlFlow<..>` means core's type, and the rules below require that printed path. | `valflow/check_assumptions2.py`: scans of the source text across line breaks, of the macro-expanded crate (`-Zunpretty=expanded`) and of the MIR; `out/assumptions_check.txt`. Audit round 3 broke the earlier, weaker form of this check (section 7). |
 | A13 | Memory layout facts of safe Rust: the market header object, the market slot array, the view structs and each account object are pairwise disjoint; distinct top-level fields of the header are disjoint. A store through a pointer derived (by reborrow, projection, or as the result of a call given only that pointer and plain values) from a pointer into one of these regions changes only bytes of that region. | Rust's reference rules together with A1, A2 (no `unsafe`, no raw pointers). |
 | A14 | `valflow/readset.py` over-approximates what each runtime check can read: the set of top-level header fields, and whether slot contents (as opposed to the slice length) are read. Section 4a. | The analysis is conservative by construction (anything not understood gives ALL); its result for this build is in `out/READSET.md` and can be compared with the source of `validate_shape` by eye. |
+| A15 | Appending functions at the end of `src/v16.rs` does not change the discriminants of the enums declared above them, and `discriminant(x)` in MIR is the same number in the probe build and in the analysed build (same compiler, same flags). The name `NAME` at the top level of `v16` is the type MIR prints as `v16::NAME`. | Rust semantics of enum discriminants (a property of the declaration); not checked by a scan. |
 
 ## 4. Added translation rules
 
@@ -74,7 +75,7 @@ small constant).
 | — | `<Result as FromResidual<..>>::from_residual(..)` into `_d` | statement `setD d 1` (then R1), `goto N` | base recognition; A6 |
 | — | a validator call (base recognition, unchanged) | `call [d, P(d)] N same [⟨[d = 0], est holds⟩]` | |
 
-| R9 | `_l = [v16::]NAME::VARIANT[(..)\|{ .. }]` (also as a constant), declared type of `_l` exactly `v16::NAME` | `setD l i`, `i` the index of `VARIANT` | `NAME` is in the table of plain enums of `src/v16.rs`: declared at top level without generics, no explicit discriminant, no attribute on any variant, name unique in the file. Also inside R3: `Ok(NAME::VARIANT..)` sets the payload ghost to `i` when the local is declared `core::result::Result<v16::NAME, ..>`. |
+| R9 | `_l = [v16::]NAME::VARIANT[(..)\|{ .. }]` (also as a constant), declared type of `_l` exactly `v16::NAME` | `setD l i`, `i` the discriminant of `VARIANT` | `(NAME, VARIANT) ↦ i` is in the table read by `valflow/enum_probe.py` (TRUSTED reader `table`, `read_probe`) from rustc's MIR of a probe `fn s2_enum_probe_NAME(x: &NAME) -> u32 { match *x { NAME::V0 { .. } => 7001, .., _ => 7000 } }`, compiled in a scratch copy (pinned sources + probes appended to `src/v16.rs`). A probe counts only if its MIR is exactly `_d = discriminant((*_1)); switchInt(move _d) -> [..]` with every target block one constant assignment; the probe prefix must occur nowhere else in the crate sources. The table for this build is `out/ENUMS.txt`. A15. Also inside R3: `Ok(NAME::VARIANT..)` sets the payload ghost to `i` when the local is declared `core::result::Result<v16::NAME, ..>`. |
 | R10 | a store through a pointer, or a call given pointers, confined to a region of the market that a check does not read | the `write` / `call` keeps that check (it is added to `same`) | section 4a |
 
 **R8, callee summaries.** A summary is the goal of the callee's own module: clauses whose guards
@@ -157,7 +158,7 @@ reads slot contents; `validate_with_market` may read 4 header fields and may rea
 
 - Negative tests (`valflow/negative_tests.py`, table in `out/NEGATIVE-TESTS.md`): attack functions
   compiled into a scratch copy of the pinned source. 31 written with the rules, 21 for R10, the
-  sibling's 40, and the 104 of audit round 3.
+  sibling's 40, the 104 of audit round 3, and the 78 of audit round 4.
 - **Audit round 3** (independent agent, told to break `T2`; it did not see this section): 104
   questions over 103 attack methods on real MIR, 0 unsound. It found **two holes** in the
   assumption scans and **one latent hole** in the code. None is triggered by the engine text.
@@ -174,4 +175,22 @@ reads slot contents; `validate_with_market` may read 4 header fields and may rea
     `IntToInt` casts, none with a projected operand); reproduced on hand-edited MIR. Fixed: the
     payload read must be the whole rvalue.
   Regression: the unit tests at the end of `out/NEGATIVE-TESTS.md`.
+- **Audit round 4** (started by session 1121b, finished by 1121c; cases in
+  `valflow/neg_cases/audit4_*`): 78 questions. 4 unsound answers, all in rule R9, whose table was
+  then parsed from the text of `src/v16.rs`:
+  - H2: explicit discriminants on tuple variants (`Clean(u8) = (1)`, or after a multi-line
+    variant) were not seen, so declaration order was taken for the discriminant.
+  - H3: a commented-out or `#[cfg(any())]` decoy declaration was parsed instead of the real one
+    (declared with its attribute on the `enum` line, or as `pub(in crate) enum`).
+  Fixed by no longer trusting the text: the table is read from compiler output (R9 above, A15).
+  The text parse survives only as the untrusted proposer of probe arms. On the engine text the old
+  table and the new one agree on every enum the old one had (c38b6b1e: 26 of 26; 08d4fd09: 24 of
+  24; the new table also has `TokenValueClassV16`), so no engine result depended on the hole; all
+  rows were regenerated with the new table anyway. Rerun with the fix: 0 unsound of 274 cases.
+  The 12 [H1] cases and 41 read-set probes of the same round: no unsound answer, no missed read.
+  Reader attacks (hand-edited probe text / MIR, `valflow/enum_probe_unit.py`): prefix in another
+  file, second marker, prefix before the marker, duplicated probe body, two arms with one
+  constant, extra statement in an arm block, argument type of another enum, discriminant read of another place, arm constants out of
+  sequence: each empties the table or drops the enum.
+  The new reader was written and attacked by the same session; it has had no independent audit.
 - Mutation harness for the checker: `out/MUTANTS.md`.

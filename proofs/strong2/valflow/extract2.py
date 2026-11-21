@@ -75,49 +75,18 @@ READ = None
 HDR_MUT = re.compile(r"^&mut (v16::)?MarketGroupV16HeaderAccount$")
 MKT_MUT = re.compile(r"^&mut \[(v16::)?Market<T>\]$")
 
-ENUMS = {}   # R9: crate enum name -> variant names in declaration order (filled by run2.enum_table)
+ENUMS = {}   # R9: crate enum name -> {variant name: discriminant} (filled from enum_probe.table)
 
 
-def enum_table(src_path):
-    """Plain enums of src/v16.rs: declared at top level without generics, no explicit
-    discriminant, no attribute on a variant, name unique in the file. Variant index = discriminant."""
-    lines = open(src_path).read().split("\n")
-    out, seen, bad = {}, {}, set()
-    i = 0
-    while i < len(lines):
-        m = re.match(r"^(?:pub(?:\([a-z]+\))? )?enum (\w+) \{$", lines[i])
-        m2 = re.match(r"^\s*(?:pub(?:\([a-z]+\))? )?enum (\w+)", lines[i])
-        if m2:
-            seen[m2.group(1)] = seen.get(m2.group(1), 0) + 1
-        if not m:
-            i += 1
-            continue
-        name, vs, ok, depth = m.group(1), [], True, 1
-        i += 1
-        while i < len(lines) and depth > 0:
-            ln = lines[i]
-            st = ln.strip()
-            if depth == 1 and st and not st.startswith("//"):
-                vm = re.match(r"^    (\w+)\s*(\{.*\}|\(.*\)|\{|\()?\s*,?$", ln)
-                if st == "}":
-                    pass
-                elif st.startswith("#["):
-                    ok = False
-                elif vm and "=" not in st.split("{")[0].split("(")[0]:
-                    vs.append(vm.group(1))
-                else:
-                    ok = False
-            depth += ln.count("{") + ln.count("(") - ln.count("}") - ln.count(")")
-            i += 1
-        if ok and vs:
-            out[name] = vs
-        else:
-            bad.add(name)
-    return {k: v for k, v in out.items() if seen.get(k) == 1 and k not in bad}
+def enum_table(probe_mir_path, probe_src_path):
+    """R9 table, read from the MIR of compiler-checked probe functions (valflow/enum_probe.py).
+    The earlier text parse of src/v16.rs was unsound on hostile declarations (audit round 4)."""
+    import enum_probe
+    return enum_probe.table(probe_mir_path, probe_src_path)
 
 
 def crate_enum_variant(r, want):
-    """Index of the variant if r is `[const ][v16::]NAME::VARIANT[(..)|{ .. }]` for the enum
+    """Discriminant of the variant if r is `[const ][v16::]NAME::VARIANT[(..)|{ .. }]` for the enum
     NAME == want of the table; else None."""
     r = r.strip()
     if r.startswith("const "):
@@ -127,7 +96,7 @@ def crate_enum_variant(r, want):
     m = re.fullmatch(r"(\w+)::(\w+)(?: \{.*\}|\(.*\))?", r)
     if not m or m.group(1) != want or want not in ENUMS or m.group(2) not in ENUMS[want]:
         return None
-    return ENUMS[want].index(m.group(2))
+    return ENUMS[want][m.group(2)]
 
 
 def single_group(s):
@@ -159,6 +128,8 @@ class T2(X.Translator):
         self.provider = provider
         self.assume = assume or {}   # callee path -> extra clauses, ASSUMED (only in *_conditional modules)
         self.used_assumed = []
+        self.write_log = []   # (block, place, region, checks kept): for reports only
+        self.call_log = []    # (block, callee path, checks kept, checks the post-clauses speak about)
         self.used2 = []   # (block, fnpath)
         self.cur = None   # (block, index of the statement being translated)
 
@@ -226,6 +197,7 @@ class T2(X.Translator):
         r = self.region(base) if re.match(r"^\(*\(\*_%d\)" % base, place) and place.count("(*") == 1 else None
         if r is not None:
             same = sorted(set(same) | set(k for k in self.checks if self.region_keeps(r, k, place)))
+        self.write_log.append((self.cur[0] if self.cur else -1, place, r, list(same)))
         if same != self.checks:
             stmts.append(("write", same))
 
@@ -488,6 +460,11 @@ class T2(X.Translator):
                                 post.append((gs2, (hs, ps)))
                     if post:
                         self.used2.append((b, fnpath))
+        spoken = set()
+        for gs, c in post:
+            if c != "bot":
+                spoken |= set(c[0]) | set(c[1])
+        self.call_log.append((b, fnpath, list(same), sorted(spoken)))
         return ("call", [dl, PO + dl], target, same, post)
 
     def translate(self):

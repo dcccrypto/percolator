@@ -89,6 +89,15 @@ for ln in open(os.path.join(here, "neg_cases", "audit3_cases.txt")):
     nm, kind, k, exp, desc = ln.split(" ", 4)
     key = nm if nm not in A3 else nm + "#" + kind + k
     A3[key] = (kind, int(k), exp == "T", "[audit 3] " + desc)
+A4 = {}
+for ln in open(os.path.join(here, "neg_cases", "audit4_cases.txt")):
+    ln = ln.rstrip("\n")
+    if not ln.strip():
+        continue
+    nm, kind, k, exp, desc = ln.split(" ", 4)
+    key = nm if nm not in A4 else nm + "#" + kind + k
+    A4[key] = (kind, int(k), exp == "T", "[audit 4] " + desc)
+A3.update(A4)
 sys.path.insert(0, os.path.join(here, "..", "..", "novel", "mirflow"))
 OLD = {}
 src_old = open(os.path.join(here, "..", "..", "novel", "mirflow", "audit_regression.py")).read()
@@ -108,8 +117,10 @@ assert text.count(ANCHOR) == 1
 extra = open(os.path.join(here, "..", "..", "novel", "mirflow", "audit_cases", "cases.rs")).read() + \
     open(os.path.join(here, "neg_cases", "cases2.rs")).read() + \
     open(os.path.join(here, "neg_cases", "cases3.rs")).read() + \
-    open(os.path.join(here, "neg_cases", "audit3_cases.rs")).read()
-tail = open(os.path.join(here, "neg_cases", "audit3_extra.rs")).read()
+    open(os.path.join(here, "neg_cases", "audit3_cases.rs")).read() + \
+    open(os.path.join(here, "neg_cases", "audit4_cases.rs")).read()
+tail = open(os.path.join(here, "neg_cases", "audit3_extra.rs")).read() + \
+    open(os.path.join(here, "neg_cases", "audit4_extra.rs")).read()
 # cases that do not compile against this revision's types are dropped by name (env SKIP=a,b)
 SKIP = [x for x in os.environ.get("SKIP", "").split(",") if x]
 for nm in SKIP:
@@ -119,7 +130,10 @@ for nm in SKIP:
     for k in [k for k in list(NEW) + list(OLD) if k.split("#")[0] == nm]:
         NEW.pop(k, None)
         OLD.pop(k, None)
-open(os.path.join(d, "src", "v16.rs"), "w").write(text.replace(ANCHOR, ANCHOR + extra) + "\n" + tail)
+import enum_probe
+full = text.replace(ANCHOR, ANCHOR + extra) + "\n" + tail
+# the R9 probes go into the same scratch copy, so the table is read from this very build
+open(os.path.join(d, "src", "v16.rs"), "w").write(full + enum_probe.probe_text(full)[0])
 mir = os.path.join(d, "out.mir")
 r = subprocess.run(["cargo", "+" + nightly, "rustc", "-j", "4", "--release", "--lib", "--",
                     "-Zunpretty=mir", "-Zinline-mir=no"], cwd=d, stdout=open(mir, "w"),
@@ -129,7 +143,7 @@ if r.returncode != 0:
     sys.exit(2)
 fns, unsupported = B.load(mir, os.path.join(d, "src", "v16.rs"))
 E.ENUMS.clear()
-E.ENUMS.update(E.enum_table(os.path.join(d, "src", "v16.rs")))
+E.ENUMS.update(E.enum_table(mir, os.path.join(d, "src", "v16.rs")))
 rs = R.RS.compute(mir, os.path.join(d, "src", "v16.rs"))
 E.READ = {"fields": {0: rs["shape"][0], 1: rs["account"][0]}, "mk": {0: rs["shape"][1], 1: rs["account"][1]}}
 prov = R.Provider(fns)

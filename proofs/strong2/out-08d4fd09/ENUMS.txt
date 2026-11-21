@@ -1,0 +1,26 @@
+AccountRefreshCertOutcomeV16 {'Certified': 0, 'BChunk': 1, 'SourceBackingExpired': 2}
+AssetLifecycleV16 {'Disabled': 0, 'PendingActivation': 1, 'Active': 2, 'DrainOnly': 3, 'Retired': 4, 'Recovery': 5}
+AutoCrankOutcomeV16 {'NoAction': 0, 'Progressed': 1, 'RecoveryResolved': 2, 'ResolvedClose': 3}
+AutoCrankPlanV16 {'NoAction': 0, 'RefreshAccount': 1, 'SettleBChunk': 2, 'Liquidate': 3, 'ReleaseSourceLiens': 4, 'AdvanceClose': 5, 'DeclareRecovery': 6, 'FinalizeRecovery': 7, 'CloseResolved': 8}
+BResidualStepV16 {'Outcome': 0, 'DeclareRecovery': 1}
+BackingBucketStatusV16 {'Empty': 0, 'Fresh': 1, 'Expired': 2, 'Impaired': 3}
+FlatSourceLienNormalizationV16 {'None': 0, 'ImpairCounterparty': 1, 'Release': 2}
+ForfeitResidualStepV16 {'NoResidual': 0, 'Book': 1, 'CommitRecovery': 2}
+HLockLaneV16 {'HMin': 0, 'HMax': 1}
+MarketModeV16 {'Live': 0, 'Resolved': 1, 'Recovery': 2}
+PermissionlessCrankActionV16 {'Refresh': 0, 'SettleB': 1, 'Liquidate': 2, 'Recover': 3}
+PermissionlessProgressOutcomeV16 {'AccountCurrent': 0, 'AccountBChunk': 1, 'SourceBackingExpired': 2, 'ResidualBooked': 3, 'RecoveryDeclared': 4}
+PermissionlessRecoveryReasonV16 {'BelowProgressFloor': 0, 'BlockedSegmentHeadroomOrRepresentability': 1, 'AccountBSettlementCannotProgress': 2, 'BIndexHeadroomExhausted': 3, 'ActiveBankruptCloseCannotProgress': 4, 'ExplicitLossOrDustAuditOverflow': 5, 'OracleOrTargetUnavailableByAuthenticatedPolicy': 6, 'CounterOrEpochOverflowDeclaredRecovery': 7}
+PositionRouteV16 {'Attach': 0, 'Clear': 1, 'Flip': 2, 'Resize': 3}
+ReleasedPnlConversionDispositionV16 {'ConsumeHaircutFace': 0, 'RetainHaircutFaceForTerminalDomain': 1}
+ResolvedCloseOutcomeV16 {'ProgressOnly': 0, 'Closed': 1}
+ResolvedSourcePreparationV16 {'BackingNormalized': 0, 'LienReleased': 1}
+ResolvedSourceRealizationV16 {'NoSourceClaim': 0, 'Processed': 1, 'Waiting': 2}
+SideModeV16 {'Normal': 0, 'DrainOnly': 1, 'ResetPending': 2}
+SideV16 {'Long': 0, 'Short': 1}
+SourceCreditBackingSourceV16 {'Counterparty': 0, 'Insurance': 1}
+TerminalSlabAssetStepV16 {'Expire': 0, 'Recredit': 1, 'Wait': 2, 'Continue': 3}
+TerminalSlabOutcomeV16 {'ScanProgress': 0, 'BackingExpired': 1, 'InsuranceRecredited': 2, 'ReadyToClose': 3}
+TokenValueClassV16 {'TokenVault': 0, 'SeniorCapital': 1, 'InsuranceCapital': 2, 'AccountCapital': 3, 'CloseSupportConsumed': 4, 'CloseInsuranceSpent': 5, 'CloseCounterpartyCreditConsumed': 6, 'BResidualBooked': 7, 'PendingObligationEscrow': 8, 'PendingObligationCredit': 9, 'ExplicitBackedLoss': 10, 'SettlementRoundingResidue': 11, 'CancelDepositEscrow': 12, 'ResolvedPayoutPaid': 13, 'ProtocolFeePaid': 14, 'ExternalQuote': 15, 'UnallocatedProtocolSurplus': 16}
+V16Error {'InvalidConfig': 0, 'ArithmeticOverflow': 1, 'ProvenanceMismatch': 2, 'HiddenLeg': 3, 'InvalidLeg': 4, 'Stale': 5, 'BStale': 6, 'LockActive': 7, 'NonProgress': 8, 'RecoveryRequired': 9, 'CounterOverflow': 10, 'CounterUnderflow': 11}
+enums in the table: 25

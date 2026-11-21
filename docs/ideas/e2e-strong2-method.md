@@ -169,3 +169,11 @@ payload across `?`.
 - Risk 1 materialised as predicted: the independent audit found two holes in the assumption
   scans and one latent hole in a pattern (`proofs/strong2/RULES.md`, section 7). None is
   triggered by the engine text; all are fixed with regression tests.
+- Session `e2e-lean-strong-1121c` (continuation after 1121b hit its usage limit, 2026-11-21
+  20:11 UTC onward): audit round 4, left unfinished, was rerun and gave 4 unsound answers in rule
+  R9 (the enum table was parsed from source text). R9 now reads the table from rustc's MIR of
+  probe functions (`valflow/enum_probe.py`, assumption A15). The engine's table did not change
+  for any enum the old one had, and every generated Lean module is byte-identical after the fix.
+  The new reader was attacked by the session that wrote it only.
+- The T15 witnesses were rerun and committed; the literal T15 rows are false at three returns
+  (pre-states built with field pokes; reachability not shown). `T15-WORKLIST.md` is now written.

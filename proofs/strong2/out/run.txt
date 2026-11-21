@@ -1,5 +1,6 @@
+mutants: {"C-claim": [3488, 3488, 0, 0], "C-dead": [119, 119, 0, 0], "C-entry": [140, 140, 0, 0], "P-guard": [1196, 207, 989, 115], "P-noest": [137, 136, 1, 88], "P-write": [119, 111, 8, 108]}
 ledger rows: {"est": 35, "no-account-argument": 27, "no-mir": 32, "open": 16, "pres": 18}
 rows this run closes that the sibling run left open: ['T18.header', 'T18.account', 'T29.header', 'T29.account', 'T33.header', 'T36.header', 'T47.header', 'T47.account']
 rows the sibling run closed that this run does not: []
 T15: {"T15.account": {"assumed": ["detach_solvent_active_legs_for_resolved_close", "expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic", "prepare_one_source_domain_for_resolved_close_not_atomic", "settle_account_side_effects_not_atomic", "settle_negative_pnl_from_principal_not_atomic", "settle_resolved_bankruptcy_negative_pnl"], "checked_paths_module": "T15_account_checked_paths", "conditional_module": "T15_account_conditional", "exempt": [55, 104, 113], "exempt_lines": {"104": 26631, "113": 26634, "55": 26614}, "n_ok_sites": 7, "proved_ok_sites": 4}, "T15.header": {"assumed": ["settle_account_side_effects_not_atomic", "settle_negative_pnl_from_principal_not_atomic", "settle_resolved_bankruptcy_negative_pnl"], "checked_paths_module": "T15_header_checked_paths", "conditional_module": "T15_header_conditional", "exempt": [104, 113], "exempt_lines": {"104": 26631, "113": 26634}, "n_ok_sites": 7, "proved_ok_sites": 5}}
-modules: 87; methods analysed: 335; plain crate enums: 26
+modules: 87; methods analysed: 335; plain crate enums: 27

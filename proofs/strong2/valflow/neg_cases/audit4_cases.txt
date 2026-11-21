@@ -1,0 +1,78 @@
+a4_h1 pres 0 F [H1] call given the whole header returns &mut c_tot; `p.bytes = [0xff;16]` (store `(*p).0`) read as header field 0
+a4_h1a pres 1 T same store asked for the account check (c_tot not read by it)
+a4_h1ctl pres 0 F same pointer, whole-value store `*p = ..`
+a4_h1ok pres 0 T helper returns &mut materialized_portfolio_count, `.bytes` written (harmless)
+a4_h2 pres 0 F [H1] helper returns &mut header.config; config.max_portfolio_assets (config field 0) = 0
+a4_h2a pres 1 F [H1] helper returns &mut header.config; config.h_max (config field 5) = 0; account check decodes config
+a4_h3 pres 0 F [H1] &mut cfg.asset_activation_cooldown_slots (config field 19) from a call-result pointer, given to a writer
+a4_h3b pres 1 F [H1] &mut cfg.h_max (config field 5) from a call-result pointer, given to a writer; account check
+a4_h3c pres 0 F [H1] mem::take(&mut cfg.max_portfolio_assets) through a call-result pointer
+a4_h4 pres 0 F [H1] bytemuck only: from_bytes_mut(&mut bytes_of_mut(header)[off..off+16]).bytes = [0xff;16] at c_tot
+a4_h5 pres 0 F [H1] FnOnce closure owning the header pointer returns &mut c_tot; `.bytes` written
+a4_h6 pres 0 F [H1] Option<&mut header>.map(|h| &mut h.c_tot); `.bytes` written
+a4_b1 pres 0 F Option<&mut u64> is Some(unread) or Some(slot_last)
+a4_b1r pres 0 F Option<&mut u64> = Some(&mut slot_last), written through
+a4_b1ok pres 0 T Option<&mut u64> = Some(&mut materialized_portfolio_count) (harmless)
+a4_b2 pres 0 T other.header.c_tot written (self untouched)
+a4_b2s pres 0 F mem::swap(&mut self.header, &mut other.header)
+a4_b2m pres 0 F mem::swap(&mut self.markets, &mut other.markets) (slice length changes)
+a4_b2x pres 0 T swap(self.unread field, other.slot_last) (harmless for self)
+a4_b2y pres 0 F swap(self.slot_last, other.unread field)
+a4_b2z pres 0 F header pointers swapped, then an unread field written
+a4_b3 pres 0 F `let mut p` reassigned from unread to slot_last
+a4_b4 pres 0 F struct of two field pointers, the read one written
+a4_b4ok pres 0 T struct of two unread field pointers (harmless)
+a4_b4h pres 0 F struct holding the whole header pointer, c_tot written
+a4_b4t pres 0 F tuple of two field pointers, the read one written
+a4_b5 pres 0 F FnMut closure capturing &mut c_tot
+a4_b5m pres 0 F FnOnce closure owning &mut c_tot
+a4_b5ok pres 0 T FnOnce closure owning &mut materialized_portfolio_count (harmless)
+a4_b5h pres 0 F closure capturing an unread and a read field of the header
+a4_b5w pres 0 F closure owning the whole header pointer writes slot_last
+a4_b6 pres 0 F callee (method) writes c_tot, returns Ok(0)
+a4_b6ok pres 0 T callee (method) writes an unread field (harmless)
+a4_b6p pres 0 F writing method called through a fn pointer
+a4_b6q pres 0 F writing method called as Self::m(&mut *self)
+a4_b6r pres 0 F writing method called through a reborrow chain
+a4_b7 pres 1 F header.current_slot written; account check reads it
+a4_b7g pres 1 F header.market_group_id[3] ^= 1; account check reads it
+a4_b7g pres 0 T header.market_group_id[3] ^= 1; validate_shape does not read it
+a4_b7c pres 1 F header.config.h_max = 0; account check decodes config
+a4_b7t pres 1 T header.c_tot written; the account check does not read it
+a4_b7t pres 0 F header.c_tot written
+a4_b7s pres 1 F slots written by a helper; account check reads slots
+a4_b7s pres 0 T slots written by a helper; validate_shape reads only the length
+a4_b7i pres 1 F slots written in an iter_mut loop; account check reads slots
+a4_b7m pres 1 F helper given &mut header.current_slot
+a4_b7u pres 1 F `let m = &mut header.mode; *m = 77`
+a4_b7cp pres 1 F market_group_id.copy_from_slice
+a4_b7cp pres 0 T market_group_id.copy_from_slice (not read by validate_shape)
+a4_b8 pres 0 F helper given two field pointers, one read
+a4_b8ok pres 0 T helper given two unread field pointers (harmless)
+a4_b9 pres 0 F helper returns one of two field pointers (unread / read)
+a4_b9i pres 0 F identity helper on &mut slot_last, then written
+a4_b9ok pres 0 T identity helper on an unread field, then written (harmless)
+a4_b10 pres 0 F mem::replace(&mut slot_last, MAX)
+a4_b11 pres 0 F nested fields of resolved_payout_ledger (top-level field 41, read)
+a4_b11p pres 0 F pointer chain into resolved_payout_ledger.snapshot_residual.bytes[0]
+a4_b12 pres 0 F long reborrow chain ending at c_tot
+a4_b12ok pres 0 T long reborrow chain ending at an unread field (harmless)
+a4_b13 pres 0 F through `&mut &mut header`
+a4_b14 pres 0 F *self.header = zeroed()
+a4_b14o pres 0 F *self.header = *other.header
+a4_b15 pres 0 T helper given an unread field pointer and the slot slice (harmless for validate_shape)
+a4_b15a pres 1 F same, account check reads slots
+a4_b16 pres 0 F associated fn (a, b): a.header.c_tot written, check 0 is about a
+a4_b16s pres 0 T associated fn (a: &View, b: &mut View): b.header.c_tot written, check 0 is about a
+a4_b17 pres 0 T array of two unread field pointers written in a loop (harmless)
+a4_b18 pres 0 F destructuring pattern binds an unread and a read field
+a4_b19 pres 0 F pointer chosen per loop iteration
+a4_b20 pres 0 T slot written through split_first_mut (harmless for validate_shape)
+a4_b21 pres 0 F a read field then an unread one, stored from call results
+a4_b22 pres 0 F mem::swap(unread, slot_last) through named pointers
+a4_e1 pres 0 F [H2] R9: #[repr(u8)] enum, tuple variants `Clean(u8) = (1), Wrote(u8) = (0)`; the Wrote arm returns unchecked
+a4_e2 pres 0 F [H2] R9: explicit discriminant after a multi-line tuple variant
+a4_e3 pres 0 F [H3] R9: block-commented decoy with the opposite order; real enum has its attribute on the `enum` line
+a4_e5 pres 0 F [H3] R9: cfg(any()) decoy; real enum declared `pub(in crate) enum`
+a4_e4 pres 0 F R9 control: honest plain enum, the arm of the writing variant returns unchecked
+a4_e4ok pres 0 T R9 control: honest plain enum, the writing variant's arm validates
