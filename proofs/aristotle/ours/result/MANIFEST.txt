@@ -1,0 +1,9 @@
+Downloaded 2026-11-21T03:48Z with: aristotle download 576ace41-da17-48fa-9b7f-e4b277eded5a
+Archive: 576ace41-da17-48fa-9b7f-e4b277eded5a-aristotle.tar.gz (15 entries, 49K)
+Files in the archive:
+  Cargo.toml, aristotle/resolved_close_spec.md, src/lib.rs, src/resolved_payout.rs,
+  src/wide_math.rs, src/resolved_payout/close_path.rs  (our uploaded slice; not re-copied here, see ../project/)
+  ARISTOTLE_SUMMARY.md, README.md, lean-toolchain
+  Spec/Model.lean, Spec/RC1.lean, Spec/Rust.lean
+  SepLogic/Public.lean, SepLogic/PublicGeneric.lean, SepLogic/Pure.lean
+Proof terms are not in the download (Aristotle does not return them).
