@@ -174,6 +174,10 @@ payload across `?`.
   R9 (the enum table was parsed from source text). R9 now reads the table from rustc's MIR of
   probe functions (`valflow/enum_probe.py`, assumption A15). The engine's table did not change
   for any enum the old one had, and every generated Lean module is byte-identical after the fix.
-  The new reader was attacked by the session that wrote it only.
+  An independent agent then broke that reader (audit round 5: 5 unsound table entries, from
+  build-dependent discriminants and from a second type printing as `v16::NAME`). The response is
+  a restriction, not a repair: R9 is off unless the crate sources pass a raw-text scan
+  (assumptions A15, A16). The scan has been attacked only by its author. Only the T15
+  `Ok(Closed)` theorem (and one callee summary on `08d4fd09`) depends on R9.
 - The T15 witnesses were rerun and committed; the literal T15 rows are false at three returns
   (pre-states built with field pokes; reachability not shown). `T15-WORKLIST.md` is now written.
