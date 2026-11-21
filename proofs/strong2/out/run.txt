@@ -1,3 +1,4 @@
+mutants: {"C-claim": [2436, 2436, 0, 0], "C-dead": [78, 78, 0, 0], "C-entry": [91, 91, 0, 0], "P-guard": [822, 151, 671, 80], "P-noest": [125, 124, 1, 82], "P-write": [78, 70, 8, 67]}
 ledger rows: {"est": 33, "no-account-argument": 27, "no-mir": 32, "open": 22, "pres": 14}
 rows this run closes that the sibling run left open: ['T18.header', 'T18.account']
 rows the sibling run closed that this run does not: []

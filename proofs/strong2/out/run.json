@@ -59,6 +59,44 @@
   "S_clear_fully_diluted_resolved_receipt_if_terminal",
   "S_close_resolved_account_not_atomic"
  ],
+ "mutants": {
+  "C-claim": [
+   2436,
+   2436,
+   0,
+   0
+  ],
+  "C-dead": [
+   78,
+   78,
+   0,
+   0
+  ],
+  "C-entry": [
+   91,
+   91,
+   0,
+   0
+  ],
+  "P-guard": [
+   822,
+   151,
+   671,
+   80
+  ],
+  "P-noest": [
+   125,
+   124,
+   1,
+   82
+  ],
+  "P-write": [
+   78,
+   70,
+   8,
+   67
+  ]
+ },
  "pin": "engine: dcccrypto/percolator@c38b6b1e, src/v16.rs blob 7d3edfe86be1a80f49793cf551c39687a8766a4d; rustc 1.99.0-nightly (d0babd8b6 2026-07-15); cargo rustc -j 4 --release --lib -- -Zunpretty=mir -Zinline-mir=no",
  "summaries": {
   "add_account_source_positive_pnl_not_atomic": {

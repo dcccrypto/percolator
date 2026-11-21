@@ -2,7 +2,7 @@
 
 Pin: engine: dcccrypto/percolator@c38b6b1e, src/v16.rs blob 7d3edfe86be1a80f49793cf551c39687a8766a4d; rustc 1.99.0-nightly (d0babd8b6 2026-07-15); cargo rustc -j 4 --release --lib -- -Zunpretty=mir -Zinline-mir=no
 
-`lake build`: Build completed successfully (78 jobs).. Modules generated: 56; with `main` on axioms [propext, Quot.sound]: 56.
+`lake build`: Build completed successfully (171 jobs).. Modules generated: 56; with `main` on axioms [propext, Quot.sound]: 56.
 
 ## Ledger rows (statement: every `Ok` return; `est` = the check holds after, `pres` = it holds after if it held before)
 

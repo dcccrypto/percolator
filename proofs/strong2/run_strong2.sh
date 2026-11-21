@@ -40,7 +40,7 @@ python3 "$HERE/valflow/check_assumptions2.py" "$SRC" "$WORK/mir/$REV.mir" >> "$O
 
 # generated files are rewritten by run2.py; stale modules of an earlier run are removed by it
 python3 "$HERE/valflow/run2.py" --mir "$WORK/mir/$REV.mir" --spans-mir "$WORK/mir/$REV.spans.mir" \
-  --src "$SRC/src/v16.rs" --gen "$GENDIR" --mirdir "$MIRDIR" --out "$OUT" --genns $GENNS --clean --sibling "$HERE/../novel/$SIB/ledger_results.tsv" \
+  --src "$SRC/src/v16.rs" --gen "$GENDIR" --mirdir "$MIRDIR" --out "$OUT" --genns $GENNS --clean --mutants --sibling "$HERE/../novel/$SIB/ledger_results.tsv" \
   --pin "engine: $ENGINE@$REV, src/v16.rs blob $V16; $RUSTC; $FLAGS" > "$OUT/run.txt"
 cat "$OUT/run.txt"
 ( cd "$HERE/lean" && PATH="$LEAN_TC/bin:$PATH" lake build 2>&1 | grep -v '^info: toolchain' > "$OUT/lake_build.log"; tail -1 "$OUT/lake_build.log" )
