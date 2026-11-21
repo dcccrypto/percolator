@@ -34,7 +34,8 @@ Toly's `Spec/*.lean` are separation-logic contracts over a Mir model that Aristo
 ## Earlier work in this directory (superseded framing)
 
 - Run 2 (project `eb31e0d7`, task `c6bd990e`): cancelled after about 2 minutes, **nothing proved**; not resubmitted and not continued. Its files (`project/`, `gen_slice2.py`, `slice_diff2.py`, `SLICE-DIFF*.md`, `check/`, `statements/`, `prompts/`) are kept as a record. Its two findings from running the engine text still stand as test results, not proofs: run 1's invariant is not kept by a close once `clear_fully_diluted_resolved_receipt_if_terminal` is in the code, and run 1's RC6 is false on the engine text.
-- Run 1 (`../ours/`, RC1–RC7): proofs about a hand transcription, not about c38b6b1e and not of any T15/T14 row (see LEDGER-MAP).
+- Run 1 (`../ours/`, RC1–RC7): Aristotle reported them PROVED about a hand transcription (no proof terms returned, not rechecked); not about c38b6b1e and not of any T15/T14 row (see LEDGER-MAP).
+- The independent audit [AUDIT.md](AUDIT.md) (commit a60260e6) is of run 2's framing at 0b7a6a4f, before v3. Its findings A1, A2, A4, A6, A7, A8, A11, A12 are about run 2's `Inv`, slice and statements, which v3 does not use; A3, A5, A9, A10 were corrected in the docs. It also confirms, independently, that F3's text is identical and that v16.rs has no `Cell`/`RefCell`/`UnsafeCell` (which the T14 statement relies on).
 
 ## Files
 

@@ -42,7 +42,7 @@ when they exist (see [JOB.md](JOB.md)).
 
 | Run | Labels | Toly row | Status for the engine |
 |---|---|---|---|
-| Run 1 (`../ours/`) | RC1–RC7 | **no row** | Proved by Aristotle about a **hand transcription** of the close path ([../ours/SLICE-DIFF.md](../ours/SLICE-DIFF.md)), not about `c38b6b1e`. They are proofs of the transcription, **not** of T15 or T14. RC2/RC4/RC5/RC7 rest on an invariant that run 2's random search shows is not kept by the engine's close; RC6 is false on the engine text; RC3 does not carry over ([README](README.md) of run 2, section Result). |
+| Run 1 (`../ours/`) | RC1–RC7 | **no row** | Aristotle reported PROVED (no proof terms returned, not rechecked locally) about a **hand transcription** of the close path ([../ours/SLICE-DIFF.md](../ours/SLICE-DIFF.md)), not about `c38b6b1e`. They are proofs of the transcription, **not** of T15 or T14. RC2/RC4/RC5/RC7 rest on an invariant that run 2's random search shows is not kept by the engine's close; RC6 is false on the engine text; RC3 does not carry over ([README](README.md) of run 2, section Result). |
 | Run 2 (project eb31e0d7, task c6bd990e) | RCs1, RCs2, RCs4, RCs5, RCs7, RC3s, RC6s, F3 | **no row** (F3 is F3) | Cancelled after ~2 minutes; **nothing proved**. Not resubmitted and not continued. Its framing (`project/`, `gen_slice2.py`) is superseded by v3. |
 
 ## Source reading of T15's Ok paths on our text (reading, not a proof)

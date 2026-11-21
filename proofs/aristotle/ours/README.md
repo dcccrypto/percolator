@@ -1,8 +1,8 @@
 # Resolved close: Aristotle results (run 1)
 
-**Read [../ours2/README.md](../ours2/README.md) first.** Run 2 works on the engine's own text for this path; this folder is the record of run 1 and is not changed apart from this note.
+**Read [../ours2/README.md](../ours2/README.md) first.** This folder is the record of run 1. Its README, JOB.md and ledger were edited after the run (commits `d84c3434`, `30a018c8`, `84f46ce0` and the correction of 2026-11-21 ~04:30 UTC, after the independent audit `../ours2/AUDIT.md`).
 
-Run 1: seven properties (RC1–RC7) were proved on Harmonic's Aristotle about a Rust **hand transcription** of the close path, not about the engine source; none were refuted. The run took about 87 minutes and assumed the `wide_mul_div_floor_u128` contract. Kani covers the same path for one or two accounts with bounded amounts.
+Run 1: Aristotle reported RC1–RC7 PROVED about a Rust **hand transcription** of the close path, not about the engine source; none were refuted. It returned no proof terms, and nothing was rechecked locally with a Lean kernel. The `PREPARED, NOT SUBMITTED` statuses in `ledger.tsv` are from before the run and were not updated; [JOB.md](JOB.md) has the reported verdicts. The run took about 87 minutes and assumed the `wide_mul_div_floor_u128` contract. Kani harnesses exist for parts of this path (`tests/proofs_v16.rs`); no Kani result for them is recorded here, and the whole-path e2e close harnesses (`tests/proofs_e2e_resolved_close.rs`, on this branch only) did not finish.
 
 What run 1 does and does not say about the engine (details in [SLICE-DIFF.md](SLICE-DIFF.md) and in run 2):
 
