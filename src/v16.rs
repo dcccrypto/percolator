@@ -11936,6 +11936,35 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    /// Return `amount` of an account's counterparty lien backing to its bucket. A Fresh bucket
+    /// that has lapsed is first moved through the canonical expiry transition, so its liened
+    /// principal becomes impaired (spec: lapsed liens are Impaired and never raise
+    /// `available_backing_num`); an impaired lien is then retired from the impaired lane.
+    fn release_or_retire_counterparty_lien_backing_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let current_slot = self.header.current_slot.get();
+        let mut bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= current_slot {
+            self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
+            bucket = self.backing_bucket_for_domain(domain)?;
+        }
+        match bucket.status {
+            BackingBucketStatusV16::Fresh => {
+                self.release_source_credit_lien_from_counterparty_terminal_not_atomic(domain, amount)
+            }
+            BackingBucketStatusV16::Impaired => {
+                self.retire_source_credit_lien_from_counterparty_impaired_not_atomic(domain, amount)
+            }
+            _ => Err(V16Error::CounterUnderflow),
+        }
+    }
+
     fn retire_source_credit_lien_from_counterparty_impaired_not_atomic(
         &mut self,
         domain: usize,
@@ -12850,6 +12879,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP {
             return Err(V16Error::InvalidLeg);
         }
+        // When the burn retires counterparty backing from the impaired lane (Impaired bucket,
+        // or a lapsed Fresh one that expiry will impair), the provider's accrued utilization
+        // fee is collected first, as the other impaired-retirement paths do.
+        if account.header.source_domains[slot]
+            .source_lien_counterparty_backing_num
+            .get()
+            != 0
+        {
+            let bucket = self.backing_bucket_for_domain(domain)?;
+            if bucket.status == BackingBucketStatusV16::Impaired
+                || (bucket.status == BackingBucketStatusV16::Fresh
+                    && bucket.expiry_slot <= self.header.current_slot.get())
+            {
+                self.collect_account_backing_utilization_fee_for_domain_not_atomic(account, domain)?;
+            }
+        }
         let source_before = account.header.source_domains[slot];
         if face_burn_num > source_before.source_claim_liened_num.get() {
             return Err(V16Error::CounterUnderflow);
@@ -12869,33 +12914,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?;
 
         if counterparty_backing_release != 0 {
-            // C-S-20: canonicalize a LAPSED `Fresh` bucket before the release.
-            // Unwinding returns already-liened principal and does not extend new
-            // credit, so expiry must not BLOCK a loss from being recognized — but
-            // it must not be SKIPPED either. spec.md:562 ("if a counterparty
-            // backing bucket expires ... the lien becomes `Impaired`") and the
-            // expiry rule at spec.md:342-357 ("liened backing in an expiring
-            // bucket MUST NOT cause `available_backing_num` underflow or
-            // inflation ... on expiry the engine MUST [refresh | atomically
-            // expire | route to recovery] before any credit-rate read") make the
-            // lapsed case a forfeit to the junior pool, not an un-pledge back to
-            // the provider. Without this, the expiry-agnostic terminal kernel
-            // (:2869, scoped by its own doc comment to Resolved wind-down) moves
-            // `valid_liened -> fresh_unliened` in LIVE mode, `:9148`'s withdraw
-            // gate then pays the lapsed principal out (wrapper tag 50), and the
-            // junior residual pool loses it atom for atom.
-            //
-            // Expiry moves the liened principal into the impaired counters; the
-            // release below then clears exactly those counters through the LIEN-1
-            // impaired arm (:2877-2898) WITHOUT re-crediting fresh backing, so the
-            // loss still settles and the burn stays live. Same shape as the Live
-            // retirement sibling at :19782-19794.
-            let now = self.header.current_slot.get();
-            let bucket = self.backing_bucket_for_domain(domain)?;
-            if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= now {
-                self.expire_source_backing_bucket_not_atomic(domain, now)?;
-            }
-            self.release_source_credit_lien_from_counterparty_terminal_not_atomic(
+            // Unwinding returns already-liened principal; it does not extend new
+            // credit, so expiry must not block a loss from being recognized. A lapsed
+            // or impaired bucket's lien is impaired by spec, so it is retired from the
+            // impaired lane rather than un-pledged back into fresh backing.
+            // (upstream c85b148b, #206; it subsumes this fork's C-S-20 inline expiry step,
+            // which is now the first step of the helper.)
+            self.release_or_retire_counterparty_lien_backing_not_atomic(
                 domain,
                 counterparty_backing_release,
             )?;
