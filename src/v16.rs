@@ -1135,6 +1135,82 @@ impl V16Core {
         domain_insurance_spent_remaining.min(claim_free_residual_remaining)
     }
 
+    /// Whether one asset owes a nonzero claim-free terminal recredit.
+    ///
+    /// Exactly `terminal_claim_free_recredit_total_reference(..) != 0` (the
+    /// four-term sum the per-asset recredit applies), pinned by the
+    /// differential tests in `terminal_recredit_scan_predicate_tests`:
+    /// - both paired spends zero: every term is a `min` with a zero spend, so
+    ///   the sum is zero;
+    /// - residual `r > 0` and short spend `s > 0`: either the long-source
+    ///   overlap is positive, or it is zero and then either the short-source
+    ///   overlap is positive or `min(s, r) > 0` is the short unconsumed term;
+    /// - residual `r > 0` and long spend `> 0`: symmetric, the long unconsumed
+    ///   term is positive unless an earlier term already is.
+    ///
+    /// The terminal scans only need this yes/no answer, so they skip the two
+    /// `u128` divisions by `BOUND_SCALE` and the checked chain per asset
+    /// (about 450 CU per asset on SBF).
+    #[inline]
+    fn terminal_claim_free_recreditable(
+        claim_free_residual: u128,
+        insurance_domain_spent_short: u128,
+        insurance_domain_spent_long: u128,
+    ) -> bool {
+        claim_free_residual != 0
+            && (insurance_domain_spent_short != 0 || insurance_domain_spent_long != 0)
+    }
+
+    /// The pre-cut per-asset recredit sum, kept verbatim as the reference for
+    /// the differential tests of `terminal_claim_free_recreditable`.
+    #[cfg(test)]
+    fn terminal_claim_free_recredit_total_reference(
+        source_credit_long_provider_receivable_num: u128,
+        source_credit_short_provider_receivable_num: u128,
+        insurance_domain_spent_long: u128,
+        insurance_domain_spent_short: u128,
+        claim_free_residual: u128,
+    ) -> V16Result<u128> {
+        let long_source_recredit = V16Core::terminal_claim_free_overlap_recredit(
+            source_credit_long_provider_receivable_num / BOUND_SCALE,
+            insurance_domain_spent_short,
+            claim_free_residual,
+        );
+        let residual_after_long = claim_free_residual
+            .checked_sub(long_source_recredit)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let short_source_recredit = V16Core::terminal_claim_free_overlap_recredit(
+            source_credit_short_provider_receivable_num / BOUND_SCALE,
+            insurance_domain_spent_long,
+            residual_after_long,
+        );
+        let residual_after_overlap = residual_after_long
+            .checked_sub(short_source_recredit)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let short_spent_remaining = insurance_domain_spent_short
+            .checked_sub(long_source_recredit)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let short_unconsumed = V16Core::terminal_claim_free_unconsumed_spend_recredit(
+            short_spent_remaining,
+            residual_after_overlap,
+        );
+        let residual_after_short = residual_after_overlap
+            .checked_sub(short_unconsumed)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let long_spent_remaining = insurance_domain_spent_long
+            .checked_sub(short_source_recredit)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let long_unconsumed = V16Core::terminal_claim_free_unconsumed_spend_recredit(
+            long_spent_remaining,
+            residual_after_short,
+        );
+        long_source_recredit
+            .checked_add(short_source_recredit)
+            .and_then(|value| value.checked_add(short_unconsumed))
+            .and_then(|value| value.checked_add(long_unconsumed))
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
     /// One asset step of the bounded terminal slab scan, priority ordered:
     /// expire a lapsed long, then short, bucket; recredit; wait on live
     /// backing; else continue. (upstream 6f3c5c12 / 545e0224)
@@ -11277,70 +11353,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    /// Read-only recredit amount for one persisted asset slot, so the bounded
-    /// scan does no view resolution. (upstream af7b4d2a)
-    fn terminal_claim_free_recredit_for_slot(
+    /// Read-only "owes a recredit" check for one persisted asset slot, so the
+    /// bounded scan does no view resolution. (upstream af7b4d2a; the amount is
+    /// computed only by the recredit itself, see `terminal_claim_free_recreditable`)
+    fn terminal_claim_free_recreditable_slot(
         slot: &EngineAssetSlotV16Account,
         claim_free_residual: u128,
-    ) -> V16Result<u128> {
-        let long_source_recredit = V16Core::terminal_claim_free_overlap_recredit(
-            slot.source_credit_long.provider_receivable_num.get() / BOUND_SCALE,
-            slot.insurance_domain_spent_short.get(),
+    ) -> bool {
+        V16Core::terminal_claim_free_recreditable(
             claim_free_residual,
-        );
-        let residual_after_long = claim_free_residual
-            .checked_sub(long_source_recredit)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let short_source_recredit = V16Core::terminal_claim_free_overlap_recredit(
-            slot.source_credit_short.provider_receivable_num.get() / BOUND_SCALE,
+            slot.insurance_domain_spent_short.get(),
             slot.insurance_domain_spent_long.get(),
-            residual_after_long,
-        );
-        let residual_after_overlap = residual_after_long
-            .checked_sub(short_source_recredit)
-            .ok_or(V16Error::CounterUnderflow)?;
-        // Second stage mirrors `recredit_terminal_claim_free_residual_for_asset_core_not_atomic`:
-        // unconsumed spend on the short insurance domain, then the long one.
-        let short_spent_remaining = slot
-            .insurance_domain_spent_short
-            .get()
-            .checked_sub(long_source_recredit)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let short_unconsumed = V16Core::terminal_claim_free_unconsumed_spend_recredit(
-            short_spent_remaining,
-            residual_after_overlap,
-        );
-        let residual_after_short = residual_after_overlap
-            .checked_sub(short_unconsumed)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let long_spent_remaining = slot
-            .insurance_domain_spent_long
-            .get()
-            .checked_sub(short_source_recredit)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let long_unconsumed = V16Core::terminal_claim_free_unconsumed_spend_recredit(
-            long_spent_remaining,
-            residual_after_short,
-        );
-        long_source_recredit
-            .checked_add(short_source_recredit)
-            .and_then(|value| value.checked_add(short_unconsumed))
-            .and_then(|value| value.checked_add(long_unconsumed))
-            .ok_or(V16Error::ArithmeticOverflow)
+        )
     }
 
     fn first_terminal_claim_free_recredit_asset(&self) -> V16Result<Option<usize>> {
+        let configured_assets = self.header.config.max_market_slots.get() as usize;
+        self.first_terminal_claim_free_recredit_asset_below(configured_assets)
+    }
+
+    /// First asset in `[0, scan_end_exclusive)` that owes a claim-free terminal
+    /// recredit, if any.
+    fn first_terminal_claim_free_recredit_asset_below(
+        &self,
+        scan_end_exclusive: usize,
+    ) -> V16Result<Option<usize>> {
         let residual = self.residual();
         if residual == 0 {
             return Ok(None);
         }
-        let configured_assets = self.header.config.max_market_slots.get() as usize;
-        for asset_index in 0..configured_assets {
-            if Self::terminal_claim_free_recredit_for_slot(
+        for asset_index in 0..scan_end_exclusive {
+            if Self::terminal_claim_free_recreditable_slot(
                 self.markets[asset_index].engine_slot(),
                 residual,
-            )? != 0
-            {
+            ) {
                 return Ok(Some(asset_index));
             }
         }
@@ -11455,7 +11501,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     let long_status = decode_backing_bucket_status(slot.backing_long.status)?;
                     let short_status = decode_backing_bucket_status(slot.backing_short.status)?;
                     let recreditable = inspect_recredit
-                        && Self::terminal_claim_free_recredit_for_slot(slot, residual)? != 0;
+                        && Self::terminal_claim_free_recreditable_slot(slot, residual);
                     V16Core::kernel_terminal_slab_asset_step(
                         if inspect_backing {
                             long_status
@@ -11528,7 +11574,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // the close sequence forever. The returned index is strictly below the
         // cursor (anything at or above it was just inspected), so the next call
         // recredits it and the scan makes progress.
-        if let Some(next_asset_index) = self.first_terminal_claim_free_recredit_asset()? {
+        //
+        // Only `[0, scan_start_asset_index)` needs re-checking: reaching this point
+        // with a nonzero residual means the loop above ran to `configured_assets`
+        // over `[scan_start_asset_index, configured_assets)` on this same, unmutated
+        // state and every asset there stepped `Continue`, which
+        // `kernel_terminal_slab_asset_step` only returns when the asset is not
+        // recreditable. With a zero residual the helper returns `None` either way.
+        if let Some(next_asset_index) =
+            self.first_terminal_claim_free_recredit_asset_below(scan_start_asset_index)?
+        {
             return Ok(TerminalSlabOutcomeV16::ScanProgress { next_asset_index });
         }
 
@@ -31132,6 +31187,95 @@ mod rent_not_kf_cohort_tests {
                 !MarketGroupV16ViewMut::<u64>::leg_kf_and_rent_are_current(asset, leg),
                 "an older K/F epoch is not current"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod terminal_recredit_scan_predicate_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn old_recreditable(
+        recv_long_num: u128,
+        recv_short_num: u128,
+        spent_long: u128,
+        spent_short: u128,
+        residual: u128,
+    ) -> bool {
+        // Old scan: `terminal_claim_free_recredit_for_slot(..)? != 0` behind the
+        // `residual == 0` early return. It never errors (each term is bounded by
+        // what remains), so an `Err` here is itself a test failure.
+        residual != 0
+            && V16Core::terminal_claim_free_recredit_total_reference(
+                recv_long_num,
+                recv_short_num,
+                spent_long,
+                spent_short,
+                residual,
+            )
+            .expect("reference recredit sum never errors")
+                != 0
+    }
+
+    fn edge_u128() -> impl Strategy<Value = u128> {
+        prop_oneof![
+            Just(0u128),
+            Just(1u128),
+            Just(BOUND_SCALE - 1),
+            Just(BOUND_SCALE),
+            Just(u128::MAX),
+            0u128..1_000,
+            0u128..(1_000 * BOUND_SCALE),
+            any::<u128>(),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20_000))]
+
+        /// Old full recredit sum `!= 0` vs the new two-field predicate, per slot.
+        #[test]
+        fn recredit_scan_predicate_matches_full_recredit_sum(
+            recv_long_num in edge_u128(),
+            recv_short_num in edge_u128(),
+            spent_long in edge_u128(),
+            spent_short in edge_u128(),
+            residual in edge_u128(),
+        ) {
+            prop_assert_eq!(
+                old_recreditable(recv_long_num, recv_short_num, spent_long, spent_short, residual),
+                V16Core::terminal_claim_free_recreditable(residual, spent_short, spent_long)
+            );
+        }
+
+        /// Whole-scan differential over random slot states: the first asset the
+        /// old scan reports equals the first asset the new scan reports, and the
+        /// cursor-bounded fall-through (`[0, start)` after `[start, n)` all came back
+        /// non-recreditable) finds the same asset as the old full rescan.
+        #[test]
+        fn recredit_scan_first_asset_matches_old_scan(
+            slots in proptest::collection::vec(
+                (edge_u128(), edge_u128(), edge_u128(), edge_u128()), 1..=16),
+            residual in edge_u128(),
+            start_seed in any::<usize>(),
+        ) {
+            let old_first = slots.iter().position(|&(rl, rs, sl, ss)| old_recreditable(rl, rs, sl, ss, residual));
+            let new_first = slots.iter().position(|&(_, _, sl, ss)| {
+                V16Core::terminal_claim_free_recreditable(residual, ss, sl)
+            });
+            prop_assert_eq!(old_first, new_first);
+
+            let start = start_seed % slots.len();
+            let upper_clean = slots[start..]
+                .iter()
+                .all(|&(rl, rs, sl, ss)| !old_recreditable(rl, rs, sl, ss, residual));
+            if upper_clean {
+                let bounded = slots[..start].iter().position(|&(_, _, sl, ss)| {
+                    V16Core::terminal_claim_free_recreditable(residual, ss, sl)
+                });
+                prop_assert_eq!(old_first, bounded);
+            }
         }
     }
 }
