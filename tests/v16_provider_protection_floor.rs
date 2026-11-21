@@ -364,21 +364,21 @@ fn an_asset_restart_starts_the_floor_again() {
             .unwrap();
         w.provider[domain] = amount;
     }
-    w.trade(0, 1, 0, 1);
-    w.step(0, PX0 + 2, 0);
-    w.refresh(0);
-    assert_eq!(protection_and_floor(&w, 1), (14, 14));
-    w.trade(1, 0, 0, 1);
-    w.refresh(0);
-    assert_eq!(w.convert(0), Ok(2));
-    assert_eq!(w.domain(1), (0, 16));
-    assert_eq!(protection_and_floor(&w, 1), (16, 14));
+    // v2.2 adaptation. Upstream first records a low of 14 in domain 1 with a trade
+    // whose gain is closed and converted. The conversion leaves spent-backing audit
+    // history that v2.2 cannot clear (no `canonicalize_spent_backing_history_not_atomic`,
+    // upstream 35c42e20), so both retirement and restart refuse the asset (LockActive).
+    // Here the domains keep their deposit floors (7 and 16), which are just as much
+    // stored values that nothing brings up to date before the restart.
+    assert_eq!(protection_and_floor(&w, 1), (16, 16));
     assert_eq!(protection_and_floor(&w, 0), (7, 7));
 
-    // Both providers let their backing lapse: forfeited. Nothing has written
-    // either domain since, so the stored floors are the old ones.
-    w.step(0, PX0 + 2, 0);
-    w.step(0, PX0 + 2, 0);
+    // Both providers let their backing lapse: forfeited. The expiry brings each
+    // floor up to date from the state before it, so the stored floors are the old
+    // ones while a reader sees zero.
+    while w.slot < expiry {
+        w.step(0, PX0, 0);
+    }
     let now = w.slot;
     for domain in [0, 1] {
         w.op(|m, _| m.expire_source_backing_bucket_not_atomic(domain, now))
@@ -386,17 +386,18 @@ fn an_asset_restart_starts_the_floor_again() {
         w.provider[domain] = 0;
         assert_eq!(protection_and_floor(&w, domain), (0, 0));
     }
-    assert_eq!((stored_floor(&w, 0), stored_floor(&w, 1)), (7, 14));
+    assert_eq!((stored_floor(&w, 0), stored_floor(&w, 1)), (7, 16));
 
     let old_market_id = w.markets[0].engine.asset.market_id.get();
     let slot = w.slot + 1;
     w.op(|m, _| m.force_asset_recovery_not_atomic(0, slot))
         .unwrap();
-    // Upstream clears domain 1's conversion audit history here with
-    // `canonicalize_spent_backing_history_not_atomic` (upstream 35c42e20, not on v2.2); the
-    // v2.2 restart takes the slot as it is. Either way nothing brings a floor up to date:
-    // both stored floors go into the restart as they are.
-    assert_eq!((stored_floor(&w, 0), stored_floor(&w, 1)), (7, 14));
+    // Upstream clears domain 1's conversion audit history and the lapsed buckets here
+    // (upstream 35c42e20). On v2.2 an asset whose buckets lapsed is restarted through
+    // retirement, which rewrites the lapsed buckets to the empty bucket. Neither step
+    // brings a floor up to date: both stored floors go into the restart as they are.
+    w.op(|m, _| m.retire_empty_asset_not_atomic(0, slot)).unwrap();
+    assert_eq!((stored_floor(&w, 0), stored_floor(&w, 1)), (7, 16));
 
     w.op(|m, _| m.restart_empty_asset_preserving_insurance_budget_not_atomic(0, PX0, slot))
         .unwrap();
