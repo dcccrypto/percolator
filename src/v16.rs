@@ -29475,7 +29475,20 @@ fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     #[cfg(not(kani))]
     return V16Core::mul_div_ceil_u128_or_wide(abs_basis_q, SOCIAL_WEIGHT_SCALE, a_basis);
     #[cfg(kani)]
-    return loss_weight_for_basis_wide_reference_for_test(abs_basis_q, a_basis);
+    return loss_weight_for_basis_wide(abs_basis_q, a_basis);
+}
+
+/// The original U512 loss-weight computation (a_basis != 0): the Kani path above and the
+/// reference for the differential test.
+#[cfg(any(kani, feature = "fuzz"))]
+fn loss_weight_for_basis_wide(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
+    checked_mul_div_ceil_u256(
+        U256::from_u128(abs_basis_q),
+        U256::from_u128(SOCIAL_WEIGHT_SCALE),
+        U256::from_u128(a_basis),
+    )
+    .and_then(|v| v.try_into_u128())
+    .ok_or(V16Error::ArithmeticOverflow)
 }
 
 /// Test hooks for `tests/loss_weight_u128_fast_path.rs` (`--features fuzz`): the production loss
@@ -29493,13 +29506,7 @@ pub fn loss_weight_for_basis_wide_reference_for_test(
     if a_basis == 0 {
         return Err(V16Error::InvalidLeg);
     }
-    checked_mul_div_ceil_u256(
-        U256::from_u128(abs_basis_q),
-        U256::from_u128(SOCIAL_WEIGHT_SCALE),
-        U256::from_u128(a_basis),
-    )
-    .and_then(|v| v.try_into_u128())
-    .ok_or(V16Error::ArithmeticOverflow)
+    loss_weight_for_basis_wide(abs_basis_q, a_basis)
 }
 
 #[cfg(any(kani, feature = "fuzz"))]
