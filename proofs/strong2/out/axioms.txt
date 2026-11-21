@@ -1,0 +1,30 @@
+'ClauseFlow.Gen.T18_header.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.Gen.T18_account.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.Gen.T15_header_checked_paths.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.Gen.T15_account_checked_paths.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.Gen.S_collect_account_backing_utilization_fee_for_domain_not_atomic.main' depends on axioms: [propext,
+ Quot.sound]
+'ClauseFlow.Gen.S_retire_source_credit_lien_from_counterparty_impaired_not_atomic.main' depends on axioms: [propext,
+ Quot.sound]
+'ClauseFlow.Gen.S_release_source_credit_lien_from_counterparty_terminal_not_atomic.main' depends on axioms: [propext,
+ Quot.sound]
+'ClauseFlow.Gen.S_release_source_credit_lien_from_insurance_terminal_not_atomic.main' depends on axioms: [propext,
+ Quot.sound]
+'ClauseFlow.Gen.S_release_source_credit_lien_from_insurance_not_atomic.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.Gen.S_release_account_source_credit_lien_for_domain_not_atomic.main' depends on axioms: [propext,
+ Quot.sound]
+'ClauseFlow.Gen.S_release_account_source_credit_liens_if_unneeded_core_not_atomic.main' depends on axioms: [propext,
+ Quot.sound]
+'ClauseFlow.Gen.S_release_account_source_credit_liens_if_unneeded_not_atomic.main' depends on axioms: [propext,
+ Quot.sound]
+'ClauseFlow.Gen.S_apply_released_pnl_conversion_with_consumption_core_not_atomic.main' depends on axioms: [propext,
+ Quot.sound]
+'ClauseFlow.Gen.S_apply_released_pnl_conversion_core_not_atomic.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.Gen.S_convert_released_pnl_to_capital_core_not_atomic.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.Gen.S_prepare_one_source_domain_for_resolved_close_not_atomic.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.Gen.S_expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic.main' depends on axioms: [propext,
+ Quot.sound]
+'ClauseFlow.Gen.S_charge_account_fee_current_not_atomic.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.Gen.S_sync_account_fee_to_slot_not_atomic.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.Gen.S_realize_one_source_domain_for_resolved_close_not_atomic.main' depends on axioms: [propext, Quot.sound]
+'ClauseFlow.Gen.S_clear_fully_diluted_resolved_receipt_if_terminal.main' depends on axioms: [propext, Quot.sound]

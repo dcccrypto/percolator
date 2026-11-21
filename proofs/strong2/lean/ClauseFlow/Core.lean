@@ -201,10 +201,24 @@ def implied (L : List Lit) (g : Lit) : Bool :=
 def fired (a : AState) (L : List Lit) : List Clause :=
   a.cls.filter (fun d => d.gs.all (implied L))
 
+/-- Literals that follow from `L` by one unit step: a ⊥-clause of `a` all of whose guards but
+one are known gives the negation of the remaining guard. -/
+def unitLits (a : AState) (L : List Lit) : List Lit :=
+  a.cls.flatMap (fun d =>
+    if d.c.isBot then
+      match d.gs.filter (fun g => !implied L g) with
+      | [g] => [(g.1, g.2.neg)]
+      | _ => []
+    else [])
+
+/-- Two rounds of unit propagation. -/
+def closure (a : AState) (L : List Lit) : List Lit :=
+  unitLits a (unitLits a L ++ L) ++ (unitLits a L ++ L)
+
 /-- `entailsCl a c`: clause `c` follows from the facts and clauses of `a`, by assuming the guards
-of `c` and firing once every clause of `a` whose guards are then known. -/
+of `c`, propagating units twice, and firing once every clause of `a` whose guards are then known. -/
 def entailsCl (a : AState) (c : Clause) : Bool :=
-  let L := c.gs ++ a.facts
+  let L := closure a (c.gs ++ a.facts)
   inconsistent L ||
   (fired a L).any (fun d => d.c.isBot) ||
   (match c.c with
@@ -237,6 +251,13 @@ def renameLit (m l : Local) (g : Lit) : Lit := if g.1 = m then (l, g.2) else g
 
 def renameCl (m l : Local) (c : Clause) : Clause := ⟨c.gs.map (renameLit m l), c.c⟩
 
+/-- For `l := (m == n)` or `l := (m != n)`: a guard on `m` against `n` restated as a guard on `l`. -/
+def swapLit (m : Local) (n : Nat) (l : Local) (tEq tNe : Test) (g : Lit) : Lit :=
+  if g = (m, Test.eq n) then (l, tEq) else if g = (m, Test.ne n) then (l, tNe) else g
+
+def cmpCls (a : AState) (m : Local) (n : Nat) (l : Local) (tEq tNe : Test) : List Clause :=
+  (a.cls.filter (mentions m)).map (fun c => ⟨c.gs.map (swapLit m n l tEq tNe), c.c⟩) ++ a.cls
+
 def tStmt : Stmt → AState → AState
   | .havoc l, a => kill l a
   | .write same, a => clobber same a
@@ -249,11 +270,13 @@ def tStmt : Stmt → AState → AState
   | .cmpEq l m n, a =>
     if l = m then kill l a else
     let a1 := kill l a
-    { a1 with cls := ⟨[(l, .eq 0), (m, .eq n)], .bot⟩ :: ⟨[(l, .ne 0), (m, .ne n)], .bot⟩ :: a1.cls }
+    { a1 with cls := ⟨[(l, .eq 0), (m, .eq n)], .bot⟩ :: ⟨[(l, .ne 0), (m, .ne n)], .bot⟩ ::
+        cmpCls a1 m n l (.ne 0) (.eq 0) }
   | .cmpNe l m n, a =>
     if l = m then kill l a else
     let a1 := kill l a
-    { a1 with cls := ⟨[(l, .ne 0), (m, .eq n)], .bot⟩ :: ⟨[(l, .eq 0), (m, .ne n)], .bot⟩ :: a1.cls }
+    { a1 with cls := ⟨[(l, .ne 0), (m, .eq n)], .bot⟩ :: ⟨[(l, .eq 0), (m, .ne n)], .bot⟩ ::
+        cmpCls a1 m n l (.eq 0) (.ne 0) }
 
 def tStmts : List Stmt → AState → AState
   | [], a => a
@@ -312,7 +335,7 @@ structure Goal where
 deriving Repr
 
 def edgeOk (inv : List (Option AState)) (e : Block × AState) : Bool :=
-  inconsistent e.2.facts ||
+  inconsistent (closure e.2 e.2.facts) ||
   match inv[e.1]? with
   | some (some c) => le e.2 c
   | _ => false
@@ -404,6 +427,56 @@ variable {W : Type} (chk : Nat → W → Bool)
 def Gamma (a : AState) (w0 w : W) (env : Env) : Prop :=
   (∀ f, f ∈ a.facts → Lit.holds env f) ∧ (∀ c, c ∈ a.cls → Clause.sat chk w0 w env c)
 
+theorem unitLits_sound {a : AState} {L : List Lit} {w0 w : W} {env : Env}
+    (hg : Gamma chk a w0 w env) (hL : ∀ p, p ∈ L → Lit.holds env p) :
+    ∀ p, p ∈ unitLits a L → Lit.holds env p := by
+  intro p hp
+  simp only [unitLits, List.mem_flatMap] at hp
+  obtain ⟨d, hd, hpd⟩ := hp
+  cases hb : d.c.isBot with
+  | false => simp [hb] at hpd
+  | true =>
+    simp only [hb, ite_true] at hpd
+    generalize hf : d.gs.filter (fun g => !implied L g) = fl at hpd
+    cases fl with
+    | nil => simp at hpd
+    | cons g t =>
+      cases t with
+      | cons _ _ => simp at hpd
+      | nil =>
+        simp only [List.mem_singleton] at hpd
+        subst hpd
+        simp only [Lit.holds]
+        apply Test.neg_holds.mpr
+        intro hgh
+        have hall : ∀ g', g' ∈ d.gs → Lit.holds env g' := by
+          intro g' hg'
+          by_cases hi : implied L g' = true
+          · exact implied_sound hL hi
+          · have hmem : g' ∈ d.gs.filter (fun g => !implied L g) := by
+              simp only [List.mem_filter, Bool.not_eq_true'] 
+              exact ⟨hg', by simpa using hi⟩
+            rw [hf] at hmem
+            simp only [List.mem_singleton] at hmem
+            subst hmem; exact hgh
+        have hs := hg.2 d hd hall
+        cases hdc : d.c with
+        | bot => rw [hdc] at hs; exact hs
+        | chk _ _ => rw [hdc] at hb; simp [Concl.isBot] at hb
+
+theorem closure_sound {a : AState} {L : List Lit} {w0 w : W} {env : Env}
+    (hg : Gamma chk a w0 w env) (hL : ∀ p, p ∈ L → Lit.holds env p) :
+    ∀ p, p ∈ closure a L → Lit.holds env p := by
+  have h1 : ∀ p, p ∈ unitLits a L ++ L → Lit.holds env p := by
+    intro p hp
+    rcases List.mem_append.mp hp with hp | hp
+    · exact unitLits_sound chk hg hL p hp
+    · exact hL p hp
+  intro p hp
+  rcases List.mem_append.mp hp with hp | hp
+  · exact unitLits_sound chk hg h1 p hp
+  · exact h1 p hp
+
 theorem fired_sat {a : AState} {L : List Lit} {w0 w : W} {env : Env}
     (hg : Gamma chk a w0 w env) (hL : ∀ p, p ∈ L → Lit.holds env p) :
     ∀ d, d ∈ fired a L → d.c.sat chk w0 w := by
@@ -414,11 +487,12 @@ theorem fired_sat {a : AState} {L : List Lit} {w0 w : W} {env : Env}
 theorem entailsCl_sound {a : AState} {c : Clause} {w0 w : W} {env : Env}
     (hg : Gamma chk a w0 w env) (h : entailsCl a c = true) : Clause.sat chk w0 w env c := by
   intro hgs
-  have hL : ∀ p, p ∈ c.gs ++ a.facts → Lit.holds env p := by
+  have hL0 : ∀ p, p ∈ c.gs ++ a.facts → Lit.holds env p := by
     intro p hp
     rcases List.mem_append.mp hp with hp | hp
     · exact hgs p hp
     · exact hg.1 p hp
+  have hL := closure_sound chk hg hL0
   have hF := fired_sat chk hg hL
   simp only [entailsCl, Bool.or_eq_true] at h
   rcases h with (h | h) | h
@@ -552,6 +626,35 @@ theorem gamma_cmp {a : AState} {w0 w : W} {env : Env} {l m : Local} {t1 t2 t3 t4
       exact h2 (hgs (l, t3) (by simp)) (hgs (m, t4) (by simp))
     · exact hg.2 c hc
 
+theorem swapLit_sound {env : Env} {m l : Local} {n : Nat} {tEq tNe : Test}
+    (h1 : tEq.holds (env l) → env m = n) (h2 : tNe.holds (env l) → env m ≠ n) (g : Lit) :
+    Lit.holds env (swapLit m n l tEq tNe g) → Lit.holds env g := by
+  intro h
+  by_cases e1 : g = (m, Test.eq n)
+  · subst e1
+    simp only [swapLit, ite_true] at h
+    exact h1 h
+  · by_cases e2 : g = (m, Test.ne n)
+    · subst e2
+      have hne : ((m, Test.ne n) : Lit) ≠ (m, Test.eq n) := by simp
+      simp only [swapLit, hne, ite_false, ite_true] at h
+      exact h2 h
+    · simp only [swapLit, e1, e2, ite_false] at h; exact h
+
+theorem gamma_cmpCls {a : AState} {w0 w : W} {env : Env} {m l : Local} {n : Nat} {tEq tNe : Test}
+    (h1 : tEq.holds (env l) → env m = n) (h2 : tNe.holds (env l) → env m ≠ n)
+    (hg : Gamma chk a w0 w env) :
+    Gamma chk { a with cls := cmpCls a m n l tEq tNe } w0 w env := by
+  refine ⟨hg.1, fun c hc => ?_⟩
+  rcases List.mem_append.mp hc with hc | hc
+  · simp only [List.mem_map, List.mem_filter] at hc
+    obtain ⟨c0, ⟨hc0, _⟩, rfl⟩ := hc
+    intro hgs
+    apply hg.2 c0 hc0
+    intro g hgm
+    exact swapLit_sound h1 h2 g (hgs _ (List.mem_map_of_mem hgm))
+  · exact hg.2 c hc
+
 theorem tStmt_sound {s : Stmt} {a : AState} {w0 w w' : W} {env env' : Env}
     (hg : Gamma chk a w0 w env) (hs : SStep chk s w env w' env') :
     Gamma chk (tStmt s a) w0 w' env' := by
@@ -600,22 +703,36 @@ theorem tStmt_sound {s : Stmt} {a : AState} {w0 w w' : W} {env env' : Env}
     · simp only [hlm, ite_true]; exact gamma_kill chk upd_other hg
     · simp only [hlm, ite_false]
       have hm : upd env l (if env m = n then 1 else 0) m = env m := upd_other m (fun h => hlm h.symm)
-      refine gamma_cmp chk ?_ ?_ (gamma_kill chk upd_other hg)
+      refine gamma_cmp chk ?_ ?_ (gamma_cmpCls chk ?_ ?_ (gamma_kill chk upd_other hg))
       · simp only [Test.holds, upd_self, hm]
         intro h1 h2; simp [h2] at h1
       · simp only [Test.holds, upd_self, hm]
         intro h1 h2; simp [h2] at h1
+      · simp only [Test.holds, upd_self, hm]
+        intro h1
+        by_cases hh : env m = n
+        · exact hh
+        · simp [hh] at h1
+      · simp only [Test.holds, upd_self, hm]
+        intro h1 hh; simp [hh] at h1
   | @cmpNe l m n =>
     simp only [tStmt]
     by_cases hlm : l = m
     · simp only [hlm, ite_true]; exact gamma_kill chk upd_other hg
     · simp only [hlm, ite_false]
       have hm : upd env l (if env m = n then 0 else 1) m = env m := upd_other m (fun h => hlm h.symm)
-      refine gamma_cmp chk ?_ ?_ (gamma_kill chk upd_other hg)
+      refine gamma_cmp chk ?_ ?_ (gamma_cmpCls chk ?_ ?_ (gamma_kill chk upd_other hg))
       · simp only [Test.holds, upd_self, hm]
         intro h1 h2; simp [h2] at h1
       · simp only [Test.holds, upd_self, hm]
         intro h1 h2; simp [h2] at h1
+      · simp only [Test.holds, upd_self, hm]
+        intro h1
+        by_cases hh : env m = n
+        · exact hh
+        · simp [hh] at h1
+      · simp only [Test.holds, upd_self, hm]
+        intro h1 hh; simp [hh] at h1
 
 theorem tStmts_sound {ss : List Stmt} {a : AState} {w0 w w' : W} {env env' : Env}
     (hg : Gamma chk a w0 w env) (hs : SSteps chk ss w env w' env') :
@@ -806,7 +923,7 @@ theorem edgeOk_sound {inv : List (Option AState)} {b : Block} {a : AState} {w0 w
     ∃ c, inv[b]? = some (some c) ∧ Gamma chk c w0 w env := by
   simp only [edgeOk, Bool.or_eq_true] at he
   rcases he with he | he
-  · rw [inconsistent_sound hg.1] at he; cases he
+  · rw [inconsistent_sound (closure_sound chk hg hg.1)] at he; cases he
   · cases hi : inv[b]? with
     | none => simp [hi] at he
     | some o =>

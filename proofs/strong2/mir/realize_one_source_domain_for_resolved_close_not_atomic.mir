@@ -1,0 +1,1612 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::realize_one_source_domain_for_resolved_close_not_atomic(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: &mut PortfolioV16ViewMut<'_>) -> Result<bool, V16Error> {
+    debug self => _1;
+    debug account => _2;
+    let mut _0: core::result::Result<bool, v16::V16Error>;
+    let mut _3: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, bool>;
+    let mut _4: core::result::Result<bool, v16::V16Error>;
+    let mut _5: u8;
+    let mut _6: isize;
+    let _7: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let _8: bool;
+    let _9: ();
+    let mut _11: bool;
+    let mut _12: usize;
+    let _14: usize;
+    let mut _15: bool;
+    let mut _16: bool;
+    let mut _17: bool;
+    let mut _18: bool;
+    let mut _19: u128;
+    let mut _20: v16::V16PodU128;
+    let mut _21: core::option::Option<v16::PortfolioSourceDomainV16Account>;
+    let mut _22: (usize, bool);
+    let mut _24: isize;
+    let mut _26: i128;
+    let mut _27: i128;
+    let mut _28: v16::V16PodI128;
+    let mut _30: u128;
+    let mut _31: v16::V16PodU128;
+    let mut _33: u32;
+    let mut _34: v16::V16PodU32;
+    let mut _36: v16::V16PodU128;
+    let mut _38: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u128>;
+    let mut _39: core::result::Result<u128, v16::V16Error>;
+    let _40: &v16::PortfolioV16View<'_>;
+    let _41: v16::PortfolioV16View<'_>;
+    let mut _42: &v16::PortfolioV16ViewMut<'_>;
+    let mut _43: isize;
+    let mut _46: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u128>;
+    let mut _47: core::result::Result<u128, v16::V16Error>;
+    let mut _48: isize;
+    let mut _51: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>>;
+    let mut _52: core::result::Result<(), v16::V16Error>;
+    let mut _53: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _54: isize;
+    let mut _56: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, v16::SourceCreditStateV16>;
+    let mut _57: core::result::Result<v16::SourceCreditStateV16, v16::V16Error>;
+    let mut _58: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _59: isize;
+    let mut _61: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u128>;
+    let mut _62: core::result::Result<u128, v16::V16Error>;
+    let mut _63: core::option::Option<u128>;
+    let mut _64: core::option::Option<wide_math::U256>;
+    let mut _65: core::option::Option<wide_math::U256>;
+    let mut _66: wide_math::U256;
+    let mut _67: wide_math::U256;
+    let mut _68: isize;
+    let mut _71: u128;
+    let mut _72: u128;
+    let mut _73: u128;
+    let mut _74: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u128>;
+    let mut _75: core::result::Result<u128, v16::V16Error>;
+    let mut _76: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _77: isize;
+    let mut _80: u128;
+    let mut _81: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, v16::SourceCreditConsumptionV16>;
+    let mut _82: core::result::Result<v16::SourceCreditConsumptionV16, v16::V16Error>;
+    let mut _83: u128;
+    let mut _84: isize;
+    let mut _87: bool;
+    let mut _88: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u128>;
+    let mut _89: core::result::Result<u128, v16::V16Error>;
+    let mut _90: u128;
+    let mut _91: isize;
+    let mut _94: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u128>;
+    let mut _95: core::result::Result<u128, v16::V16Error>;
+    let mut _96: u128;
+    let mut _97: v16::ReleasedPnlConversionDispositionV16;
+    let mut _98: isize;
+    let mut _101: bool;
+    let mut _102: u128;
+    let mut _103: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, bool>;
+    let mut _104: core::result::Result<bool, v16::V16Error>;
+    let mut _105: &v16::MarketGroupV16ViewMut<'_, T>;
+    let mut _106: isize;
+    let mut _109: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>>;
+    let mut _110: core::result::Result<(), v16::V16Error>;
+    let mut _111: isize;
+    let mut _114: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u128>;
+    let mut _115: core::result::Result<u128, v16::V16Error>;
+    let mut _116: isize;
+    let mut _119: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u128>;
+    let mut _120: core::result::Result<u128, v16::V16Error>;
+    let mut _121: u128;
+    let mut _122: v16::V16PodU128;
+    let mut _123: isize;
+    let mut _126: v16::V16PodU128;
+    let mut _127: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, bool>;
+    let mut _128: core::result::Result<bool, v16::V16Error>;
+    let mut _129: u8;
+    let mut _130: isize;
+    let mut _134: i128;
+    let mut _135: i128;
+    let mut _136: v16::V16PodI128;
+    let mut _137: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u128>;
+    let mut _138: core::result::Result<u128, v16::V16Error>;
+    let mut _139: core::option::Option<u128>;
+    let mut _140: isize;
+    let mut _143: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, v16::ResolvedPayoutLedgerV16>;
+    let mut _144: core::result::Result<v16::ResolvedPayoutLedgerV16, v16::V16Error>;
+    let mut _145: &v16::ResolvedPayoutLedgerV16Account;
+    let mut _146: isize;
+    let mut _149: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u128>;
+    let mut _150: core::result::Result<u128, v16::V16Error>;
+    let mut _151: isize;
+    let mut _154: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>>;
+    let mut _155: core::result::Result<(), v16::V16Error>;
+    let mut _156: isize;
+    let _158: ();
+    let mut _159: &mut v16::PortfolioAccountV16Account;
+    let mut _160: &mut v16::PortfolioAccountV16Account;
+    let mut _161: &mut v16::PortfolioAccountV16Account;
+    let mut _162: &mut v16::PortfolioAccountV16Account;
+    let mut _163: &mut v16::PortfolioAccountV16Account;
+    let mut _164: &mut v16::PortfolioAccountV16Account;
+    let mut _165: &mut v16::PortfolioAccountV16Account;
+    let mut _166: &mut v16::MarketGroupV16HeaderAccount;
+    let mut _167: &mut v16::PortfolioAccountV16Account;
+    let mut _168: &mut v16::MarketGroupV16HeaderAccount;
+    scope 1 {
+        debug residual => _7;
+        scope 2 {
+        }
+    }
+    scope 3 {
+        debug val => _8;
+        scope 4 {
+        }
+    }
+    scope 5 {
+        debug claim_source => _21;
+        let mut _10: usize;
+        scope 6 {
+            debug slot => _10;
+            let _13: v16::PortfolioSourceDomainV16Account;
+            let _23: v16::PortfolioSourceDomainV16Account;
+            scope 7 {
+                debug source => _13;
+            }
+            scope 8 {
+                debug source => _23;
+                let _25: u128;
+                scope 9 {
+                    debug pos => _25;
+                    let _29: u128;
+                    scope 10 {
+                        debug released => _29;
+                        let _32: usize;
+                        scope 11 {
+                            debug source_domain => _32;
+                            let _35: u128;
+                            scope 12 {
+                                debug source_claim_num => _35;
+                                let _37: u128;
+                                let _44: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                let _45: u128;
+                                let _49: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                let _50: u128;
+                                scope 13 {
+                                    debug claim_num => _37;
+                                    scope 22 {
+                                        debug converted => _71;
+                                        let _55: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                        let _60: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                        let _107: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                        let _108: bool;
+                                        let _112: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                        let _113: u128;
+                                        let _117: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                        let _118: u128;
+                                        let _169: u128;
+                                        let _170: u128;
+                                        let _171: u128;
+                                        let _172: u128;
+                                        let _173: u128;
+                                        let _174: u128;
+                                        let _175: u128;
+                                        let _176: u128;
+                                        let _177: u128;
+                                        let _178: u128;
+                                        let _179: u128;
+                                        let _180: u64;
+                                        scope 23 {
+                                            debug residual => _55;
+                                            scope 24 {
+                                            }
+                                        }
+                                        scope 25 {
+                                            debug val => const ();
+                                            scope 26 {
+                                            }
+                                        }
+                                        scope 27 {
+                                            debug rate => _179;
+                                            let _69: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                            let _70: u128;
+                                            scope 32 {
+                                                debug credited_num => _70;
+                                                let _78: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                                let _79: u128;
+                                                let _85: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                                let _86: v16::SourceCreditConsumptionV16;
+                                                scope 37 {
+                                                    debug residual => _78;
+                                                    scope 38 {
+                                                    }
+                                                }
+                                                scope 39 {
+                                                    debug val => _79;
+                                                    scope 40 {
+                                                    }
+                                                }
+                                                scope 41 {
+                                                    debug consumption => _86;
+                                                    let _92: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                                    let _93: u128;
+                                                    let _99: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                                    let _100: u128;
+                                                    scope 46 {
+                                                        debug residual => _92;
+                                                        scope 47 {
+                                                        }
+                                                    }
+                                                    scope 48 {
+                                                        debug val => _93;
+                                                        scope 49 {
+                                                        }
+                                                    }
+                                                    scope 50 {
+                                                        debug residual => _99;
+                                                        scope 51 {
+                                                        }
+                                                    }
+                                                    scope 52 {
+                                                        debug val => _100;
+                                                        scope 53 {
+                                                        }
+                                                    }
+                                                }
+                                                scope 42 {
+                                                    debug residual => _85;
+                                                    scope 43 {
+                                                    }
+                                                }
+                                                scope 44 {
+                                                    debug val => _86;
+                                                    scope 45 {
+                                                    }
+                                                }
+                                            }
+                                            scope 33 {
+                                                debug residual => _69;
+                                                scope 34 {
+                                                }
+                                            }
+                                            scope 35 {
+                                                debug val => _70;
+                                                scope 36 {
+                                                }
+                                            }
+                                        }
+                                        scope 28 {
+                                            debug residual => _60;
+                                            scope 29 {
+                                            }
+                                        }
+                                        scope 30 {
+                                            debug ((val: SourceCreditStateV16).0: u128) => _169;
+                                            debug ((val: SourceCreditStateV16).1: u128) => _170;
+                                            debug ((val: SourceCreditStateV16).2: u128) => _171;
+                                            debug ((val: SourceCreditStateV16).3: u128) => _172;
+                                            debug ((val: SourceCreditStateV16).4: u128) => _173;
+                                            debug ((val: SourceCreditStateV16).5: u128) => _174;
+                                            debug ((val: SourceCreditStateV16).6: u128) => _175;
+                                            debug ((val: SourceCreditStateV16).7: u128) => _176;
+                                            debug ((val: SourceCreditStateV16).8: u128) => _177;
+                                            debug ((val: SourceCreditStateV16).9: u128) => _178;
+                                            debug ((val: SourceCreditStateV16).10: u128) => _179;
+                                            debug ((val: SourceCreditStateV16).11: u64) => _180;
+                                            scope 31 {
+                                            }
+                                        }
+                                        scope 54 {
+                                            debug residual => _107;
+                                            scope 55 {
+                                            }
+                                        }
+                                        scope 56 {
+                                            debug val => _108;
+                                            scope 57 {
+                                            }
+                                        }
+                                        scope 58 {
+                                            debug residual => _112;
+                                            scope 59 {
+                                            }
+                                        }
+                                        scope 60 {
+                                            debug val => const ();
+                                            scope 61 {
+                                            }
+                                        }
+                                        scope 62 {
+                                            debug source_attributed_face => _113;
+                                            let _124: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                            let _125: u128;
+                                            scope 67 {
+                                                debug reserved_pnl => _125;
+                                                let _131: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                                let _132: bool;
+                                                let _133: u128;
+                                                scope 72 {
+                                                    debug residual => _131;
+                                                    scope 73 {
+                                                    }
+                                                }
+                                                scope 74 {
+                                                    debug val => _132;
+                                                    scope 75 {
+                                                    }
+                                                }
+                                                scope 76 {
+                                                    debug pos_after => _133;
+                                                    let _141: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                                    let _142: u128;
+                                                    scope 77 {
+                                                        debug face_burned => _142;
+                                                        let _147: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                                        let _181: u128;
+                                                        let _182: u128;
+                                                        let _183: u128;
+                                                        let _184: u128;
+                                                        let _185: u128;
+                                                        let _186: u64;
+                                                        let _187: bool;
+                                                        let _188: bool;
+                                                        scope 82 {
+                                                            debug ((ledger: ResolvedPayoutLedgerV16).0: u128) => _181;
+                                                            debug ((ledger: ResolvedPayoutLedgerV16).1: u128) => _182;
+                                                            debug ((ledger: ResolvedPayoutLedgerV16).2: u128) => _183;
+                                                            debug ((ledger: ResolvedPayoutLedgerV16).3: u128) => _184;
+                                                            debug ((ledger: ResolvedPayoutLedgerV16).4: u128) => _185;
+                                                            debug ((ledger: ResolvedPayoutLedgerV16).5: u64) => _186;
+                                                            debug ((ledger: ResolvedPayoutLedgerV16).6: bool) => _187;
+                                                            debug ((ledger: ResolvedPayoutLedgerV16).7: bool) => _188;
+                                                            let _148: u128;
+                                                            let _152: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                                            let _153: u128;
+                                                            scope 87 {
+                                                                debug decrease_num => _148;
+                                                                let _157: core::result::Result<core::convert::Infallible, v16::V16Error>;
+                                                                scope 92 {
+                                                                    debug residual => _157;
+                                                                    scope 93 {
+                                                                    }
+                                                                }
+                                                                scope 94 {
+                                                                    debug val => const ();
+                                                                    scope 95 {
+                                                                    }
+                                                                }
+                                                            }
+                                                            scope 88 {
+                                                                debug residual => _152;
+                                                                scope 89 {
+                                                                }
+                                                            }
+                                                            scope 90 {
+                                                                debug val => _153;
+                                                                scope 91 {
+                                                                }
+                                                            }
+                                                        }
+                                                        scope 83 {
+                                                            debug residual => _147;
+                                                            scope 84 {
+                                                            }
+                                                        }
+                                                        scope 85 {
+                                                            debug ((val: ResolvedPayoutLedgerV16).0: u128) => _181;
+                                                            debug ((val: ResolvedPayoutLedgerV16).1: u128) => _182;
+                                                            debug ((val: ResolvedPayoutLedgerV16).2: u128) => _183;
+                                                            debug ((val: ResolvedPayoutLedgerV16).3: u128) => _184;
+                                                            debug ((val: ResolvedPayoutLedgerV16).4: u128) => _185;
+                                                            debug ((val: ResolvedPayoutLedgerV16).5: u64) => _186;
+                                                            debug ((val: ResolvedPayoutLedgerV16).6: bool) => _187;
+                                                            debug ((val: ResolvedPayoutLedgerV16).7: bool) => _188;
+                                                            scope 86 {
+                                                            }
+                                                        }
+                                                    }
+                                                    scope 78 {
+                                                        debug residual => _141;
+                                                        scope 79 {
+                                                        }
+                                                    }
+                                                    scope 80 {
+                                                        debug val => _142;
+                                                        scope 81 {
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            scope 68 {
+                                                debug residual => _124;
+                                                scope 69 {
+                                                }
+                                            }
+                                            scope 70 {
+                                                debug val => _125;
+                                                scope 71 {
+                                                }
+                                            }
+                                        }
+                                        scope 63 {
+                                            debug residual => _117;
+                                            scope 64 {
+                                            }
+                                        }
+                                        scope 65 {
+                                            debug val => _118;
+                                            scope 66 {
+                                            }
+                                        }
+                                    }
+                                }
+                                scope 14 {
+                                    debug residual => _44;
+                                    scope 15 {
+                                    }
+                                }
+                                scope 16 {
+                                    debug val => _45;
+                                    scope 17 {
+                                    }
+                                }
+                                scope 18 {
+                                    debug residual => _49;
+                                    scope 19 {
+                                    }
+                                }
+                                scope 20 {
+                                    debug val => _50;
+                                    scope 21 {
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    bb0: {
+        StorageLive(_3);
+        StorageLive(_4);
+        StorageLive(_5);
+        _159 = no_retag copy ((*_2).0: &mut v16::PortfolioAccountV16Account);
+        _5 = copy (((*_159).24: v16::ResolvedPayoutReceiptV16Account).4: u8);
+        _4 = decode_bool(move _5) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        StorageDead(_5);
+        _3 = <Result<bool, V16Error> as Try>::branch(move _4) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        StorageDead(_4);
+        _6 = discriminant(_3);
+        switchInt(move _6) -> [0: bb4, 1: bb5, otherwise: bb3];
+    }
+
+    bb3: {
+        unreachable;
+    }
+
+    bb4: {
+        _8 = copy ((_3 as Continue).0: bool);
+        switchInt(copy _8) -> [0: bb8, otherwise: bb7];
+    }
+
+    bb5: {
+        StorageLive(_7);
+        _7 = copy ((_3 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _7) -> [return: bb6, unwind continue];
+    }
+
+    bb6: {
+        StorageDead(_7);
+        StorageDead(_3);
+        goto -> bb172;
+    }
+
+    bb7: {
+        StorageDead(_3);
+        _0 = const Result::<bool, V16Error>::Ok(false);
+        goto -> bb172;
+    }
+
+    bb8: {
+        StorageDead(_3);
+        _9 = PortfolioV16ViewMut::<'_>::compact_source_domains(copy _2) -> [return: bb9, unwind continue];
+    }
+
+    bb9: {
+        _21 = Option::<PortfolioSourceDomainV16Account>::None;
+        StorageLive(_10);
+        _10 = const 0_usize;
+        goto -> bb10;
+    }
+
+    bb10: {
+        StorageLive(_11);
+        StorageLive(_12);
+        _12 = copy _10;
+        _11 = Lt(move _12, const 32_usize);
+        switchInt(move _11) -> [0: bb25, otherwise: bb11];
+    }
+
+    bb11: {
+        StorageDead(_12);
+        StorageLive(_13);
+        StorageLive(_14);
+        _14 = copy _10;
+        _15 = Lt(copy _14, const 32_usize);
+        assert(move _15, "index out of bounds: the length is {} but the index is {}", const 32_usize, copy _14) -> [success: bb12, unwind continue];
+    }
+
+    bb12: {
+        _160 = no_retag copy ((*_2).0: &mut v16::PortfolioAccountV16Account);
+        _13 = copy ((*_160).17: [v16::PortfolioSourceDomainV16Account; 32])[_14];
+        StorageDead(_14);
+        StorageLive(_16);
+        _16 = PortfolioSourceDomainV16Account::has_default_sparse_tag(copy _13) -> [return: bb13, unwind continue];
+    }
+
+    bb13: {
+        switchInt(move _16) -> [0: bb17, otherwise: bb14];
+    }
+
+    bb14: {
+        StorageLive(_17);
+        _17 = PortfolioSourceDomainV16Account::is_occupied(copy _13) -> [return: bb15, unwind continue];
+    }
+
+    bb15: {
+        switchInt(move _17) -> [0: bb16, otherwise: bb17];
+    }
+
+    bb16: {
+        StorageDead(_17);
+        StorageDead(_16);
+        StorageDead(_13);
+        goto -> bb26;
+    }
+
+    bb17: {
+        StorageDead(_17);
+        StorageDead(_16);
+        StorageLive(_18);
+        _18 = PortfolioSourceDomainV16Account::is_occupied(copy _13) -> [return: bb18, unwind continue];
+    }
+
+    bb18: {
+        switchInt(move _18) -> [0: bb23, otherwise: bb19];
+    }
+
+    bb19: {
+        StorageLive(_19);
+        StorageLive(_20);
+        _20 = copy (_13.2: v16::V16PodU128);
+        _19 = V16PodU128::get(move _20) -> [return: bb20, unwind continue];
+    }
+
+    bb20: {
+        StorageDead(_20);
+        switchInt(copy _19) -> [0: bb22, otherwise: bb21];
+    }
+
+    bb21: {
+        StorageDead(_19);
+        _21 = Option::<PortfolioSourceDomainV16Account>::Some(copy _13);
+        StorageDead(_18);
+        StorageDead(_13);
+        StorageDead(_11);
+        goto -> bb28;
+    }
+
+    bb22: {
+        StorageDead(_19);
+        goto -> bb23;
+    }
+
+    bb23: {
+        StorageDead(_18);
+        _22 = AddWithOverflow(copy _10, const 1_usize);
+        assert(!move (_22.1: bool), "attempt to compute `{} + {}`, which would overflow", copy _10, const 1_usize) -> [success: bb24, unwind continue];
+    }
+
+    bb24: {
+        _10 = move (_22.0: usize);
+        StorageDead(_13);
+        StorageDead(_11);
+        goto -> bb10;
+    }
+
+    bb25: {
+        StorageDead(_12);
+        goto -> bb26;
+    }
+
+    bb26: {
+        StorageDead(_11);
+        _24 = discriminant(_21);
+        switchInt(move _24) -> [1: bb28, 0: bb27, otherwise: bb3];
+    }
+
+    bb27: {
+        _0 = const Result::<bool, V16Error>::Ok(false);
+        goto -> bb171;
+    }
+
+    bb28: {
+        StorageLive(_23);
+        _23 = copy ((_21 as Some).0: v16::PortfolioSourceDomainV16Account);
+        StorageLive(_25);
+        StorageLive(_26);
+        StorageLive(_27);
+        StorageLive(_28);
+        _161 = no_retag copy ((*_2).0: &mut v16::PortfolioAccountV16Account);
+        _28 = copy ((*_161).3: v16::V16PodI128);
+        _27 = V16PodI128::get(move _28) -> [return: bb29, unwind continue];
+    }
+
+    bb29: {
+        StorageDead(_28);
+        _26 = <i128 as Ord>::max(move _27, const 0_i128) -> [return: bb30, unwind continue];
+    }
+
+    bb30: {
+        StorageDead(_27);
+        _25 = move _26 as u128 (IntToInt);
+        StorageDead(_26);
+        StorageLive(_29);
+        StorageLive(_30);
+        StorageLive(_31);
+        _162 = no_retag copy ((*_2).0: &mut v16::PortfolioAccountV16Account);
+        _31 = copy ((*_162).4: v16::V16PodU128);
+        _30 = V16PodU128::get(move _31) -> [return: bb31, unwind continue];
+    }
+
+    bb31: {
+        StorageDead(_31);
+        _29 = core::num::<impl u128>::saturating_sub(copy _25, move _30) -> [return: bb32, unwind continue];
+    }
+
+    bb32: {
+        StorageDead(_30);
+        StorageLive(_32);
+        StorageLive(_33);
+        StorageLive(_34);
+        _34 = copy (_23.0: v16::V16PodU32);
+        _33 = V16PodU32::get(move _34) -> [return: bb33, unwind continue];
+    }
+
+    bb33: {
+        StorageDead(_34);
+        _32 = move _33 as usize (IntToInt);
+        StorageDead(_33);
+        StorageLive(_35);
+        StorageLive(_36);
+        _36 = copy (_23.2: v16::V16PodU128);
+        _35 = V16PodU128::get(move _36) -> [return: bb34, unwind continue];
+    }
+
+    bb34: {
+        StorageDead(_36);
+        StorageLive(_37);
+        StorageLive(_38);
+        StorageLive(_39);
+        StorageLive(_40);
+        StorageLive(_41);
+        StorageLive(_42);
+        _42 = &(*_2);
+        _41 = PortfolioV16ViewMut::<'_>::as_view(move _42) -> [return: bb35, unwind continue];
+    }
+
+    bb35: {
+        StorageDead(_42);
+        _40 = &_41;
+        _39 = MarketGroupV16ViewMut::<'_, T>::source_claim_unliened_num(move _40, copy _32) -> [return: bb36, unwind continue];
+    }
+
+    bb36: {
+        _38 = <Result<u128, V16Error> as Try>::branch(move _39) -> [return: bb37, unwind continue];
+    }
+
+    bb37: {
+        StorageDead(_39);
+        _43 = discriminant(_38);
+        switchInt(move _43) -> [0: bb38, 1: bb39, otherwise: bb3];
+    }
+
+    bb38: {
+        _45 = copy ((_38 as Continue).0: u128);
+        StorageLive(_46);
+        StorageLive(_47);
+        _47 = V16Core::bound_num_from_amount(copy _29) -> [return: bb41, unwind continue];
+    }
+
+    bb39: {
+        StorageLive(_44);
+        _44 = copy ((_38 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _44) -> [return: bb40, unwind continue];
+    }
+
+    bb40: {
+        StorageDead(_44);
+        goto -> bb169;
+    }
+
+    bb41: {
+        _46 = <Result<u128, V16Error> as Try>::branch(move _47) -> [return: bb42, unwind continue];
+    }
+
+    bb42: {
+        StorageDead(_47);
+        _48 = discriminant(_46);
+        switchInt(move _48) -> [0: bb43, 1: bb44, otherwise: bb3];
+    }
+
+    bb43: {
+        _50 = copy ((_46 as Continue).0: u128);
+        _37 = <u128 as Ord>::min(move _45, move _50) -> [return: bb46, unwind continue];
+    }
+
+    bb44: {
+        StorageLive(_49);
+        _49 = copy ((_46 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _49) -> [return: bb45, unwind continue];
+    }
+
+    bb45: {
+        StorageDead(_49);
+        StorageDead(_46);
+        goto -> bb169;
+    }
+
+    bb46: {
+        StorageDead(_46);
+        StorageDead(_41);
+        StorageDead(_40);
+        StorageDead(_38);
+        _71 = const 0_u128;
+        switchInt(copy _37) -> [0: bb173, otherwise: bb47];
+    }
+
+    bb47: {
+        StorageLive(_51);
+        StorageLive(_52);
+        StorageLive(_53);
+        _53 = &(*_1);
+        _52 = MarketGroupV16ViewMut::<'_, T>::validate_source_domain_ledger_current(move _53, copy _32) -> [return: bb48, unwind continue];
+    }
+
+    bb48: {
+        StorageDead(_53);
+        _51 = <Result<(), V16Error> as Try>::branch(move _52) -> [return: bb49, unwind continue];
+    }
+
+    bb49: {
+        StorageDead(_52);
+        _54 = discriminant(_51);
+        switchInt(move _54) -> [0: bb50, 1: bb51, otherwise: bb3];
+    }
+
+    bb50: {
+        StorageDead(_51);
+        StorageLive(_56);
+        StorageLive(_57);
+        StorageLive(_58);
+        _58 = &(*_1);
+        _57 = MarketGroupV16ViewMut::<'_, T>::source_credit_for_domain(move _58, copy _32) -> [return: bb53, unwind continue];
+    }
+
+    bb51: {
+        StorageLive(_55);
+        _55 = copy ((_51 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _55) -> [return: bb52, unwind continue];
+    }
+
+    bb52: {
+        StorageDead(_55);
+        StorageDead(_51);
+        goto -> bb167;
+    }
+
+    bb53: {
+        StorageDead(_58);
+        _56 = <Result<SourceCreditStateV16, V16Error> as Try>::branch(move _57) -> [return: bb54, unwind continue];
+    }
+
+    bb54: {
+        StorageDead(_57);
+        _59 = discriminant(_56);
+        switchInt(move _59) -> [0: bb55, 1: bb56, otherwise: bb3];
+    }
+
+    bb55: {
+        StorageLive(_169);
+        StorageLive(_170);
+        StorageLive(_171);
+        StorageLive(_172);
+        StorageLive(_173);
+        StorageLive(_174);
+        StorageLive(_175);
+        StorageLive(_176);
+        StorageLive(_177);
+        StorageLive(_178);
+        StorageLive(_180);
+        _169 = copy (((_56 as Continue).0: v16::SourceCreditStateV16).0: u128);
+        _170 = copy (((_56 as Continue).0: v16::SourceCreditStateV16).1: u128);
+        _171 = copy (((_56 as Continue).0: v16::SourceCreditStateV16).2: u128);
+        _172 = copy (((_56 as Continue).0: v16::SourceCreditStateV16).3: u128);
+        _173 = copy (((_56 as Continue).0: v16::SourceCreditStateV16).4: u128);
+        _174 = copy (((_56 as Continue).0: v16::SourceCreditStateV16).5: u128);
+        _175 = copy (((_56 as Continue).0: v16::SourceCreditStateV16).6: u128);
+        _176 = copy (((_56 as Continue).0: v16::SourceCreditStateV16).7: u128);
+        _177 = copy (((_56 as Continue).0: v16::SourceCreditStateV16).8: u128);
+        _178 = copy (((_56 as Continue).0: v16::SourceCreditStateV16).9: u128);
+        _179 = copy (((_56 as Continue).0: v16::SourceCreditStateV16).10: u128);
+        _180 = copy (((_56 as Continue).0: v16::SourceCreditStateV16).11: u64);
+        StorageDead(_169);
+        StorageDead(_170);
+        StorageDead(_171);
+        StorageDead(_172);
+        StorageDead(_173);
+        StorageDead(_174);
+        StorageDead(_175);
+        StorageDead(_176);
+        StorageDead(_177);
+        StorageDead(_178);
+        StorageDead(_180);
+        StorageDead(_56);
+        StorageLive(_61);
+        StorageLive(_62);
+        StorageLive(_63);
+        StorageLive(_64);
+        StorageLive(_65);
+        StorageLive(_66);
+        _66 = U256::from_u128(copy _37) -> [return: bb58, unwind continue];
+    }
+
+    bb56: {
+        StorageLive(_60);
+        _60 = copy ((_56 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _60) -> [return: bb57, unwind continue];
+    }
+
+    bb57: {
+        StorageDead(_60);
+        StorageDead(_56);
+        goto -> bb166;
+    }
+
+    bb58: {
+        StorageLive(_67);
+        _67 = U256::from_u128(move _179) -> [return: bb59, unwind continue];
+    }
+
+    bb59: {
+        _65 = U256::checked_mul(move _66, move _67) -> [return: bb60, unwind continue];
+    }
+
+    bb60: {
+        StorageDead(_67);
+        StorageDead(_66);
+        _64 = Option::<U256>::and_then::<U256, {closure@src/v16.rs:26219:27: 26219:30}>(move _65, const ZeroSized: {closure@src/v16.rs:26219:27: 26219:30}) -> [return: bb61, unwind continue];
+    }
+
+    bb61: {
+        StorageDead(_65);
+        _63 = Option::<U256>::and_then::<u128, {closure@src/v16.rs:26220:27: 26220:30}>(move _64, const ZeroSized: {closure@src/v16.rs:26220:27: 26220:30}) -> [return: bb62, unwind continue];
+    }
+
+    bb62: {
+        StorageDead(_64);
+        _62 = Option::<u128>::ok_or::<V16Error>(move _63, const V16Error::ArithmeticOverflow) -> [return: bb63, unwind continue];
+    }
+
+    bb63: {
+        StorageDead(_63);
+        _61 = <Result<u128, V16Error> as Try>::branch(move _62) -> [return: bb64, unwind continue];
+    }
+
+    bb64: {
+        StorageDead(_62);
+        _68 = discriminant(_61);
+        switchInt(move _68) -> [0: bb65, 1: bb66, otherwise: bb3];
+    }
+
+    bb65: {
+        _70 = copy ((_61 as Continue).0: u128);
+        StorageDead(_61);
+        StorageLive(_72);
+        _72 = Div(copy _70, const 1000000000000_u128);
+        StorageLive(_73);
+        StorageLive(_74);
+        StorageLive(_75);
+        StorageLive(_76);
+        _76 = &(*_1);
+        _75 = MarketGroupV16ViewMut::<'_, T>::source_credit_available_backing_num(move _76, copy _32) -> [return: bb68, unwind continue];
+    }
+
+    bb66: {
+        StorageLive(_69);
+        _69 = copy ((_61 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _69) -> [return: bb67, unwind continue];
+    }
+
+    bb67: {
+        StorageDead(_69);
+        StorageDead(_61);
+        goto -> bb165;
+    }
+
+    bb68: {
+        StorageDead(_76);
+        _74 = <Result<u128, V16Error> as Try>::branch(move _75) -> [return: bb69, unwind continue];
+    }
+
+    bb69: {
+        StorageDead(_75);
+        _77 = discriminant(_74);
+        switchInt(move _77) -> [0: bb70, 1: bb71, otherwise: bb3];
+    }
+
+    bb70: {
+        _79 = copy ((_74 as Continue).0: u128);
+        _73 = Div(copy _79, const 1000000000000_u128);
+        _71 = <u128 as Ord>::min(move _72, move _73) -> [return: bb73, unwind continue];
+    }
+
+    bb71: {
+        StorageLive(_78);
+        _78 = copy ((_74 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _78) -> [return: bb72, unwind continue];
+    }
+
+    bb72: {
+        StorageDead(_78);
+        StorageDead(_73);
+        StorageDead(_72);
+        StorageDead(_74);
+        goto -> bb165;
+    }
+
+    bb73: {
+        StorageDead(_73);
+        StorageDead(_72);
+        StorageDead(_74);
+        StorageLive(_80);
+        _80 = copy _71;
+        switchInt(copy _80) -> [0: bb92, otherwise: bb74];
+    }
+
+    bb74: {
+        StorageDead(_80);
+        StorageLive(_81);
+        StorageLive(_82);
+        StorageLive(_83);
+        _83 = copy _71;
+        _82 = MarketGroupV16ViewMut::<'_, T>::consume_source_domain_credit_for_effective_not_atomic(copy _1, copy _32, move _83) -> [return: bb75, unwind continue];
+    }
+
+    bb75: {
+        StorageDead(_83);
+        _81 = <Result<SourceCreditConsumptionV16, V16Error> as Try>::branch(move _82) -> [return: bb76, unwind continue];
+    }
+
+    bb76: {
+        StorageDead(_82);
+        _84 = discriminant(_81);
+        switchInt(move _84) -> [0: bb77, 1: bb78, otherwise: bb3];
+    }
+
+    bb77: {
+        _86 = copy ((_81 as Continue).0: v16::SourceCreditConsumptionV16);
+        StorageDead(_81);
+        StorageLive(_87);
+        StorageLive(_88);
+        StorageLive(_89);
+        StorageLive(_90);
+        _90 = copy (_86.0: u128);
+        _89 = V16Core::bound_num_from_amount(move _90) -> [return: bb80, unwind continue];
+    }
+
+    bb78: {
+        StorageLive(_85);
+        _85 = copy ((_81 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _85) -> [return: bb79, unwind continue];
+    }
+
+    bb79: {
+        StorageDead(_85);
+        StorageDead(_81);
+        goto -> bb164;
+    }
+
+    bb80: {
+        StorageDead(_90);
+        _88 = <Result<u128, V16Error> as Try>::branch(move _89) -> [return: bb81, unwind continue];
+    }
+
+    bb81: {
+        StorageDead(_89);
+        _91 = discriminant(_88);
+        switchInt(move _91) -> [0: bb82, 1: bb83, otherwise: bb3];
+    }
+
+    bb82: {
+        _93 = copy ((_88 as Continue).0: u128);
+        _87 = Gt(copy _93, copy _37);
+        switchInt(move _87) -> [0: bb86, otherwise: bb85];
+    }
+
+    bb83: {
+        StorageLive(_92);
+        _92 = copy ((_88 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _92) -> [return: bb84, unwind continue];
+    }
+
+    bb84: {
+        StorageDead(_92);
+        StorageDead(_88);
+        goto -> bb163;
+    }
+
+    bb85: {
+        StorageDead(_88);
+        _0 = const Result::<bool, V16Error>::Err(V16Error::InvalidConfig);
+        goto -> bb163;
+    }
+
+    bb86: {
+        StorageDead(_88);
+        StorageDead(_87);
+        StorageLive(_94);
+        StorageLive(_95);
+        StorageLive(_96);
+        _96 = copy _71;
+        StorageLive(_97);
+        _97 = ReleasedPnlConversionDispositionV16::RetainHaircutFaceForTerminalDomain { source_domain: copy _32, source_claim_num: copy _35 };
+        _95 = MarketGroupV16ViewMut::<'_, T>::apply_released_pnl_conversion_with_consumption_core_not_atomic(copy _1, copy _2, copy _25, move _96, move _86, const 0_u128, move _97) -> [return: bb87, unwind continue];
+    }
+
+    bb87: {
+        StorageDead(_97);
+        StorageDead(_96);
+        _94 = <Result<u128, V16Error> as Try>::branch(move _95) -> [return: bb88, unwind continue];
+    }
+
+    bb88: {
+        StorageDead(_95);
+        _98 = discriminant(_94);
+        switchInt(move _98) -> [0: bb89, 1: bb90, otherwise: bb3];
+    }
+
+    bb89: {
+        StorageLive(_100);
+        _100 = copy ((_94 as Continue).0: u128);
+        StorageDead(_100);
+        StorageDead(_94);
+        goto -> bb93;
+    }
+
+    bb90: {
+        StorageLive(_99);
+        _99 = copy ((_94 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _99) -> [return: bb91, unwind continue];
+    }
+
+    bb91: {
+        StorageDead(_99);
+        StorageDead(_94);
+        goto -> bb164;
+    }
+
+    bb92: {
+        StorageDead(_80);
+        goto -> bb93;
+    }
+
+    bb93: {
+        StorageLive(_101);
+        StorageLive(_102);
+        _102 = copy _71;
+        _101 = Eq(move _102, const 0_u128);
+        switchInt(move _101) -> [0: bb107, otherwise: bb94];
+    }
+
+    bb94: {
+        StorageDead(_102);
+        StorageLive(_103);
+        StorageLive(_104);
+        StorageLive(_105);
+        _105 = &(*_1);
+        _104 = MarketGroupV16ViewMut::<'_, T>::source_domain_terminal_for_haircut_demote(move _105, copy _32, move _23) -> [return: bb95, unwind continue];
+    }
+
+    bb95: {
+        StorageDead(_105);
+        _103 = <Result<bool, V16Error> as Try>::branch(move _104) -> [return: bb96, unwind continue];
+    }
+
+    bb96: {
+        StorageDead(_104);
+        _106 = discriminant(_103);
+        switchInt(move _106) -> [0: bb97, 1: bb98, otherwise: bb3];
+    }
+
+    bb97: {
+        _108 = copy ((_103 as Continue).0: bool);
+        switchInt(copy _108) -> [0: bb101, otherwise: bb100];
+    }
+
+    bb98: {
+        StorageLive(_107);
+        _107 = copy ((_103 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _107) -> [return: bb99, unwind continue];
+    }
+
+    bb99: {
+        StorageDead(_107);
+        StorageDead(_103);
+        goto -> bb162;
+    }
+
+    bb100: {
+        StorageDead(_103);
+        StorageLive(_109);
+        StorageLive(_110);
+        _110 = MarketGroupV16ViewMut::<'_, T>::burn_account_source_claim_bound_num_domain_first(copy _1, copy _2, move _32, copy _35) -> [return: bb102, unwind continue];
+    }
+
+    bb101: {
+        StorageDead(_103);
+        _0 = const Result::<bool, V16Error>::Err(V16Error::LockActive);
+        goto -> bb162;
+    }
+
+    bb102: {
+        _109 = <Result<(), V16Error> as Try>::branch(move _110) -> [return: bb103, unwind continue];
+    }
+
+    bb103: {
+        StorageDead(_110);
+        _111 = discriminant(_109);
+        switchInt(move _111) -> [0: bb104, 1: bb105, otherwise: bb3];
+    }
+
+    bb104: {
+        StorageDead(_109);
+        _163 = no_retag copy ((*_2).0: &mut v16::PortfolioAccountV16Account);
+        (((*_163).18: v16::HealthCertV16Account).10: u8) = const 0_u8;
+        goto -> bb108;
+    }
+
+    bb105: {
+        StorageLive(_112);
+        _112 = copy ((_109 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _112) -> [return: bb106, unwind continue];
+    }
+
+    bb106: {
+        StorageDead(_112);
+        StorageDead(_109);
+        goto -> bb162;
+    }
+
+    bb107: {
+        StorageDead(_102);
+        goto -> bb108;
+    }
+
+    bb108: {
+        StorageDead(_101);
+        StorageLive(_113);
+        StorageLive(_114);
+        StorageLive(_115);
+        _115 = V16Core::amount_from_bound_num(move _35) -> [return: bb109, unwind continue];
+    }
+
+    bb109: {
+        _114 = <Result<u128, V16Error> as Try>::branch(move _115) -> [return: bb110, unwind continue];
+    }
+
+    bb110: {
+        StorageDead(_115);
+        _116 = discriminant(_114);
+        switchInt(move _116) -> [0: bb111, 1: bb112, otherwise: bb3];
+    }
+
+    bb111: {
+        _118 = copy ((_114 as Continue).0: u128);
+        _113 = <u128 as Ord>::min(move _118, move _29) -> [return: bb114, unwind continue];
+    }
+
+    bb112: {
+        StorageLive(_117);
+        _117 = copy ((_114 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _117) -> [return: bb113, unwind continue];
+    }
+
+    bb113: {
+        StorageDead(_117);
+        StorageDead(_114);
+        goto -> bb161;
+    }
+
+    bb114: {
+        StorageDead(_114);
+        StorageLive(_119);
+        StorageLive(_120);
+        StorageLive(_121);
+        StorageLive(_122);
+        _164 = no_retag copy ((*_2).0: &mut v16::PortfolioAccountV16Account);
+        _122 = copy ((*_164).4: v16::V16PodU128);
+        _121 = V16PodU128::get(move _122) -> [return: bb115, unwind continue];
+    }
+
+    bb115: {
+        StorageDead(_122);
+        _120 = V16Core::kernel_retain_terminal_source_haircut(copy _25, move _121, move _113, move _71) -> [return: bb116, unwind continue];
+    }
+
+    bb116: {
+        StorageDead(_121);
+        _119 = <Result<u128, V16Error> as Try>::branch(move _120) -> [return: bb117, unwind continue];
+    }
+
+    bb117: {
+        StorageDead(_120);
+        _123 = discriminant(_119);
+        switchInt(move _123) -> [0: bb118, 1: bb119, otherwise: bb3];
+    }
+
+    bb118: {
+        _125 = copy ((_119 as Continue).0: u128);
+        StorageDead(_119);
+        StorageLive(_126);
+        _126 = V16PodU128::new(move _125) -> [return: bb121, unwind continue];
+    }
+
+    bb119: {
+        StorageLive(_124);
+        _124 = copy ((_119 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _124) -> [return: bb120, unwind continue];
+    }
+
+    bb120: {
+        StorageDead(_124);
+        StorageDead(_119);
+        goto -> bb160;
+    }
+
+    bb121: {
+        _165 = no_retag copy ((*_2).0: &mut v16::PortfolioAccountV16Account);
+        ((*_165).4: v16::V16PodU128) = move _126;
+        StorageDead(_126);
+        StorageLive(_127);
+        StorageLive(_128);
+        StorageLive(_129);
+        _166 = no_retag copy ((*_1).0: &mut v16::MarketGroupV16HeaderAccount);
+        _129 = copy ((*_166).40: u8);
+        _128 = decode_bool(move _129) -> [return: bb122, unwind continue];
+    }
+
+    bb122: {
+        StorageDead(_129);
+        _127 = <Result<bool, V16Error> as Try>::branch(move _128) -> [return: bb123, unwind continue];
+    }
+
+    bb123: {
+        StorageDead(_128);
+        _130 = discriminant(_127);
+        switchInt(move _130) -> [0: bb124, 1: bb125, otherwise: bb3];
+    }
+
+    bb124: {
+        _132 = copy ((_127 as Continue).0: bool);
+        switchInt(copy _132) -> [0: bb128, otherwise: bb127];
+    }
+
+    bb125: {
+        StorageLive(_131);
+        _131 = copy ((_127 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _131) -> [return: bb126, unwind continue];
+    }
+
+    bb126: {
+        StorageDead(_131);
+        StorageDead(_127);
+        goto -> bb160;
+    }
+
+    bb127: {
+        StorageDead(_127);
+        StorageLive(_133);
+        StorageLive(_134);
+        StorageLive(_135);
+        StorageLive(_136);
+        _167 = no_retag copy ((*_2).0: &mut v16::PortfolioAccountV16Account);
+        _136 = copy ((*_167).3: v16::V16PodI128);
+        _135 = V16PodI128::get(move _136) -> [return: bb129, unwind continue];
+    }
+
+    bb128: {
+        StorageDead(_127);
+        goto -> bb155;
+    }
+
+    bb129: {
+        StorageDead(_136);
+        _134 = <i128 as Ord>::max(move _135, const 0_i128) -> [return: bb130, unwind continue];
+    }
+
+    bb130: {
+        StorageDead(_135);
+        _133 = move _134 as u128 (IntToInt);
+        StorageDead(_134);
+        StorageLive(_137);
+        StorageLive(_138);
+        StorageLive(_139);
+        _139 = core::num::<impl u128>::checked_sub(move _25, move _133) -> [return: bb131, unwind continue];
+    }
+
+    bb131: {
+        _138 = Option::<u128>::ok_or::<V16Error>(move _139, const V16Error::CounterUnderflow) -> [return: bb132, unwind continue];
+    }
+
+    bb132: {
+        StorageDead(_139);
+        _137 = <Result<u128, V16Error> as Try>::branch(move _138) -> [return: bb133, unwind continue];
+    }
+
+    bb133: {
+        StorageDead(_138);
+        _140 = discriminant(_137);
+        switchInt(move _140) -> [0: bb134, 1: bb135, otherwise: bb3];
+    }
+
+    bb134: {
+        _142 = copy ((_137 as Continue).0: u128);
+        StorageDead(_137);
+        StorageLive(_143);
+        StorageLive(_144);
+        StorageLive(_145);
+        _168 = no_retag copy ((*_1).0: &mut v16::MarketGroupV16HeaderAccount);
+        _145 = &((*_168).41: v16::ResolvedPayoutLedgerV16Account);
+        _144 = ResolvedPayoutLedgerV16Account::try_to_runtime(move _145) -> [return: bb137, unwind continue];
+    }
+
+    bb135: {
+        StorageLive(_141);
+        _141 = copy ((_137 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _141) -> [return: bb136, unwind continue];
+    }
+
+    bb136: {
+        StorageDead(_141);
+        StorageDead(_137);
+        goto -> bb159;
+    }
+
+    bb137: {
+        StorageDead(_145);
+        _143 = <Result<ResolvedPayoutLedgerV16, V16Error> as Try>::branch(move _144) -> [return: bb138, unwind continue];
+    }
+
+    bb138: {
+        StorageDead(_144);
+        _146 = discriminant(_143);
+        switchInt(move _146) -> [0: bb139, 1: bb140, otherwise: bb3];
+    }
+
+    bb139: {
+        StorageLive(_181);
+        StorageLive(_182);
+        StorageLive(_184);
+        StorageLive(_185);
+        StorageLive(_186);
+        StorageLive(_187);
+        StorageLive(_188);
+        _181 = copy (((_143 as Continue).0: v16::ResolvedPayoutLedgerV16).0: u128);
+        _182 = copy (((_143 as Continue).0: v16::ResolvedPayoutLedgerV16).1: u128);
+        _183 = copy (((_143 as Continue).0: v16::ResolvedPayoutLedgerV16).2: u128);
+        _184 = copy (((_143 as Continue).0: v16::ResolvedPayoutLedgerV16).3: u128);
+        _185 = copy (((_143 as Continue).0: v16::ResolvedPayoutLedgerV16).4: u128);
+        _186 = copy (((_143 as Continue).0: v16::ResolvedPayoutLedgerV16).5: u64);
+        _187 = copy (((_143 as Continue).0: v16::ResolvedPayoutLedgerV16).6: bool);
+        _188 = copy (((_143 as Continue).0: v16::ResolvedPayoutLedgerV16).7: bool);
+        StorageDead(_181);
+        StorageDead(_182);
+        StorageDead(_184);
+        StorageDead(_185);
+        StorageDead(_186);
+        StorageDead(_187);
+        StorageDead(_188);
+        StorageDead(_143);
+        StorageLive(_148);
+        StorageLive(_149);
+        StorageLive(_150);
+        _150 = V16Core::bound_num_from_amount(move _142) -> [return: bb142, unwind continue];
+    }
+
+    bb140: {
+        StorageLive(_147);
+        _147 = copy ((_143 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _147) -> [return: bb141, unwind continue];
+    }
+
+    bb141: {
+        StorageDead(_147);
+        StorageDead(_143);
+        goto -> bb158;
+    }
+
+    bb142: {
+        _149 = <Result<u128, V16Error> as Try>::branch(move _150) -> [return: bb143, unwind continue];
+    }
+
+    bb143: {
+        StorageDead(_150);
+        _151 = discriminant(_149);
+        switchInt(move _151) -> [0: bb144, 1: bb145, otherwise: bb3];
+    }
+
+    bb144: {
+        _153 = copy ((_149 as Continue).0: u128);
+        _148 = <u128 as Ord>::min(move _153, move _183) -> [return: bb147, unwind continue];
+    }
+
+    bb145: {
+        StorageLive(_152);
+        _152 = copy ((_149 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _152) -> [return: bb146, unwind continue];
+    }
+
+    bb146: {
+        StorageDead(_152);
+        StorageDead(_149);
+        goto -> bb157;
+    }
+
+    bb147: {
+        StorageDead(_149);
+        switchInt(copy _148) -> [0: bb154, otherwise: bb148];
+    }
+
+    bb148: {
+        StorageLive(_154);
+        StorageLive(_155);
+        _155 = MarketGroupV16ViewMut::<'_, T>::refine_resolved_unreceipted_bound_not_atomic(move _1, move _148) -> [return: bb149, unwind continue];
+    }
+
+    bb149: {
+        _154 = <Result<(), V16Error> as Try>::branch(move _155) -> [return: bb150, unwind continue];
+    }
+
+    bb150: {
+        StorageDead(_155);
+        _156 = discriminant(_154);
+        switchInt(move _156) -> [0: bb151, 1: bb152, otherwise: bb3];
+    }
+
+    bb151: {
+        StorageDead(_154);
+        goto -> bb154;
+    }
+
+    bb152: {
+        StorageLive(_157);
+        _157 = copy ((_154 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<bool, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _157) -> [return: bb153, unwind continue];
+    }
+
+    bb153: {
+        StorageDead(_157);
+        StorageDead(_154);
+        goto -> bb157;
+    }
+
+    bb154: {
+        StorageDead(_148);
+        StorageDead(_133);
+        goto -> bb155;
+    }
+
+    bb155: {
+        _158 = PortfolioV16ViewMut::<'_>::compact_source_domains(move _2) -> [return: bb156, unwind continue];
+    }
+
+    bb156: {
+        _0 = const Result::<bool, V16Error>::Ok(true);
+        StorageDead(_113);
+        StorageDead(_37);
+        StorageDead(_35);
+        StorageDead(_32);
+        StorageDead(_29);
+        StorageDead(_25);
+        StorageDead(_23);
+        StorageDead(_10);
+        goto -> bb172;
+    }
+
+    bb157: {
+        StorageDead(_148);
+        goto -> bb158;
+    }
+
+    bb158: {
+        goto -> bb159;
+    }
+
+    bb159: {
+        StorageDead(_133);
+        goto -> bb160;
+    }
+
+    bb160: {
+        goto -> bb161;
+    }
+
+    bb161: {
+        StorageDead(_113);
+        goto -> bb168;
+    }
+
+    bb162: {
+        StorageDead(_101);
+        goto -> bb168;
+    }
+
+    bb163: {
+        StorageDead(_87);
+        goto -> bb164;
+    }
+
+    bb164: {
+        goto -> bb165;
+    }
+
+    bb165: {
+        goto -> bb166;
+    }
+
+    bb166: {
+        goto -> bb167;
+    }
+
+    bb167: {
+        goto -> bb168;
+    }
+
+    bb168: {
+        goto -> bb170;
+    }
+
+    bb169: {
+        StorageDead(_41);
+        StorageDead(_40);
+        StorageDead(_38);
+        goto -> bb170;
+    }
+
+    bb170: {
+        StorageDead(_37);
+        StorageDead(_35);
+        StorageDead(_32);
+        StorageDead(_29);
+        StorageDead(_25);
+        StorageDead(_23);
+        goto -> bb171;
+    }
+
+    bb171: {
+        StorageDead(_10);
+        goto -> bb172;
+    }
+
+    bb172: {
+        return;
+    }
+
+    bb173: {
+        StorageLive(_101);
+        StorageLive(_102);
+        goto -> bb94;
+    }
+}

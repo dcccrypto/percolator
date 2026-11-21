@@ -1,19 +1,19 @@
 {"synthetic": false,
  "schemaVersion": "2025-09-10",
  "outputs":
- {"o": ["d7a26ad71ab35cba.olean"],
+ {"o": ["242c29b298a253f3.olean"],
   "m": false,
-  "i": "b4605a299c9c6059.ilean",
-  "c": "a3db9a49f54fceb9.c"},
+  "i": "2049f73cb304fc05.ilean",
+  "c": "b1a2b57f22ff31ed.c"},
  "log":
  [{"message":
    ".> LEAN_PATH=/Users/khubair/agent-work/e2e-proofs-1121/wt-strong2/proofs/strong2/lean/.lake/build/lib/lean /Users/khubair/agent-work/e2e-proofs-1121/lean-tc/lean-4.34.0-darwin_aarch64/bin/lean /Users/khubair/agent-work/e2e-proofs-1121/wt-strong2/proofs/strong2/lean/ClauseFlow/Core.lean -o /Users/khubair/agent-work/e2e-proofs-1121/wt-strong2/proofs/strong2/lean/.lake/build/lib/lean/ClauseFlow/Core.olean -i /Users/khubair/agent-work/e2e-proofs-1121/wt-strong2/proofs/strong2/lean/.lake/build/lib/lean/ClauseFlow/Core.ilean -c /Users/khubair/agent-work/e2e-proofs-1121/wt-strong2/proofs/strong2/lean/.lake/build/ir/ClauseFlow/Core.c --setup /Users/khubair/agent-work/e2e-proofs-1121/wt-strong2/proofs/strong2/lean/.lake/build/ir/ClauseFlow/Core.setup.json --json",
    "level": "trace"},
   {"message":
-   "ClauseFlow/Core.lean:910:0: 'ClauseFlow.checkCert_sound' depends on axioms: [propext, Quot.sound]",
+   "ClauseFlow/Core.lean:1027:0: 'ClauseFlow.checkCert_sound' depends on axioms: [propext, Quot.sound]",
    "level": "info"},
   {"message":
-   "ClauseFlow/Core.lean:911:0: 'ClauseFlow.call_of_cert' depends on axioms: [propext, Quot.sound]",
+   "ClauseFlow/Core.lean:1028:0: 'ClauseFlow.call_of_cert' depends on axioms: [propext, Quot.sound]",
    "level": "info"}],
  "inputs":
  [["deps",
@@ -28,10 +28,10 @@
   ["Lean 4.34.0, commit 293d5d0c0c3f3dded4688b3ccd6a33939ac5102b",
    "a1c6c7aa3e9abfe7"],
   ["/Users/khubair/agent-work/e2e-proofs-1121/wt-strong2/proofs/strong2/lean/ClauseFlow/Core.lean",
-   "2c4c5d6e5e5f2789"],
+   "ffaf1db2675f802b"],
   ["options", "00000000000006bb"],
   ["isModule: false", "feefd2a0d3a1847e"],
   ["Module.name: ClauseFlow.Core", "d755196ebc8207f6"],
   ["Package.id?: (some clauseflow)", "b7e29e1e339adc1c"],
   ["Module.leanArgs: #[]", "00000000000006bb"]],
- "depHash": "14e1f87f29c75ebc"}
+ "depHash": "83535024cda47860"}

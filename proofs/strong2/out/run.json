@@ -1,0 +1,656 @@
+{
+ "analysed_methods": 188,
+ "pin": "engine: dcccrypto/percolator@c38b6b1e, src/v16.rs blob 7d3edfe86be1a80f49793cf551c39687a8766a4d; rustc 1.99.0-nightly (d0babd8b6 2026-07-15); cargo rustc -j 4 --release --lib -- -Zunpretty=mir -Zinline-mir=no",
+ "summaries": {
+  "apply_released_pnl_conversion_core_not_atomic": {
+   "blocks": 20,
+   "clauses": [
+    "result = 0 \u2227 payload = 0: impossible"
+   ],
+   "mir_sha256": "a81d27ffafecf28bc83ed60c878417b77f3a286621019e4e199f60407cdfac58",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ],
+      [
+       1000000,
+       "eq",
+       0
+      ]
+     ],
+     "bot"
+    ]
+   ],
+   "uses": [
+    "apply_released_pnl_conversion_with_consumption_core_not_atomic"
+   ]
+  },
+  "apply_released_pnl_conversion_with_consumption_core_not_atomic": {
+   "blocks": 97,
+   "clauses": [
+    "result = 0 \u2227 payload = 0: impossible"
+   ],
+   "mir_sha256": "229e676e89a29f32b170cf1bfa41e156639045c9d036705dc48acb395ea62db0",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ],
+      [
+       1000000,
+       "eq",
+       0
+      ]
+     ],
+     "bot"
+    ]
+   ],
+   "uses": []
+  },
+  "charge_account_fee_current_not_atomic": {
+   "blocks": 31,
+   "clauses": [
+    "result = 0 \u2227 payload = 0: checks [0, 1] preserved"
+   ],
+   "mir_sha256": "a8305311f617c8a5f455cb494e015ae7fb6da9feac21646dc6dfe04b21540401",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ],
+      [
+       1000000,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0,
+       1
+      ]
+     ]
+    ]
+   ],
+   "uses": []
+  },
+  "clear_fully_diluted_resolved_receipt_if_terminal": {
+   "blocks": 35,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "e5902dfad9d12468d83b29293931e240cd51de5a6e4a5b97f5924e1757be6914",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": []
+  },
+  "collect_account_backing_utilization_fee_for_domain_not_atomic": {
+   "blocks": 95,
+   "clauses": [
+    "result = 0 \u2227 payload = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "2b91f3f07852e8f70c3c04373c5591a15e6ecbb1f2869d676345a1215e05fe75",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ],
+      [
+       1000000,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": []
+  },
+  "convert_released_pnl_to_capital_core_not_atomic": {
+   "blocks": 60,
+   "clauses": [
+    "result = 0 \u2227 payload = 0: checks [0, 1] preserved"
+   ],
+   "mir_sha256": "9975c3afbd9fcae7f8acd918f410be0d3ac3d642e2ec16d30ef6cb6956a7169e",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ],
+      [
+       1000000,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0,
+       1
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "apply_released_pnl_conversion_core_not_atomic"
+   ]
+  },
+  "expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic": {
+   "blocks": 50,
+   "clauses": [
+    "result = 0 \u2227 payload = 0: checks [0, 1] preserved"
+   ],
+   "mir_sha256": "3169587ad5f4627206813cd6c4cb7f537dbb41ba8c995f47039cdfea248b23d3",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ],
+      [
+       1000000,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0,
+       1
+      ]
+     ]
+    ]
+   ],
+   "uses": []
+  },
+  "prepare_one_source_domain_for_resolved_close_not_atomic": {
+   "blocks": 122,
+   "clauses": [
+    "result = 0: checks [0] preserved",
+    "result = 0 \u2227 payload = 1: checks [0, 1] hold"
+   ],
+   "mir_sha256": "d79d981e9d92668dce60b08b76eec81c6d1c9a25ce89f8fd61bb16f50f2565ef",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ],
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ],
+      [
+       1000000,
+       "eq",
+       1
+      ]
+     ],
+     [
+      [
+       0,
+       1
+      ],
+      []
+     ]
+    ]
+   ],
+   "uses": [
+    "collect_account_backing_utilization_fee_for_domain_not_atomic",
+    "release_account_source_credit_lien_for_domain_not_atomic",
+    "retire_source_credit_lien_from_counterparty_impaired_not_atomic"
+   ]
+  },
+  "realize_one_source_domain_for_resolved_close_not_atomic": {
+   "blocks": 174,
+   "clauses": [
+    "result = 0 \u2227 payload = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "dd435722d490da1fbde74d26004f88cddc26590ad90486ef022cf51f8826daf0",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ],
+      [
+       1000000,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "apply_released_pnl_conversion_with_consumption_core_not_atomic"
+   ]
+  },
+  "release_account_source_credit_lien_for_domain_not_atomic": {
+   "blocks": 52,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "783add466ae091b7d2965c7ab9e71d5555cae1df2308982f498d33898afee6da",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "release_source_credit_lien_from_counterparty_terminal_not_atomic",
+    "release_source_credit_lien_from_insurance_not_atomic",
+    "release_source_credit_lien_from_insurance_terminal_not_atomic"
+   ]
+  },
+  "release_account_source_credit_liens_if_unneeded_core_not_atomic": {
+   "blocks": 178,
+   "clauses": [
+    "result = 0: checks [0, 1] hold"
+   ],
+   "mir_sha256": "0a20c8580a3c0d193de627797f099c13f9dc970f93c60c68335f410bf2cd56d3",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [
+       0,
+       1
+      ],
+      []
+     ]
+    ]
+   ],
+   "uses": [
+    "collect_account_backing_utilization_fee_for_domain_not_atomic",
+    "release_account_source_credit_lien_for_domain_not_atomic",
+    "retire_source_credit_lien_from_counterparty_impaired_not_atomic"
+   ]
+  },
+  "release_account_source_credit_liens_if_unneeded_not_atomic": {
+   "blocks": 2,
+   "clauses": [
+    "result = 0: checks [0, 1] hold"
+   ],
+   "mir_sha256": "1faad798b9a8742bf1657fd18fef72796edc1f41c074a2aa5837c3003a257808",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [
+       0,
+       1
+      ],
+      []
+     ]
+    ]
+   ],
+   "uses": [
+    "release_account_source_credit_liens_if_unneeded_core_not_atomic"
+   ]
+  },
+  "release_source_credit_lien_from_counterparty_terminal_not_atomic": {
+   "blocks": 64,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "ef1583f3a7603b3873dd9732d71e995d91444cffb74c3d4adce8ae261d34eb27",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": []
+  },
+  "release_source_credit_lien_from_insurance_not_atomic": {
+   "blocks": 9,
+   "clauses": [
+    "result = 0: checks [0] hold"
+   ],
+   "mir_sha256": "fef87103d101f4263ec85994ab7ee877238d6fd7d955cdd81e5899ab00a764ee",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [
+       0
+      ],
+      []
+     ]
+    ]
+   ],
+   "uses": []
+  },
+  "release_source_credit_lien_from_insurance_terminal_not_atomic": {
+   "blocks": 64,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "2fa1896c08e9fbbe84ec1839ea9cd230090b024a81f11f0a6d8a2ae78e26f395",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": []
+  },
+  "retire_source_credit_lien_from_counterparty_impaired_not_atomic": {
+   "blocks": 64,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "0a14182cbc16511b6d081084e6380a5ca7dc8e9b2f11c254d7d655d455eb2f91",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": []
+  },
+  "sync_account_fee_to_slot_not_atomic": {
+   "blocks": 112,
+   "clauses": [
+    "result = 0: checks [1] hold; checks [0] preserved",
+    "result = 0 \u2227 payload = 1: checks [0] hold"
+   ],
+   "mir_sha256": "815940b907c634d908bbd6f9405703245a9ce872015af878f9ea315f249fc78f",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [
+       1
+      ],
+      [
+       0
+      ]
+     ]
+    ],
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ],
+      [
+       1000000,
+       "eq",
+       1
+      ]
+     ],
+     [
+      [
+       0
+      ],
+      []
+     ]
+    ]
+   ],
+   "uses": [
+    "charge_account_fee_current_not_atomic"
+   ]
+  }
+ },
+ "targets": {
+  "T15": {
+   "accounts": [
+    [
+     2,
+     "mut"
+    ]
+   ],
+   "blocks": 257,
+   "checks": [
+    0,
+    1
+   ],
+   "fn": "close_resolved_account_not_atomic",
+   "ir_blocks": 257,
+   "mir_sha256": "45f0ed9671e3d808a6c3d83eab81363e8242c2214e5ba0fcc42130eda498d34d",
+   "ok_sites": {
+    "104": 26631,
+    "113": 26634,
+    "139": 26641,
+    "22": 26594,
+    "240": 26702,
+    "41": 26605,
+    "55": 26614
+   },
+   "rows": {
+    "T15.account": {
+     "exempt": [
+      55,
+      104,
+      113
+     ],
+     "exempt_lines": {
+      "104": 26631,
+      "113": 26634,
+      "55": 26614
+     },
+     "mirror_problems": 0,
+     "module": "T15_account_checked_paths",
+     "ok_sites": 7,
+     "proved_ok_sites": 4,
+     "status": "partial: Ok returns outside the excluded blocks, pres"
+    },
+    "T15.header": {
+     "exempt": [
+      104,
+      113
+     ],
+     "exempt_lines": {
+      "104": 26631,
+      "113": 26634
+     },
+     "mirror_problems": 0,
+     "module": "T15_header_checked_paths",
+     "ok_sites": 7,
+     "proved_ok_sites": 5,
+     "status": "partial: Ok returns outside the excluded blocks, pres"
+    }
+   },
+   "summary_clauses": [],
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::clear_fully_diluted_resolved_receipt_if_terminal",
+    "MarketGroupV16ViewMut::<'_, T>::expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic",
+    "MarketGroupV16ViewMut::<'_, T>::prepare_one_source_domain_for_resolved_close_not_atomic",
+    "MarketGroupV16ViewMut::<'_, T>::realize_one_source_domain_for_resolved_close_not_atomic",
+    "MarketGroupV16ViewMut::<'_, T>::sync_account_fee_to_slot_not_atomic"
+   ]
+  },
+  "T18": {
+   "accounts": [
+    [
+     2,
+     "mut"
+    ]
+   ],
+   "blocks": 49,
+   "checks": [
+    0,
+    1
+   ],
+   "fn": "convert_released_pnl_to_capital_not_atomic",
+   "ir_blocks": 49,
+   "mir_sha256": "5c7737fcb443166aa0e5d651a54c88b4a51491da28f19c9901c21d0ca1d1ead0",
+   "ok_sites": {
+    "44": 25498
+   },
+   "rows": {
+    "T18.account": {
+     "exempt": [],
+     "mirror_problems": 0,
+     "module": "T18_account",
+     "status": "whole row, pres"
+    },
+    "T18.header": {
+     "exempt": [],
+     "mirror_problems": 0,
+     "module": "T18_header",
+     "status": "whole row, pres"
+    }
+   },
+   "summary_clauses": [
+    "result = 0: checks [0, 1] preserved",
+    "result = 0 \u2227 payload = 1: checks [0, 1] hold"
+   ],
+   "uses": [
+    "MarketGroupV16ViewMut::<'_, T>::convert_released_pnl_to_capital_core_not_atomic",
+    "MarketGroupV16ViewMut::<'_, T>::release_account_source_credit_liens_if_unneeded_not_atomic"
+   ]
+  }
+ },
+ "unsupported": {}
+}

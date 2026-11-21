@@ -1,0 +1,13 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::release_account_source_credit_liens_if_unneeded_not_atomic(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: &mut PortfolioV16ViewMut<'_>) -> Result<u128, V16Error> {
+    debug self => _1;
+    debug account => _2;
+    let mut _0: core::result::Result<u128, v16::V16Error>;
+
+    bb0: {
+        _0 = MarketGroupV16ViewMut::<'_, T>::release_account_source_credit_liens_if_unneeded_core_not_atomic(move _1, move _2) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}
