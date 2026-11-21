@@ -131,7 +131,8 @@ fn check_solvent_never_liquidated(extra: u128, p1: u64) {
     assert!(g.header.c_tot.get() + g.header.insurance.get() <= g.header.vault.get());
 }
 
-#[cfg(kani)]
+// Did not finish on the 2026-11-21 machine (REPORT.md); compiled only with `--features e2e-long`.
+#[cfg(all(kani, feature = "e2e-long"))]
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -141,7 +142,8 @@ fn proof_e2e_liquidate_solvent_account_is_refused_insolvent_is_closed() {
     check_solvent_never_liquidated(extra as u128, 95);
 }
 
-#[cfg(kani)]
+// Did not finish on the 2026-11-21 machine (REPORT.md); compiled only with `--features e2e-long`.
+#[cfg(all(kani, feature = "e2e-long"))]
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]

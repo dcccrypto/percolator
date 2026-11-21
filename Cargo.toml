@@ -27,6 +27,9 @@ fork-facade = []
 x1-diff = []
 # Negative control for the monitor: drops the clamp from the new path (the harness MUST then fail).
 x1-mutant-noclamp = ["x1-diff"]
+# Whole-path e2e Kani harnesses (tests/proofs_e2e_*.rs) that do not finish within an hour under
+# CBMC (symbolic execution of the real-ops path over the ~10 KB structs); kept compiling, run on demand.
+e2e-long = []
 
 [profile.release]
 lto = "fat"

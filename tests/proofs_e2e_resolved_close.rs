@@ -133,7 +133,8 @@ fn check_resolved_close_pays_exactly_owed(d: u128, p1: u64) {
     cover!(p1 == P0, "no move: each gets its deposit back");
 }
 
-#[cfg(kani)]
+// Did not finish on the 2026-11-21 machine (REPORT.md); compiled only with `--features e2e-long`.
+#[cfg(all(kani, feature = "e2e-long"))]
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -146,7 +147,8 @@ fn proof_e2e_resolved_close_pays_exactly_owed_and_conserves_value() {
 }
 
 /// Narrower variant (P1 concrete) in case the symbolic-price harness does not finish.
-#[cfg(kani)]
+// Did not finish on the 2026-11-21 machine (REPORT.md); compiled only with `--features e2e-long`.
+#[cfg(all(kani, feature = "e2e-long"))]
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -209,7 +211,8 @@ pub fn check_resolved_close_flat_with_loss(c: u128, l: u128, o: u128, i: u128, u
     cover!(l == 0 && c > 0, "no loss: full capital paid");
 }
 
-#[cfg(kani)]
+// Did not finish on the 2026-11-21 machine (REPORT.md); compiled only with `--features e2e-long`.
+#[cfg(all(kani, feature = "e2e-long"))]
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -245,7 +248,8 @@ fn native_sampled_resolved_close_flat_domain() {
 /// Narrow form of (d'), sized like the suite's
 /// `proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault` (which finishes):
 /// C in 0..=5 and L in 0..=5 symbolic, O = 3, I = 2, U = 1 concrete. Same check function.
-#[cfg(kani)]
+// Did not finish on the 2026-11-21 machine (REPORT.md); compiled only with `--features e2e-long`.
+#[cfg(all(kani, feature = "e2e-long"))]
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]

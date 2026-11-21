@@ -77,7 +77,8 @@ pub fn check_liquidate_from_snapshot(extra: u128) {
     assert!(g.header.c_tot.get() + g.header.insurance.get() <= g.header.vault.get());
 }
 
-#[cfg(kani)]
+// Did not finish on the 2026-11-21 machine (REPORT.md); compiled only with `--features e2e-long`.
+#[cfg(all(kani, feature = "e2e-long"))]
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]

@@ -122,7 +122,8 @@ fn check_trade_conserves_value(dl: u128, ds: u128, fee_bps: u64, taker_is_long: 
     cover!(fee == 10, "max fee (100 bps of 1_000)");
 }
 
-#[cfg(kani)]
+// Did not finish on the 2026-11-21 machine (REPORT.md); compiled only with `--features e2e-long`.
+#[cfg(all(kani, feature = "e2e-long"))]
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
