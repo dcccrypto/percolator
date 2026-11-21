@@ -3445,6 +3445,28 @@ impl V16Core {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
+    /// Claim bound that the domain's unliened backing is owed to: every claim except the
+    /// face that valid liens cover with their own pledged backing.
+    ///
+    /// A lien locks at least as much face as the backing it pledges
+    /// (`required_face >= required_backing`), and locked face draws no soft credit, so the
+    /// pledged backing and the same amount of face leave the rate together. The haircut part
+    /// of a lien created below the full rate (`face - backing`) stays in the bound, which
+    /// only lowers the rate. Impaired liens are not deducted: their backing is gone or
+    /// encumbered while their face is still owed.
+    fn unliened_claim_bound_num_for_source_credit_state(
+        state: SourceCreditStateV16,
+    ) -> V16Result<u128> {
+        let lien_covered = state
+            .valid_liened_backing_num
+            .checked_add(state.valid_liened_insurance_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(state.positive_claim_bound_num.saturating_sub(lien_covered))
+    }
+
+    /// Rate at which unliened claim face is credited: available (unliened) backing over the
+    /// unliened claim bound, capped at the full rate. Liened backing is in neither term, so
+    /// a lien never cuts the rate of a domain whose total backing covers its claims (#250).
     fn expected_source_credit_rate_num_for_state(state: SourceCreditStateV16) -> V16Result<u128> {
         Self::validate_source_credit_state_shape_static(state)?;
         if state.positive_claim_bound_num == 0 {
@@ -3454,12 +3476,16 @@ impl V16Core {
         if available == 0 {
             return Ok(0);
         }
-        let rate = U256::from_u128(available)
+        let unliened_claim = Self::unliened_claim_bound_num_for_source_credit_state(state)?;
+        if available >= unliened_claim {
+            return Ok(CREDIT_RATE_SCALE);
+        }
+        // `0 < available < unliened_claim`: the quotient is below CREDIT_RATE_SCALE.
+        U256::from_u128(available)
             .checked_mul(U256::from_u128(CREDIT_RATE_SCALE))
-            .and_then(|v| v.checked_div(U256::from_u128(state.positive_claim_bound_num)))
+            .and_then(|v| v.checked_div(U256::from_u128(unliened_claim)))
             .and_then(|v| v.try_into_u128())
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        Ok(core::cmp::min(rate, CREDIT_RATE_SCALE))
+            .ok_or(V16Error::ArithmeticOverflow)
     }
 
     fn validate_source_credit_state_shape_static(state: SourceCreditStateV16) -> V16Result<()> {
@@ -4420,7 +4446,7 @@ pub fn kani_validate_positive_pnl_source_attribution(
     V16Core::validate_positive_pnl_source_attribution(pnl, source_claim_sum_num)
 }
 
-#[cfg(kani)]
+#[cfg(any(kani, feature = "fuzz"))]
 pub fn kani_expected_source_credit_rate_num_for_state(
     state: SourceCreditStateV16,
 ) -> V16Result<u128> {
@@ -14588,7 +14614,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
-    #[cfg(kani)]
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn kani_prepare_counterparty_lien_create_delta(
         bucket: BackingBucketV16,
         source: SourceCreditStateV16,
@@ -14598,7 +14624,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::prepare_counterparty_lien_create_delta(bucket, source, current_slot, amount)
     }
 
-    #[cfg(kani)]
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn kani_prepare_counterparty_lien_consume_delta(
         bucket: BackingBucketV16,
         source: SourceCreditStateV16,
@@ -14607,7 +14633,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::prepare_counterparty_lien_consume_delta(bucket, source, amount)
     }
 
-    #[cfg(kani)]
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn kani_prepare_counterparty_lien_terminal_release_delta(
         bucket: BackingBucketV16,
         source: SourceCreditStateV16,
@@ -14616,7 +14642,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::prepare_counterparty_lien_terminal_release_delta(bucket, source, amount)
     }
 
-    #[cfg(kani)]
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn kani_prepare_counterparty_backing_add_delta(
         bucket: BackingBucketV16,
         source: SourceCreditStateV16,
@@ -14633,7 +14659,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
-    #[cfg(kani)]
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn kani_prepare_counterparty_backing_withdraw_delta(
         bucket: BackingBucketV16,
         source: SourceCreditStateV16,
@@ -14714,7 +14740,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
-    #[cfg(kani)]
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn kani_source_credit_lien_amounts_for_effective(
         effective_credit: u128,
         credit_rate_num: u128,
@@ -23512,7 +23538,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
-    #[cfg(kani)]
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn kani_prepare_counterparty_backing_expiry_delta(
         bucket: BackingBucketV16,
         source: SourceCreditStateV16,
@@ -27901,7 +27927,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
-    #[cfg(kani)]
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn kani_source_lien_backing_release_for_face_burn(
         face_locked_num: u128,
         backing_reserved_num: u128,

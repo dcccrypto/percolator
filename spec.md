@@ -375,6 +375,24 @@ credit_rate_num_after <= credit_rate_num_before unless positive_claim_bound_num 
 ```
 A pure expiry transition that increases available backing or credit rate is invalid and MUST revert or recover. A before/after inequality alone is insufficient unless the recomputed aggregate equalities also hold.
 
+Credit rate (upstream c7ae2256, #250). `credit_rate_num` is the rate at which UN-LIENED claim face is credited, so it is the unliened backing over the claim bound that this backing is still owed to:
+
+```text
+available_backing_num =
+    (fresh_reserved_backing_num - valid_liened_backing_num)
+  + (insurance_credit_reserved_num - valid_liened_insurance_num - impaired_liened_insurance_num)
+
+unliened_claim_bound_num =
+    max(0, positive_claim_bound_num - valid_liened_backing_num - valid_liened_insurance_num)
+
+if positive_claim_bound_num == 0:                       credit_rate_num = CREDIT_RATE_SCALE
+else if available_backing_num == 0:                     credit_rate_num = 0
+else if available_backing_num >= unliened_claim_bound_num: credit_rate_num = CREDIT_RATE_SCALE
+else: credit_rate_num = floor(available_backing_num * CREDIT_RATE_SCALE / unliened_claim_bound_num)
+```
+
+A valid lien locks at least as much face as the backing it pledges and locked face draws no soft credit, so a lien's pledged backing and the same amount of claim bound leave the rate together; leaving lien-covered face in the denominator would count a claim its own lien already covers against the remaining backing a second time. The haircut part of a lien created below the full rate (`face_claim_locked - backing_reserved`) stays in `unliened_claim_bound_num`, and impaired liens are not deducted; both only lower the rate. With `total_backing_num = fresh_reserved_backing_num + insurance_credit_reserved_num - impaired_liened_insurance_num`, every state MUST satisfy: liens plus all soft credit on unliened face fit in `total_backing_num`; `total_backing_num >= positive_claim_bound_num` and `available_backing_num > 0` imply `credit_rate_num == CREDIT_RATE_SCALE`; `credit_rate_num <= min(CREDIT_RATE_SCALE, floor(total_backing_num * CREDIT_RATE_SCALE / positive_claim_bound_num))`. Creating a lien MUST NOT raise `credit_rate_num`. Limit: in a domain that is under-backed when a lien is created, only the lien's backing leaves the denominator (no per-domain liened-face aggregate is stored), so other claimants are credited below the lien-free rate while that lien is outstanding: never an over-credit.
+
 Insurance may contribute to source credit only through a canonical live insurance-credit reservation recorded in `InsuranceLedger.source_credit_reserved_num[D]`. `SourceCreditState[D].insurance_credit_reserved_num` is a derived view of that canonical ledger entry, not a second writer.
 
 ```text
