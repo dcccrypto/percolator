@@ -42,8 +42,14 @@ fn asset(markets: &[Market<u64>]) -> AssetStateV16 {
 
 fn raw_and_basis(acct: &PortfolioAccountV16Account) -> Option<(SideV16, u128, u128, u64)> {
     let leg = acct.legs[0].try_to_runtime().unwrap();
-    leg.active
-        .then(|| (leg.side, leg.basis_pos_q.unsigned_abs(), leg.a_basis, leg.epoch_snap))
+    leg.active.then(|| {
+        (
+            leg.side,
+            leg.basis_pos_q.unsigned_abs(),
+            leg.a_basis,
+            leg.epoch_snap,
+        )
+    })
 }
 
 fn ceil_eff(raw: u128, a_basis: u128, a: u128) -> u128 {
@@ -124,7 +130,9 @@ fn deposit(
 ) {
     let mut market = MarketGroupV16ViewMut::new(header, markets);
     let mut a = PortfolioV16ViewMut::new(acct);
-    market.deposit_not_atomic(&mut a, 1_000_000_000_000).unwrap();
+    market
+        .deposit_not_atomic(&mut a, 1_000_000_000_000)
+        .unwrap();
 }
 
 /// Longs L1=500_000, L2=250_000 against one short S=750_000; S unilaterally
@@ -212,7 +220,11 @@ fn exit_all(order: [usize; 2], how: Exit) {
     }
     // OI must be exhausted on both sides and any residue reset, not stranded.
     let a = asset(&markets);
-    assert_eq!((a.oi_eff_long_q, a.oi_eff_short_q), (0, 0), "{order:?} {how:?}");
+    assert_eq!(
+        (a.oi_eff_long_q, a.oi_eff_short_q),
+        (0, 0),
+        "{order:?} {how:?}"
+    );
     for acct in accts.iter_mut() {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut v = PortfolioV16ViewMut::new(acct);
@@ -223,7 +235,11 @@ fn exit_all(order: [usize; 2], how: Exit) {
         );
         // flat price, zero fees: nobody gains or loses value
         assert_eq!(v.header.pnl.get(), 0, "{order:?} {how:?}");
-        assert_eq!(v.header.capital.get(), 1_000_000_000_000, "{order:?} {how:?}");
+        assert_eq!(
+            v.header.capital.get(),
+            1_000_000_000_000,
+            "{order:?} {how:?}"
+        );
     }
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market.validate_shape().unwrap();
@@ -328,4 +344,73 @@ fn issue_449_characterize_resize_rounding_surplus_compounds_hardening_gap() {
     let expected = g_num * i128::from(new_price - PRICE) / (ADL_ONE * POS_SCALE) as i128;
     eprintln!("sum (capital+pnl-deposit) after +10% = {sum_pnl} (G*dP/POS_SCALE = {expected})");
     assert!(sum_pnl > 0, "zero-sum broken by the harvested surplus");
+}
+
+/// dcccrypto addition (not upstream): the invariant the post-fix engine
+/// (upstream c030aa40) is meant to hold, checked directly after every op.
+///   (1) per side, exact exposure sum(raw * A / a_basis) <= oi_eff
+///   (2) no op raises a side's exact-over-OI residue
+/// Ignored because the current v2.2 engine still has the pre-fix A index, so
+/// it is expected to fail. Run with `--ignored` to see the first violation.
+#[test]
+#[ignore = "expected to fail until the #449 A-index fix (upstream c030aa40) is ported"]
+fn issue_449_invariant_exact_exposure_within_oi_eff_and_no_per_op_gain() {
+    const N: usize = 4;
+    let (mut header, mut markets) = market();
+    let mut accts: Vec<_> = (0..N + 2).map(|i| account(60 + i as u8)).collect();
+    for a in accts.iter_mut() {
+        deposit(&mut header, &mut markets, a);
+    }
+    {
+        let (l, s) = accts.split_at_mut(N);
+        for (i, leg) in l.iter_mut().enumerate() {
+            let q = 1_000 * POS_SCALE + 7_777 * (i as u128 + 1);
+            trade(&mut header, &mut markets, leg, &mut s[0], q / 2).unwrap();
+            trade(&mut header, &mut markets, leg, &mut s[1], q - q / 2).unwrap();
+        }
+    }
+    let check = |markets: &[Market<u64>],
+                 accts: &[PortfolioAccountV16Account],
+                 prev: [i128; 2],
+                 op: &str| {
+        let a = asset(markets);
+        let c = census(markets, accts);
+        let oi = [a.oi_eff_long_q, a.oi_eff_short_q];
+        let g = [0, 1].map(|s| c[s].1 as i128 - (oi[s] * ADL_ONE) as i128);
+        for s in 0..2 {
+            assert!(
+                g[s] <= 0,
+                "{op}: side {s} exact exposure exceeds oi_eff by {:.6} raw units",
+                g[s] as f64 / ADL_ONE as f64
+            );
+            assert!(
+                g[s] <= prev[s].max(0),
+                "{op}: side {s} residue grew {} -> {}",
+                prev[s],
+                g[s]
+            );
+        }
+        g
+    };
+    let mut g = check(&markets, &accts, [0, 0], "open");
+    {
+        let (_, s) = accts.split_at_mut(N);
+        let s0_eff = raw_and_basis(&s[0]).unwrap().1;
+        rebalance(&mut header, &mut markets, &mut s[0], s0_eff * 2 / 3).unwrap();
+    }
+    g = check(&markets, &accts, g, "initial ADL");
+    for r in 0..50 {
+        {
+            let (_, s) = accts.split_at_mut(N);
+            rebalance(&mut header, &mut markets, &mut s[0], 1).unwrap();
+        }
+        g = check(&markets, &accts, g, &format!("round {r} short rebalance"));
+        for i in 0..N {
+            {
+                let (l, s) = accts.split_at_mut(N);
+                trade(&mut header, &mut markets, &mut s[1], &mut l[i], 1).unwrap();
+            }
+            g = check(&markets, &accts, g, &format!("round {r} long {i} reduce"));
+        }
+    }
 }
