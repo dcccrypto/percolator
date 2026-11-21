@@ -1,0 +1,1 @@
+2026-11-21T04:14:54Z accepted — first action: running changed_fns.py (copied to ours2/tools/) on src/wide_math.rs c38b6b1e vs add1d027 for F3, then reading ROADMAP/ledger T15/T14 rows and Toly's Spec statements
