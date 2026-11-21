@@ -21,7 +21,9 @@ The function has 7 `Ok(..)` assignments: six `Ok(ProgressOnly)` and one `Ok(Clos
 (every `Ok` return except the excluded blocks), and `S_close_resolved_account_not_atomic.main`
 (whole function, no exclusion, no assumed callee: `Ok(Closed)` implies both checks hold).
 They are statements about the abstract program produced from MIR; see `RULES.md` for what is
-trusted (rules R1 to R10, assumptions A1 to A15).
+trusted (rules R1 to R10, assumptions A1 to A16). The `Ok(Closed)` theorem is the one result
+here that needs rule R9 (enum values), the rule two audit rounds found holes in; the per-return
+rows do not need it (`RULES.md`, section 7).
 
 ## 1. What the witness test shows, and what it does not
 
