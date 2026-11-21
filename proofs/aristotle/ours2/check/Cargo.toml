@@ -1,0 +1,14 @@
+[package]
+name = "slice2-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+percolator-resolved-close-slice2 = { path = "../project" }
+
+[profile.release]
+opt-level = 2
+overflow-checks = true
+
+[workspace]

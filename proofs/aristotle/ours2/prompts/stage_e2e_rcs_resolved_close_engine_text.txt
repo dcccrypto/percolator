@@ -1,0 +1,26 @@
+First task on a new project. The folder is a small Rust crate cut out of a larger risk engine (dcccrypto/percolator, src/v16.rs at revision c38b6b1e). aristotle/resolved_close_spec.md describes it: which text is the engine's own, copied byte for byte (src/wide_math.rs, and every block of src/engine_slice.rs that carries a line range), which lines are not (everything between the NOT ENGINE markers, and src/engine_slice/harness.rs), what each stub means, the invariant Inv, and the properties.
+
+What it is about. After a market is resolved, accounts are closed one at a time, by anyone, in any order. Each close pays the account its capital plus a share of a fixed pool (snapshot_residual) and then sets the account's capital to zero whatever was actually paid; the payout is capped by the vault. I want to know that, for any number of accounts and any order of closes, the shares together never exceed the pool, so the cap never cuts a payout, nobody's capital is zeroed unpaid, and the insurance stays in the vault. A first project proved this for a hand transcription of the path. This crate is the engine's own text for the same path, including the byte decoding, the snapshot capture, the receipt clearing and the bookkeeping calls that the transcription left out.
+
+What is already established, so that you do not redo it:
+- Bounded model checking (Kani) covers this path for one or two accounts with bounded amounts, and wide_mul_div_floor_u128 for 8-bit inputs only: the harnesses are named in aristotle/resolved_close_spec.md. It cannot quantify over the number of accounts or the length of a close sequence, and it cannot reach the full input range of the wide division. Those two gaps are this task and nothing else is.
+- Inv is not the first project's Inv: it has a ghost list CL of cleared receipts, a no-snapshot case and a byte well-formedness clause. The spec says why each was needed.
+
+In this task prove these properties of aristotle/resolved_close_spec.md, in this order, then stop:
+
+- RCs1: under Inv with the snapshot captured, the receipts (present ones and the ghost list) are together owed at most snapshot_residual at the ledger's rate. Pure arithmetic about kernel_recompute_resolved_payout_rate and resolved_receipt_claimable_against_ledger, for a list of any length.
+- RCs2: one call of close_one from an Inv state with pnl >= 0 keeps Inv (for a suitable CL'), pays exactly capital plus the receipt's unpaid share, changes nothing else, and does not panic.
+- RCs4: close_all on any slice and any order keeps Inv and pays exactly the capital that left plus what was added to the receipts. It needs a loop invariant; RCs2 is the step.
+- RCs5: when the order covers every account.
+- RCs7: the same as RCs2 for topup_one.
+- F3: wide_mul_div_floor_u128(a, b, d) panics exactly when d == 0 or floor(a*b/d) >= 2^128, and otherwise returns floor(a*b/d). This one is about src/wide_math.rs only and does not depend on the others.
+- RC3s: under the stated extra conditions close_one never returns Err and no execution of it panics. (Not termination: only that it cannot end in Err or in a panic.)
+- RC6s: two orders that are permutations of each other give the same total and the same state up to which fully paid receipts were cleared.
+
+Until F3 is proved, use the contract of wide_mul_div_floor_u128 (if d > 0 and floor(a*b/d) fits in u128 it returns floor(a*b/d) without panicking) as an explicit hypothesis in RCs1 to RCs7, and say so in each result. If F3 is proved, say which results no longer depend on a hypothesis.
+
+Finish and record one property before starting the next, so that finished results are kept if the task is stopped early. This task has a fixed size: if a property does not yield after a serious attempt, record it as unresolved with the obstacle in one or two sentences and go on to the next one. Do not let F3 or the last two properties take the effort that RCs1 to RCs7 need.
+
+Properties are for all slice lengths and all values the types allow, about calls that return Ok, unless they say otherwise (the no-panic clauses, F3, RC3s). Verify the bodies as built with overflow checks on (the crate's release profile). Sums in the properties are mathematical integers, not u128. CL is a ghost list: quantify over it, it is not in the program.
+
+Report each property under its label, proved or refuted with a concrete counterexample (the market header, the accounts, CL and the order). Do not weaken a statement silently: if Inv is too weak for a property, or a property is false as written, that is the most useful result of this task; state the version that does hold and go on with that one. List every library function whose documented behaviour a proof assumes instead of covering by its body, say for each result whether it used the wide_mul_div_floor_u128 contract as a hypothesis, and say for each result which of the stubs (STUB-OK, STUB-FRAME, STUB-PATH, STUB-DEAD in the spec) its code path goes through. Do not work on any other function of the crate in this task.

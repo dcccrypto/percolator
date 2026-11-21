@@ -1,0 +1,24 @@
+[package]
+name = "percolator-resolved-close-slice2"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The resolved-close payout path of the percolator v2.2 engine (src/v16.rs at c38b6b1e): engine text copied byte for byte, plus marked stubs."
+
+[lib]
+name = "percolator_resolved_close_slice2"
+path = "src/lib.rs"
+
+[dependencies]
+
+# Same as the engine's deployed profile (Cargo.toml of dcccrypto/percolator): overflow checks are on.
+[profile.release]
+opt-level = 3
+overflow-checks = true
+
+# `cfg(kani)` occurs in the copied engine text; it is never set here.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+# Keeps this crate out of the engine repository's cargo workspace (it sits inside that checkout).
+[workspace]
