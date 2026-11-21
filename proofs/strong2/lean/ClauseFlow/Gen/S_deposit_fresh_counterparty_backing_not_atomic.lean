@@ -9,7 +9,7 @@ MIR blocks: 40, locals: 42. market root: _1; accounts: none
 result = local 0 (0 is Ok); payload = local 1000000 (ghost: integer value or enum discriminant
 of the Ok payload; for Option: None = 0, Some = 1).
 callee summaries used (block, callee), each certified by its own module in this directory:
-  none
+  bb16 MarketGroupV16ViewMut::<'_, T>::adjust_provider_principal_for_domain
 summary clauses (the goal):
   result = 0: checks [0] hold
 -/
@@ -35,7 +35,7 @@ def cfg : Cfg := [
   /- bb13 -/ ⟨[.havoc 13, .havoc 1000013, .havoc 10, .havoc 1000010], .goto 38⟩,
   /- bb14 -/ ⟨[], .branch 15 16 1000015 1000016 15⟩,
   /- bb15 -/ ⟨[.havoc 16, .havoc 1000016, .copy 17 15, .copy 1000017 1000015], .switch 17 [(0, 16), (1, 17)] (some 3)⟩,
-  /- bb16 -/ ⟨[.havoc 15, .havoc 1000015], .call [20, 1000020] 19 [] []⟩,
+  /- bb16 -/ ⟨[.havoc 15, .havoc 1000015], .call [20, 1000020] 19 [] [⟨[(20, .eq 0)], .chk [] [0]⟩]⟩,
   /- bb17 -/ ⟨[.havoc 18, .havoc 1000018, .setD 0 1, .havoc 1000000], .goto 18⟩,
   /- bb18 -/ ⟨[.havoc 18, .havoc 1000018, .havoc 15, .havoc 1000015], .goto 38⟩,
   /- bb19 -/ ⟨[], .branch 19 20 1000019 1000020 20⟩,

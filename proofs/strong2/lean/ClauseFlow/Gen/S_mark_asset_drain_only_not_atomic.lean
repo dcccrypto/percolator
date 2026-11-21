@@ -9,7 +9,8 @@ MIR blocks: 39, locals: 38. market root: _1; accounts: none
 result = local 0 (0 is Ok); payload = local 1000000 (ghost: integer value or enum discriminant
 of the Ok payload; for Option: None = 0, Some = 1).
 callee summaries used (block, callee), each certified by its own module in this directory:
-  none
+  bb25 MarketGroupV16ViewMut::<'_, T>::set_asset_state
+  bb30 MarketGroupV16ViewMut::<'_, T>::commit_asset_set_epoch_bump
 summary clauses (the goal):
   result = 0: checks [0] preserved
 -/
@@ -44,12 +45,12 @@ def cfg : Cfg := [
   /- bb22 -/ ⟨[.havoc 26, .havoc 1000026], .call [25, 1000025] 23 [0] []⟩,
   /- bb23 -/ ⟨[.havoc 26, .havoc 1000026], .branch 24 25 1000024 1000025 24⟩,
   /- bb24 -/ ⟨[.havoc 25, .havoc 1000025, .copy 27 24, .copy 1000027 1000024], .switch 27 [(0, 25), (1, 26)] (some 3)⟩,
-  /- bb25 -/ ⟨[.havoc 36, .havoc 1000036, .havoc 37, .havoc 1000037, .havoc 24, .havoc 1000024, .havoc 22, .havoc 1000022], .call [30, 1000030] 28 [] []⟩,
+  /- bb25 -/ ⟨[.havoc 36, .havoc 1000036, .havoc 37, .havoc 1000037, .havoc 24, .havoc 1000024, .havoc 22, .havoc 1000022], .call [30, 1000030] 28 [] [⟨[(30, .eq 0)], .chk [] [0]⟩]⟩,
   /- bb26 -/ ⟨[.havoc 28, .havoc 1000028, .setD 0 1, .havoc 1000000], .goto 27⟩,
   /- bb27 -/ ⟨[.havoc 28, .havoc 1000028, .havoc 24, .havoc 1000024], .goto 36⟩,
   /- bb28 -/ ⟨[], .branch 29 30 1000029 1000030 29⟩,
   /- bb29 -/ ⟨[.havoc 30, .havoc 1000030, .copy 31 29, .copy 1000031 1000029], .switch 31 [(0, 30), (1, 31)] (some 3)⟩,
-  /- bb30 -/ ⟨[.havoc 29, .havoc 1000029], .call [33, 1000033] 33 [] []⟩,
+  /- bb30 -/ ⟨[.havoc 29, .havoc 1000029], .call [33, 1000033] 33 [] [⟨[], .chk [] [0]⟩]⟩,
   /- bb31 -/ ⟨[.havoc 32, .havoc 1000032, .setD 0 1, .havoc 1000000], .goto 32⟩,
   /- bb32 -/ ⟨[.havoc 32, .havoc 1000032, .havoc 29, .havoc 1000029], .goto 36⟩,
   /- bb33 -/ ⟨[.havoc 34, .havoc 1000034], .call [0, 1000000] 34 [0] [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
@@ -89,14 +90,14 @@ def inv : List (Option AState) := [
   /- bb25 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb26 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb27 -/ some ⟨[(0, .eq 1)], [⟨[], .chk [] [0]⟩]⟩,
-  /- bb28 -/ some ⟨[], []⟩,
-  /- bb29 -/ some ⟨[], []⟩,
-  /- bb30 -/ some ⟨[], []⟩,
+  /- bb28 -/ some ⟨[], [⟨[(30, .eq 0)], .chk [] [0]⟩]⟩,
+  /- bb29 -/ some ⟨[], [⟨[(29, .eq 0)], .chk [] [0]⟩]⟩,
+  /- bb30 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb31 -/ some ⟨[], []⟩,
   /- bb32 -/ some ⟨[(0, .eq 1)], []⟩,
-  /- bb33 -/ some ⟨[], []⟩,
-  /- bb34 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
-  /- bb35 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [] [0]⟩]⟩,
+  /- bb33 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
+  /- bb34 -/ some ⟨[], [⟨[], .chk [] [0]⟩, ⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
+  /- bb35 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb36 -/ some ⟨[(0, .eq 1)], []⟩,
   /- bb37 -/ some ⟨[(0, .eq 1)], [⟨[], .chk [] [0]⟩]⟩,
   /- bb38 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [] [0]⟩]⟩

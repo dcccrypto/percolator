@@ -8,11 +8,15 @@
   "T15_account_conditional",
   "S_add_account_source_positive_pnl_not_atomic",
   "S_canonicalize_retired_empty_asset_slot_not_atomic",
+  "S_update_resolved_payout_blocker_total",
+  "S_set_asset_state",
+  "S_band_observe_cert_not_atomic",
   "S_charge_account_backing_fee_not_atomic",
   "S_claim_resolved_payout_topup_not_atomic",
   "S_collect_account_backing_utilization_fee_for_domain_not_atomic",
   "S_retire_source_credit_lien_from_counterparty_impaired_not_atomic",
   "S_release_source_credit_lien_from_counterparty_terminal_not_atomic",
+  "S_set_insurance_reservation_for_domain",
   "S_release_source_credit_lien_from_insurance_terminal_not_atomic",
   "S_release_source_credit_lien_from_insurance_not_atomic",
   "S_release_account_source_credit_lien_for_domain_not_atomic",
@@ -26,18 +30,39 @@
   "S_credit_backing_provider_earnings_not_atomic",
   "S_credit_domain_insurance_budgets_not_atomic",
   "S_credit_domain_insurance_budget_not_atomic",
+  "S_set_pending_domain_loss_barrier_count",
+  "S_drop_unowned_side_oi",
+  "S_begin_full_drain_reset_inner",
+  "S_begin_zero_oi_residue_resets",
+  "S_begin_legless_asset_resets",
   "S_cure_and_cancel_close_with_cert_not_atomic",
   "S_cure_and_cancel_close_not_atomic",
   "S_deposit_domain_insurance_not_atomic",
+  "S_adjust_provider_principal_for_domain",
   "S_deposit_fresh_counterparty_backing_not_atomic",
   "S_deposit_not_atomic",
+  "S_deregister_empty_materialized_portfolio_not_atomic",
   "S_execute_batch_band_scoped_not_atomic",
   "S_execute_batch_with_fee_loss_stale_scoped_not_atomic",
   "S_execute_trade_with_fee_loss_stale_scoped_not_atomic",
+  "S_finalize_side_reset_not_atomic",
+  "S_commit_asset_set_epoch_bump",
   "S_force_asset_recovery_not_atomic",
   "S_force_close_recovery_pair_not_atomic",
+  "S_retain_leg_as_pending_obligation",
+  "S_clear_leg_at_slot_inner",
+  "S_clear_leg_inner",
+  "S_clear_leg",
+  "S_mark_account_b_stale",
+  "S_mark_leg_b_stale",
+  "S_begin_close_progress_ledger",
+  "S_declare_permissionless_recovery",
+  "S_ensure_close_progress_not_expired",
+  "S_advance_close_progress_ledger",
+  "S_forfeit_recovery_leg_not_atomic",
   "S_mark_asset_drain_only_not_atomic",
   "S_recredit_terminal_claim_free_residual_for_asset_not_atomic",
+  "S_register_empty_materialized_portfolio_not_atomic",
   "S_release_source_credit_lien_from_counterparty_not_atomic",
   "S_reset_empty_asset_oracle_anchor_not_atomic",
   "S_resolve_market_not_atomic",
@@ -55,48 +80,16 @@
   "S_withdraw_not_atomic",
   "S_prepare_one_source_domain_for_resolved_close_not_atomic",
   "S_expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic",
+  "S_attach_leg_at_slot",
+  "S_resize_leg_same_side_at_slot",
+  "S_apply_position_delta_with_lookup_inner",
+  "S_apply_position_delta_with_lookup",
+  "S_apply_position_delta",
+  "S_detach_solvent_active_legs_for_resolved_close",
   "S_realize_one_source_domain_for_resolved_close_not_atomic",
   "S_clear_fully_diluted_resolved_receipt_if_terminal",
   "S_close_resolved_account_not_atomic"
  ],
- "mutants": {
-  "C-claim": [
-   2436,
-   2436,
-   0,
-   0
-  ],
-  "C-dead": [
-   78,
-   78,
-   0,
-   0
-  ],
-  "C-entry": [
-   91,
-   91,
-   0,
-   0
-  ],
-  "P-guard": [
-   822,
-   151,
-   671,
-   80
-  ],
-  "P-noest": [
-   125,
-   124,
-   1,
-   82
-  ],
-  "P-write": [
-   78,
-   70,
-   8,
-   67
-  ]
- },
  "pin": "engine: dcccrypto/percolator@c38b6b1e, src/v16.rs blob 7d3edfe86be1a80f49793cf551c39687a8766a4d; rustc 1.99.0-nightly (d0babd8b6 2026-07-15); cargo rustc -j 4 --release --lib -- -Zunpretty=mir -Zinline-mir=no",
  "summaries": {
   "add_account_source_positive_pnl_not_atomic": {
@@ -126,6 +119,150 @@
     ]
    ],
    "uses": []
+  },
+  "adjust_provider_principal_for_domain": {
+   "blocks": 12,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "57775eb0273e7d240039798753f23952ed54b1233c34ace1c3db2ecfb62ff568",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": []
+  },
+  "advance_close_progress_ledger": {
+   "blocks": 61,
+   "clauses": [
+    "result = 0: checks [0, 1] preserved"
+   ],
+   "mir_sha256": "625579b3b09eb5532a939d29be83021615271dbbbae6bd870382823d07b461d1",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0,
+       1
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "begin_legless_asset_resets",
+    "ensure_close_progress_not_expired",
+    "set_pending_domain_loss_barrier_count"
+   ]
+  },
+  "apply_position_delta": {
+   "blocks": 19,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "f31d97027fe6c025d3a1e130a6f5a6759bd87359b0a1bc279cc6b9662c6a7254",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "apply_position_delta_with_lookup"
+   ]
+  },
+  "apply_position_delta_with_lookup": {
+   "blocks": 2,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "418b8a8012bdf055fb997cf6cc8023366cbd44395a69ccb5b36702c3586a29dd",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "apply_position_delta_with_lookup_inner"
+   ]
+  },
+  "apply_position_delta_with_lookup_inner": {
+   "blocks": 172,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "376e593ae80ef9a77c4f09c91adf7066623c7fd987dd09347bc6b8fa7c97328c",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "attach_leg_at_slot",
+    "clear_leg_at_slot_inner",
+    "resize_leg_same_side_at_slot",
+    "set_asset_state"
+   ]
   },
   "apply_released_pnl_conversion_core_not_atomic": {
    "blocks": 20,
@@ -180,6 +317,175 @@
     ]
    ],
    "uses": []
+  },
+  "attach_leg_at_slot": {
+   "blocks": 74,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "24b9a24005c4d4028b263c4bd3a5433c42df4a70f673c37e3efb618c596600f2",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "set_asset_state"
+   ]
+  },
+  "band_observe_cert_not_atomic": {
+   "blocks": 53,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "f2268f93a5c2fc06b8bf4d49db68d1f5f979a8baac05152beefeb6bf4992c501",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "set_asset_state"
+   ]
+  },
+  "begin_close_progress_ledger": {
+   "blocks": 85,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "a0ee95dc54cdece926674b09e2f39a1c0cefe7ea4f887d6f7f714eaec7010233",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "set_pending_domain_loss_barrier_count"
+   ]
+  },
+  "begin_full_drain_reset_inner": {
+   "blocks": 40,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "66a6268b944d9bd3e172a9cb6e7280e5f307e1aae9ece4a6ac6435fb6bfc82c4",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "set_asset_state"
+   ]
+  },
+  "begin_legless_asset_resets": {
+   "blocks": 17,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "6042d777fab808ce579615ef821736bd85e76afe2d9cb34844bf896a7a12edb8",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "begin_zero_oi_residue_resets"
+   ]
+  },
+  "begin_zero_oi_residue_resets": {
+   "blocks": 61,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "8723034065f6ce215cd951a3d724b0ec5e59e5b54552743ef5eaa46e61e175fc",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "begin_full_drain_reset_inner",
+    "drop_unowned_side_oi"
+   ]
   },
   "canonicalize_retired_empty_asset_slot_not_atomic": {
    "blocks": 47,
@@ -254,7 +560,9 @@
      ]
     ]
    ],
-   "uses": []
+   "uses": [
+    "band_observe_cert_not_atomic"
+   ]
   },
   "charge_account_fee_current_not_atomic": {
    "blocks": 31,
@@ -341,6 +649,90 @@
    ],
    "uses": []
   },
+  "clear_leg": {
+   "blocks": 2,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "53896b5f6c6c2f4d547f4accaa70848237260a64b847b9b1bf49132a4bf0be8f",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "clear_leg_inner"
+   ]
+  },
+  "clear_leg_at_slot_inner": {
+   "blocks": 117,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "bb21a4786e78923ccf1ffadba676a0b9cb7850108a6b746432a325a3470f2f3e",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "set_asset_state"
+   ]
+  },
+  "clear_leg_inner": {
+   "blocks": 10,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "97fa80136d8d5e33e85a5b2d15c182025491b550efbaa1a6224848fba25de069",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "clear_leg_at_slot_inner"
+   ]
+  },
   "close_resolved_account_not_atomic": {
    "blocks": 257,
    "clauses": [
@@ -373,6 +765,7 @@
    ],
    "uses": [
     "clear_fully_diluted_resolved_receipt_if_terminal",
+    "detach_solvent_active_legs_for_resolved_close",
     "expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic",
     "prepare_one_source_domain_for_resolved_close_not_atomic",
     "realize_one_source_domain_for_resolved_close_not_atomic",
@@ -400,6 +793,26 @@
        0
       ]
      ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": []
+  },
+  "commit_asset_set_epoch_bump": {
+   "blocks": 3,
+   "clauses": [
+    "always: checks [0] preserved"
+   ],
+   "mir_sha256": "f5ce87aee88cfac3bd78c12fd5c1ec84f22c497b448e132a07370cd89fb411fa",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [],
      [
       [],
       [
@@ -657,6 +1070,67 @@
      ]
     ]
    ],
+   "uses": [
+    "begin_legless_asset_resets",
+    "set_pending_domain_loss_barrier_count"
+   ]
+  },
+  "declare_permissionless_recovery": {
+   "blocks": 34,
+   "clauses": [
+    "result = 0 \u2227 payload = 0: impossible",
+    "result = 0 \u2227 payload = 1: impossible",
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "4d46fbfae17baa33483477a336a3333106ebc38f12b1cfb7f9f3145108d90531",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ],
+      [
+       1000000,
+       "eq",
+       0
+      ]
+     ],
+     "bot"
+    ],
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ],
+      [
+       1000000,
+       "eq",
+       1
+      ]
+     ],
+     "bot"
+    ],
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
    "uses": []
   },
   "deposit_domain_insurance_not_atomic": {
@@ -709,7 +1183,9 @@
      ]
     ]
    ],
-   "uses": []
+   "uses": [
+    "adjust_provider_principal_for_domain"
+   ]
   },
   "deposit_not_atomic": {
    "blocks": 66,
@@ -738,6 +1214,121 @@
     ]
    ],
    "uses": []
+  },
+  "deregister_empty_materialized_portfolio_not_atomic": {
+   "blocks": 25,
+   "clauses": [
+    "result = 0: checks [1] hold; checks [0] preserved"
+   ],
+   "mir_sha256": "c0ccd0a1815ba621c73edc8123a63f5e5c882dc86385032e50701dbf90067bb2",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [
+       1
+      ],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": []
+  },
+  "detach_solvent_active_legs_for_resolved_close": {
+   "blocks": 184,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "a83f93f7c3f02eaca79f6f09b10524b91466ec21bd7613dd1404cc92b4997e87",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "apply_position_delta",
+    "begin_full_drain_reset_inner",
+    "begin_zero_oi_residue_resets",
+    "clear_leg_at_slot_inner"
+   ]
+  },
+  "drop_unowned_side_oi": {
+   "blocks": 59,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "c014dd3297ca29e1f78e65868f84099b0cb5e17fa2571055b747e02f67736462",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "set_asset_state"
+   ]
+  },
+  "ensure_close_progress_not_expired": {
+   "blocks": 23,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "8c706bf0b10099a491f1d83cc224bbee2160d51bae21cc15423daee04843738b",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "declare_permissionless_recovery"
+   ]
   },
   "execute_batch_band_scoped_not_atomic": {
    "blocks": 76,
@@ -859,6 +1450,34 @@
    ],
    "uses": []
   },
+  "finalize_side_reset_not_atomic": {
+   "blocks": 65,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "dbaa2789c6dfd173fff4cd5bac3c693f759aba76544bb01e976f7187ce5dcb77",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "set_asset_state"
+   ]
+  },
   "force_asset_recovery_not_atomic": {
    "blocks": 46,
    "clauses": [
@@ -883,7 +1502,10 @@
      ]
     ]
    ],
-   "uses": []
+   "uses": [
+    "commit_asset_set_epoch_bump",
+    "set_asset_state"
+   ]
   },
   "force_close_recovery_pair_not_atomic": {
    "blocks": 89,
@@ -931,6 +1553,67 @@
     "execute_trade_with_fee_loss_stale_scoped_not_atomic"
    ]
   },
+  "forfeit_recovery_leg_not_atomic": {
+   "blocks": 354,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "51e8f1f19691cd83086f2698f55a2b7cac07767a3a93cc90e748c2d060820aaf",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "advance_close_progress_ledger",
+    "begin_close_progress_ledger",
+    "begin_full_drain_reset_inner",
+    "begin_zero_oi_residue_resets",
+    "clear_leg",
+    "declare_permissionless_recovery",
+    "mark_leg_b_stale",
+    "retain_leg_as_pending_obligation"
+   ]
+  },
+  "mark_account_b_stale": {
+   "blocks": 19,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "f360f1befa057c1a1b60f353bd43982d7fdd6a84b9437842505ceefd5d8153fc",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": []
+  },
   "mark_asset_drain_only_not_atomic": {
    "blocks": 39,
    "clauses": [
@@ -955,7 +1638,38 @@
      ]
     ]
    ],
-   "uses": []
+   "uses": [
+    "commit_asset_set_epoch_bump",
+    "set_asset_state"
+   ]
+  },
+  "mark_leg_b_stale": {
+   "blocks": 19,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "95482f8d3ab023e5c23960e7d55bf1392f6ad74ca64955c3cbef6b6df52e4ae5",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "mark_account_b_stale"
+   ]
   },
   "normalize_terminal_empty_asset_history_not_atomic": {
    "blocks": 54,
@@ -981,7 +1695,9 @@
      ]
     ]
    ],
-   "uses": []
+   "uses": [
+    "set_asset_state"
+   ]
   },
   "prepare_one_source_domain_for_resolved_close_not_atomic": {
    "blocks": 122,
@@ -1089,6 +1805,34 @@
        0
       ],
       []
+     ]
+    ]
+   ],
+   "uses": []
+  },
+  "register_empty_materialized_portfolio_not_atomic": {
+   "blocks": 25,
+   "clauses": [
+    "result = 0: checks [1] hold; checks [0] preserved"
+   ],
+   "mir_sha256": "ee3b9ae378277b55e36c88b45d517bcfb5660ea75e36050bc68115eabbe74b06",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [
+       1
+      ],
+      [
+       0
+      ]
      ]
     ]
    ],
@@ -1286,7 +2030,9 @@
      ]
     ]
    ],
-   "uses": []
+   "uses": [
+    "set_insurance_reservation_for_domain"
+   ]
   },
   "reset_empty_asset_oracle_anchor_not_atomic": {
    "blocks": 52,
@@ -1312,7 +2058,37 @@
      ]
     ]
    ],
-   "uses": []
+   "uses": [
+    "set_asset_state"
+   ]
+  },
+  "resize_leg_same_side_at_slot": {
+   "blocks": 35,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "5fb4ede313a69a5bb5c7844174cd385dca28f416b86c7817a99d401ba3a247a8",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "set_asset_state"
+   ]
   },
   "resolve_market_not_atomic": {
    "blocks": 20,
@@ -1368,6 +2144,34 @@
     "normalize_terminal_empty_asset_history_not_atomic"
    ]
   },
+  "retain_leg_as_pending_obligation": {
+   "blocks": 64,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "e5b41f530605dd9c97fd6de9f984d4bc8f92ba455bbd502ea4c3f3b733e450da",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "set_asset_state"
+   ]
+  },
   "retire_empty_asset_not_atomic": {
    "blocks": 61,
    "clauses": [
@@ -1393,7 +2197,9 @@
     ]
    ],
    "uses": [
-    "normalize_terminal_empty_asset_history_not_atomic"
+    "commit_asset_set_epoch_bump",
+    "normalize_terminal_empty_asset_history_not_atomic",
+    "set_asset_state"
    ]
   },
   "retire_source_credit_lien_from_counterparty_impaired_not_atomic": {
@@ -1500,7 +2306,91 @@
      ]
     ]
    ],
+   "uses": [
+    "set_asset_state"
+   ]
+  },
+  "set_asset_state": {
+   "blocks": 29,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "9e5c639b735ad6e992268ff290cf4f0d74800568cef4c0e3fb63add2e718cca9",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "update_resolved_payout_blocker_total"
+   ]
+  },
+  "set_insurance_reservation_for_domain": {
+   "blocks": 15,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "6ab7fb0523f215e65971d4feabc40938c697d4aa3c2999f0752b1555cd29aa14",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
    "uses": []
+  },
+  "set_pending_domain_loss_barrier_count": {
+   "blocks": 41,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "6a3bbf0f882a30dd7395da7918b4a5036bed772871c20af12b40af80857336cb",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": [
+    "update_resolved_payout_blocker_total"
+   ]
   },
   "sync_account_fee_to_slot_not_atomic": {
    "blocks": 112,
@@ -1552,6 +2442,32 @@
    "uses": [
     "charge_account_fee_current_not_atomic"
    ]
+  },
+  "update_resolved_payout_blocker_total": {
+   "blocks": 10,
+   "clauses": [
+    "result = 0: checks [0] preserved"
+   ],
+   "mir_sha256": "81364740461c7177cfb3a5c016daa45b2b783cf8dff708b800b9554eeea0f25e",
+   "mirror_problems": 0,
+   "raw": [
+    [
+     [
+      [
+       0,
+       "eq",
+       0
+      ]
+     ],
+     [
+      [],
+      [
+       0
+      ]
+     ]
+    ]
+   ],
+   "uses": []
   },
   "withdraw_backing_provider_earnings_not_atomic": {
    "blocks": 35,
@@ -1629,7 +2545,9 @@
      ]
     ]
    ],
-   "uses": []
+   "uses": [
+    "adjust_provider_principal_for_domain"
+   ]
   },
   "withdraw_not_atomic": {
    "blocks": 105,
@@ -1699,7 +2617,6 @@
    },
    "T15.header": {
     "assumed": [
-     "detach_solvent_active_legs_for_resolved_close",
      "settle_account_side_effects_not_atomic",
      "settle_negative_pnl_from_principal_not_atomic",
      "settle_resolved_bankruptcy_negative_pnl"

@@ -1,0 +1,168 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::apply_position_delta(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: &mut PortfolioV16ViewMut<'_>, _3: usize, _4: i128) -> Result<(), V16Error> {
+    debug self => _1;
+    debug account => _2;
+    debug asset_index => _3;
+    debug delta_q => _4;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+    let mut _5: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, v16::PositionDeltaLookupV16>;
+    let mut _6: core::result::Result<v16::PositionDeltaLookupV16, v16::V16Error>;
+    let mut _7: &v16::MarketGroupV16ViewMut<'_, T>;
+    let _8: &v16::PortfolioV16View<'_>;
+    let _9: v16::PortfolioV16View<'_>;
+    let mut _10: &v16::PortfolioV16ViewMut<'_>;
+    let mut _11: isize;
+    let _12: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let _13: v16::PositionDeltaLookupV16;
+    let mut _14: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, i128>;
+    let mut _15: core::result::Result<i128, v16::V16Error>;
+    let mut _16: core::option::Option<i128>;
+    let mut _17: i128;
+    let mut _18: i128;
+    let mut _19: isize;
+    scope 1 {
+        debug lookup => _13;
+        let _20: core::result::Result<core::convert::Infallible, v16::V16Error>;
+        let _21: i128;
+        scope 6 {
+            debug raw_delta_q => _21;
+        }
+        scope 7 {
+            debug residual => _20;
+            scope 8 {
+            }
+        }
+        scope 9 {
+            debug val => _21;
+            scope 10 {
+            }
+        }
+    }
+    scope 2 {
+        debug residual => _12;
+        scope 3 {
+        }
+    }
+    scope 4 {
+        debug val => _13;
+        scope 5 {
+        }
+    }
+
+    bb0: {
+        switchInt(copy _4) -> [0: bb1, otherwise: bb2];
+    }
+
+    bb1: {
+        _0 = const Result::<(), V16Error>::Ok(());
+        goto -> bb18;
+    }
+
+    bb2: {
+        StorageLive(_5);
+        StorageLive(_6);
+        StorageLive(_7);
+        _7 = &(*_1);
+        StorageLive(_8);
+        StorageLive(_9);
+        StorageLive(_10);
+        _10 = &(*_2);
+        _9 = PortfolioV16ViewMut::<'_>::as_view(move _10) -> [return: bb3, unwind continue];
+    }
+
+    bb3: {
+        StorageDead(_10);
+        _8 = &_9;
+        _6 = MarketGroupV16ViewMut::<'_, T>::position_delta_lookup_for_asset(move _7, move _8, copy _3, move _4) -> [return: bb4, unwind continue];
+    }
+
+    bb4: {
+        StorageDead(_7);
+        _5 = <Result<PositionDeltaLookupV16, V16Error> as Try>::branch(move _6) -> [return: bb5, unwind continue];
+    }
+
+    bb5: {
+        StorageDead(_6);
+        _11 = discriminant(_5);
+        switchInt(move _11) -> [0: bb7, 1: bb8, otherwise: bb6];
+    }
+
+    bb6: {
+        unreachable;
+    }
+
+    bb7: {
+        _13 = copy ((_5 as Continue).0: v16::PositionDeltaLookupV16);
+        StorageDead(_9);
+        StorageDead(_8);
+        StorageDead(_5);
+        StorageLive(_14);
+        StorageLive(_15);
+        StorageLive(_16);
+        StorageLive(_17);
+        _17 = copy (_13.3: i128);
+        StorageLive(_18);
+        _18 = copy (_13.2: i128);
+        _16 = core::num::<impl i128>::checked_sub(move _17, move _18) -> [return: bb10, unwind continue];
+    }
+
+    bb8: {
+        StorageLive(_12);
+        _12 = copy ((_5 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _12) -> [return: bb9, unwind continue];
+    }
+
+    bb9: {
+        StorageDead(_12);
+        StorageDead(_9);
+        StorageDead(_8);
+        StorageDead(_5);
+        goto -> bb17;
+    }
+
+    bb10: {
+        StorageDead(_18);
+        StorageDead(_17);
+        _15 = Option::<i128>::ok_or::<V16Error>(move _16, const V16Error::ArithmeticOverflow) -> [return: bb11, unwind continue];
+    }
+
+    bb11: {
+        StorageDead(_16);
+        _14 = <Result<i128, V16Error> as Try>::branch(move _15) -> [return: bb12, unwind continue];
+    }
+
+    bb12: {
+        StorageDead(_15);
+        _19 = discriminant(_14);
+        switchInt(move _19) -> [0: bb13, 1: bb14, otherwise: bb6];
+    }
+
+    bb13: {
+        _21 = copy ((_14 as Continue).0: i128);
+        StorageDead(_14);
+        _0 = MarketGroupV16ViewMut::<'_, T>::apply_position_delta_with_lookup(move _1, move _2, move _3, move _21, move _13) -> [return: bb16, unwind continue];
+    }
+
+    bb14: {
+        StorageLive(_20);
+        _20 = copy ((_14 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _20) -> [return: bb15, unwind continue];
+    }
+
+    bb15: {
+        StorageDead(_20);
+        StorageDead(_14);
+        goto -> bb17;
+    }
+
+    bb16: {
+        goto -> bb18;
+    }
+
+    bb17: {
+        goto -> bb18;
+    }
+
+    bb18: {
+        return;
+    }
+}

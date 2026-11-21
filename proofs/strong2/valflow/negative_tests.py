@@ -58,6 +58,37 @@ NEW = {
     "s2_n26": ("pres", 0, False, "test `c > 1` (c == 1 path wrote, unchecked)"),
     "s2_n27": ("pres", 0, True, "match Ok(v) => v, Err(_) => 0 (harmless: Err of this callee is impossible after a write... refusal is only imprecise)"),
 }
+NEW.update({
+    "s3_f1": ("pres", 0, True, "R10: writes header field materialized_portfolio_count, which validate_shape never reads (the T29/T47 shape)"),
+    "s3_f2": ("pres", 0, False, "R10: writes c_tot (read)"),
+    "s3_f3": ("pres", 0, False, "R10: helper given `&mut header.vault` (read)"),
+    "s3_f4": ("pres", 0, True, "R10: helper given `&mut header.materialized_portfolio_count` (not read)"),
+    "s3_f5": ("pres", 0, False, "R10: helper given the whole header, writes c_tot"),
+    "s3_f6": ("pres", 0, False, "R10: pointer is one of two fields, one of them read"),
+    "s3_f7": ("pres", 0, True, "R10: overwrites a market slot; validate_shape (this build) reads only the slice length"),
+    "s3_f7a": ("pres", 1, False, "R10: overwrites a market slot; the ACCOUNT check may read slots"),
+    "s3_f9": ("pres", 0, True, "R10: writes header.mode, not read by validate_shape"),
+    "s3_f9#acct": ("pres", 1, False, "R10: writes header.mode, which the account check reads"),
+    "s3_f10": ("pres", 0, False, "R10: overwrites header.config (read)"),
+    "s3_f11": ("pres", 0, False, "R10: unread field through a sub-borrow, then c_tot through the parent"),
+    "s3_f12": ("pres", 0, False, "R10: bytes_of_mut(header)[40] = 0xff"),
+    "s3_f13": ("pres", 0, False, "R10: mem::swap of an unread field with a read one"),
+    "s3_f14": ("pres", 0, True, "R10: mem::swap of two unread fields"),
+    "s3_f15": ("pres", 0, False, "R10: callee writes c_tot"),
+    "s3_f15ok": ("pres", 0, True, "R10: callee writes only an unread field"),
+    "s3_f16": ("pres", 0, False, "R10: pointer chosen between an unread and a read field of the same type"),
+    "s3_f17": ("pres", 0, False, "R10: array of field pointers, one read"),
+    "s3_f18": ("pres", 0, False, "R10: nested field of config (top-level field 1, read)"),
+    "s3_f19": ("pres", 0, False, "R10: slice reborrowed, then vault written"),
+})
+A3 = {}
+for ln in open(os.path.join(here, "neg_cases", "audit3_cases.txt")):
+    ln = ln.rstrip("\n")
+    if not ln.strip():
+        continue
+    nm, kind, k, exp, desc = ln.split(" ", 4)
+    key = nm if nm not in A3 else nm + "#" + kind + k
+    A3[key] = (kind, int(k), exp == "T", "[audit 3] " + desc)
 sys.path.insert(0, os.path.join(here, "..", "..", "novel", "mirflow"))
 OLD = {}
 src_old = open(os.path.join(here, "..", "..", "novel", "mirflow", "audit_regression.py")).read()
@@ -75,7 +106,10 @@ for f in os.listdir(os.path.join(src_dir, "src")):
 text = open(os.path.join(d, "src", "v16.rs")).read()
 assert text.count(ANCHOR) == 1
 extra = open(os.path.join(here, "..", "..", "novel", "mirflow", "audit_cases", "cases.rs")).read() + \
-    open(os.path.join(here, "neg_cases", "cases2.rs")).read()
+    open(os.path.join(here, "neg_cases", "cases2.rs")).read() + \
+    open(os.path.join(here, "neg_cases", "cases3.rs")).read() + \
+    open(os.path.join(here, "neg_cases", "audit3_cases.rs")).read()
+tail = open(os.path.join(here, "neg_cases", "audit3_extra.rs")).read()
 # cases that do not compile against this revision's types are dropped by name (env SKIP=a,b)
 SKIP = [x for x in os.environ.get("SKIP", "").split(",") if x]
 for nm in SKIP:
@@ -85,7 +119,7 @@ for nm in SKIP:
     for k in [k for k in list(NEW) + list(OLD) if k.split("#")[0] == nm]:
         NEW.pop(k, None)
         OLD.pop(k, None)
-open(os.path.join(d, "src", "v16.rs"), "w").write(text.replace(ANCHOR, ANCHOR + extra))
+open(os.path.join(d, "src", "v16.rs"), "w").write(text.replace(ANCHOR, ANCHOR + extra) + "\n" + tail)
 mir = os.path.join(d, "out.mir")
 r = subprocess.run(["cargo", "+" + nightly, "rustc", "-j", "4", "--release", "--lib", "--",
                     "-Zunpretty=mir", "-Zinline-mir=no"], cwd=d, stdout=open(mir, "w"),
@@ -94,6 +128,10 @@ if r.returncode != 0:
     print("the cases do not compile:\n" + r.stderr[-3000:])
     sys.exit(2)
 fns, unsupported = B.load(mir, os.path.join(d, "src", "v16.rs"))
+E.ENUMS.clear()
+E.ENUMS.update(E.enum_table(os.path.join(d, "src", "v16.rs")))
+rs = R.RS.compute(mir, os.path.join(d, "src", "v16.rs"))
+E.READ = {"fields": {0: rs["shape"][0], 1: rs["account"][0]}, "mk": {0: rs["shape"][1], 1: rs["account"][1]}}
 prov = R.Provider(fns)
 prov.unsupported.update(unsupported)
 
@@ -119,7 +157,7 @@ def ask(name, kind, k):
 print("| Case | What it does | Asked | Sound answer | Tool | Verdict |")
 print("|---|---|---|---|---|---|")
 unsound = imprecise = 0
-allc = [(k, v[0], v[1], v[2], v[3]) for k, v in NEW.items()]
+allc = [(k, v[0], v[1], v[2], v[3]) for k, v in list(NEW.items()) + list(A3.items())]
 for key, (req, reqp, ok_expected, desc) in OLD.items():
     allc.append((key, "est" if req else "pres", int(req or reqp), ok_expected, "[sibling audit] " + desc))
 for key, kind, k, ok_expected, desc in allc:
@@ -134,5 +172,48 @@ for key, kind, k, ok_expected, desc in allc:
         imprecise += 1
     print("| %s | %s | %s %d | %s | %s | %s |" % (key, desc, kind, k, "certified" if ok_expected else "refused", got, verdict))
 print("\nunsound answers: %d of %d cases; imprecise (sound refusals of a true statement): %d" % (unsound, len(allc), imprecise))
+
+# ---- unit tests that need no Rust build -----------------------------------------------------
+print("\n## Unit tests\n")
+
+
+class _F:  # a minimal stand-in for X.Fn
+    def __init__(self, types):
+        self.types, self.args, self.blocks = types, [], {}
+
+
+def unit_assign(types, l, rhs):
+    t = E.T2.__new__(E.T2)
+    t.fn, t.escaped, t.partial, t.assigns, t.cur = _F(types), set(), set(), {}, (0, 0)
+    t.fn.blocks = {0: ([], "return;", False)}
+    out = []
+    t.assign_local(l, rhs, out)
+    return out
+
+
+u1 = unit_assign({3: "u64", 4: "core::result::Result<u128, v16::V16Error>"}, 3, "copy ((_4 as Ok).0: u128) as u64 (IntToInt)")
+ok1 = u1 == [("havoc", 3)]
+print("- audit 3 risk R-a, `_3 = copy ((_4 as Ok).0: u128) as u64 (IntToInt)` must not be a payload read: %s -> %s" % (u1, "ok" if ok1 else "UNSOUND"))
+u2 = unit_assign({6: "Result<u128, u8>"}, 6, "Result::<u128, u8>::Ok(copy _2)")
+ok2 = u2 == [("havoc", 6)]
+print("- audit 3 hole H1, `Result::<..>::Ok(..)` into a local not declared `core::result::Result<..>` must pin nothing: %s -> %s" % (u2, "ok" if ok2 else "UNSOUND"))
+unsound += (not ok1) + (not ok2)
+# audit 3 holes H1/H2: the assumption scan must reject a crate with the homonym items
+for nm in ("homonym_h1_lib.rs", "homonym_h2_lib.rs"):
+    hd = os.path.join(work, "negative-homonym")
+    if os.path.isdir(hd):
+        shutil.rmtree(hd)
+    os.makedirs(os.path.join(hd, "src"))
+    for f in os.listdir(os.path.join(src_dir, "src")):
+        shutil.copy(os.path.join(src_dir, "src", f), os.path.join(hd, "src"))
+    open(os.path.join(hd, "src", "lib.rs"), "a").write("\n" + open(os.path.join(here, "neg_cases", nm)).read())
+    p = subprocess.run([sys.executable, os.path.join(here, "check_assumptions2.py"), hd, mir],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    good = p.returncode == 1
+    print("- audit 3 %s appended to src/lib.rs: check_assumptions2.py exit %d -> %s" % (
+        nm, p.returncode, "ok (rejected)" if good else "UNSOUND (accepted)"))
+    unsound += not good
+    shutil.rmtree(hd)
+print("\nunsound in total: %d" % unsound)
 shutil.rmtree(d)
 sys.exit(1 if unsound else 0)

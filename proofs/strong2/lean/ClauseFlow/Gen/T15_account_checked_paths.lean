@@ -12,6 +12,7 @@ callee summaries used (block, callee), each certified by its own module in this 
   bb9 MarketGroupV16ViewMut::<'_, T>::prepare_one_source_domain_for_resolved_close_not_atomic
   bb25 MarketGroupV16ViewMut::<'_, T>::expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic
   bb58 MarketGroupV16ViewMut::<'_, T>::sync_account_fee_to_slot_not_atomic
+  bb77 MarketGroupV16ViewMut::<'_, T>::detach_solvent_active_legs_for_resolved_close
   bb115 MarketGroupV16ViewMut::<'_, T>::realize_one_source_domain_for_resolved_close_not_atomic
   bb193 MarketGroupV16ViewMut::<'_, T>::clear_fully_diluted_resolved_receipt_if_terminal
 row T15.account, PARTIAL: executions that do not pass through block(s) [55, 104, 113]
@@ -100,7 +101,7 @@ def cfg : Cfg := [
   /- bb74 -/ ⟨[.havoc 81, .havoc 1000081, .setD 0 1, .havoc 1000000], .goto 75⟩,
   /- bb75 -/ ⟨[.havoc 81, .havoc 1000081, .havoc 78, .havoc 1000078, .havoc 75, .havoc 1000075], .goto 256⟩,
   /- bb76 -/ ⟨[.havoc 76, .havoc 1000076], .goto 77⟩,
-  /- bb77 -/ ⟨[.havoc 75, .havoc 1000075], .call [83, 1000083] 78 [] []⟩,
+  /- bb77 -/ ⟨[.havoc 75, .havoc 1000075], .call [83, 1000083] 78 [] [⟨[(83, .eq 0)], .chk [] [0]⟩]⟩,
   /- bb78 -/ ⟨[], .branch 82 83 1000082 1000083 79⟩,
   /- bb79 -/ ⟨[.havoc 83, .havoc 1000083, .copy 84 82, .copy 1000084 1000082], .switch 84 [(0, 80), (1, 81)] (some 3)⟩,
   /- bb80 -/ ⟨[.havoc 82, .havoc 1000082, .havoc 253, .havoc 1000253, .havoc 88, .havoc 1000088], .call [87, 1000087] 83 [0, 1] []⟩,
@@ -230,12 +231,12 @@ def cfg : Cfg := [
   /- bb204 -/ ⟨[.copy 207 1000200, .havoc 1000207], .call [199, 1000199] 207 [0, 1] []⟩,
   /- bb205 -/ ⟨[.havoc 206, .havoc 1000206, .setD 0 1, .havoc 1000000], .goto 206⟩,
   /- bb206 -/ ⟨[.havoc 206, .havoc 1000206, .havoc 199, .havoc 1000199, .havoc 200, .havoc 1000200], .goto 244⟩,
-  /- bb207 -/ ⟨[.havoc 266, .havoc 1000266, .write [], .havoc 199, .havoc 1000199, .havoc 200, .havoc 1000200, .havoc 267, .havoc 1000267, .havoc 211, .havoc 1000211], .call [210, 1000210] 208 [0, 1] []⟩,
+  /- bb207 -/ ⟨[.havoc 266, .havoc 1000266, .write [1], .havoc 199, .havoc 1000199, .havoc 200, .havoc 1000200, .havoc 267, .havoc 1000267, .havoc 211, .havoc 1000211], .call [210, 1000210] 208 [0, 1] []⟩,
   /- bb208 -/ ⟨[.havoc 211, .havoc 1000211, .havoc 268, .havoc 1000268, .havoc 214, .havoc 1000214], .call [213, 1000213] 209 [0, 1] []⟩,
   /- bb209 -/ ⟨[.havoc 214, .havoc 1000214], .call [212, 1000212] 210 [0, 1] []⟩,
   /- bb210 -/ ⟨[.havoc 213, .havoc 1000213], .call [209, 1000209] 211 [0, 1] []⟩,
   /- bb211 -/ ⟨[.havoc 212, .havoc 1000212, .havoc 210, .havoc 1000210], .call [208, 1000208] 212 [0, 1] []⟩,
-  /- bb212 -/ ⟨[.havoc 209, .havoc 1000209, .havoc 269, .havoc 1000269, .write [], .havoc 208, .havoc 1000208], .call [216, 1000216] 213 [] []⟩,
+  /- bb212 -/ ⟨[.havoc 209, .havoc 1000209, .havoc 269, .havoc 1000269, .write [1], .havoc 208, .havoc 1000208], .call [216, 1000216] 213 [] []⟩,
   /- bb213 -/ ⟨[], .branch 215 216 1000215 1000216 214⟩,
   /- bb214 -/ ⟨[.havoc 216, .havoc 1000216, .copy 217 215, .copy 1000217 1000215], .switch 217 [(0, 215), (1, 216)] (some 3)⟩,
   /- bb215 -/ ⟨[.havoc 215, .havoc 1000215], .call [219, 1000219] 218 [0, 1] []⟩,

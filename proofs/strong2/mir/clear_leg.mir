@@ -1,0 +1,14 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::clear_leg(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: &mut PortfolioV16ViewMut<'_>, _3: usize) -> Result<(), V16Error> {
+    debug self => _1;
+    debug account => _2;
+    debug asset_index => _3;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+
+    bb0: {
+        _0 = MarketGroupV16ViewMut::<'_, T>::clear_leg_inner(move _1, move _2, move _3, const false) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}

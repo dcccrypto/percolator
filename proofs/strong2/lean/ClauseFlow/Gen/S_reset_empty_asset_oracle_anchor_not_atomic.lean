@@ -9,7 +9,7 @@ MIR blocks: 52, locals: 51. market root: _1; accounts: none
 result = local 0 (0 is Ok); payload = local 1000000 (ghost: integer value or enum discriminant
 of the Ok payload; for Option: None = 0, Some = 1).
 callee summaries used (block, callee), each certified by its own module in this directory:
-  none
+  bb39 MarketGroupV16ViewMut::<'_, T>::set_asset_state
 summary clauses (the goal):
   result = 0: checks [0] hold
 -/
@@ -58,7 +58,7 @@ def cfg : Cfg := [
   /- bb36 -/ ⟨[.setD 0 1, .havoc 1000000], .goto 48⟩,
   /- bb37 -/ ⟨[.havoc 38, .havoc 1000038, .havoc 23, .havoc 1000023, .havoc 23, .havoc 1000023, .havoc 23, .havoc 1000023], .goto 39⟩,
   /- bb38 -/ ⟨[.havoc 38, .havoc 1000038], .goto 39⟩,
-  /- bb39 -/ ⟨[.copy 41 23, .copy 1000041 1000023], .call [40, 1000040] 40 [] []⟩,
+  /- bb39 -/ ⟨[.copy 41 23, .copy 1000041 1000023], .call [40, 1000040] 40 [] [⟨[(40, .eq 0)], .chk [] [0]⟩]⟩,
   /- bb40 -/ ⟨[.havoc 41, .havoc 1000041], .branch 39 40 1000039 1000040 41⟩,
   /- bb41 -/ ⟨[.havoc 40, .havoc 1000040, .copy 42 39, .copy 1000042 1000039], .switch 42 [(0, 42), (1, 43)] (some 3)⟩,
   /- bb42 -/ ⟨[.havoc 39, .havoc 1000039], .call [44, 1000044] 45 [0] []⟩,
@@ -114,12 +114,12 @@ def inv : List (Option AState) := [
   /- bb37 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb38 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb39 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
-  /- bb40 -/ some ⟨[], []⟩,
-  /- bb41 -/ some ⟨[], []⟩,
-  /- bb42 -/ some ⟨[], []⟩,
+  /- bb40 -/ some ⟨[], [⟨[(40, .eq 0)], .chk [] [0]⟩]⟩,
+  /- bb41 -/ some ⟨[], [⟨[(39, .eq 0)], .chk [] [0]⟩]⟩,
+  /- bb42 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb43 -/ some ⟨[], []⟩,
   /- bb44 -/ some ⟨[(0, .eq 1)], []⟩,
-  /- bb45 -/ some ⟨[], []⟩,
+  /- bb45 -/ some ⟨[], [⟨[], .chk [] [0]⟩]⟩,
   /- bb46 -/ some ⟨[], []⟩,
   /- bb47 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
   /- bb48 -/ some ⟨[(0, .eq 1)], [⟨[], .chk [] [0]⟩]⟩,

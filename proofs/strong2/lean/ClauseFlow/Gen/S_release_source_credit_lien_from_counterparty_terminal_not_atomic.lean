@@ -74,7 +74,7 @@ def cfg : Cfg := [
   /- bb52 -/ ⟨[.havoc 53, .havoc 1000053], .call [57, 1000057] 55 [0] []⟩,
   /- bb53 -/ ⟨[.havoc 56, .havoc 1000056, .setD 0 1, .havoc 1000000], .goto 54⟩,
   /- bb54 -/ ⟨[.havoc 56, .havoc 1000056, .havoc 53, .havoc 1000053], .goto 59⟩,
-  /- bb55 -/ ⟨[.havoc 60, .havoc 1000060, .write [], .havoc 57, .havoc 1000057, .havoc 58, .havoc 1000058], .call [0, 1000000] 56 [0] [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
+  /- bb55 -/ ⟨[.havoc 60, .havoc 1000060, .havoc 57, .havoc 1000057, .havoc 58, .havoc 1000058], .call [0, 1000000] 56 [0] [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
   /- bb56 -/ ⟨[.havoc 58, .havoc 1000058], .goto 63⟩,
   /- bb57 -/ ⟨[.havoc 33, .havoc 1000033, .havoc 32, .havoc 1000032], .goto 58⟩,
   /- bb58 -/ ⟨[.havoc 38, .havoc 1000038, .havoc 35, .havoc 1000035, .havoc 34, .havoc 1000034, .havoc 31, .havoc 1000031], .goto 59⟩,

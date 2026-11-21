@@ -1,0 +1,202 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::ensure_close_progress_not_expired(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: CloseProgressLedgerV16) -> Result<(), V16Error> {
+    debug self => _1;
+    debug ledger => _2;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+    let mut _3: bool;
+    let mut _4: bool;
+    let mut _5: u64;
+    let mut _6: v16::V16PodU64;
+    let mut _7: u64;
+    let mut _8: bool;
+    let mut _9: &v16::MarketModeV16;
+    let _10: v16::MarketModeV16;
+    let mut _11: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, v16::MarketModeV16>;
+    let mut _12: core::result::Result<v16::MarketModeV16, v16::V16Error>;
+    let mut _13: u8;
+    let mut _14: isize;
+    let _15: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let _16: v16::MarketModeV16;
+    let mut _17: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, v16::PermissionlessProgressOutcomeV16>;
+    let mut _18: core::result::Result<v16::PermissionlessProgressOutcomeV16, v16::V16Error>;
+    let mut _19: isize;
+    let _20: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let _21: v16::PermissionlessProgressOutcomeV16;
+    let mut _22: &mut v16::MarketGroupV16HeaderAccount;
+    let mut _23: &mut v16::MarketGroupV16HeaderAccount;
+    scope 1 {
+        debug residual => _15;
+        scope 2 {
+        }
+    }
+    scope 3 {
+        debug val => _16;
+        scope 4 {
+        }
+    }
+    scope 5 {
+        debug residual => _20;
+        scope 6 {
+        }
+    }
+    scope 7 {
+        debug val => _21;
+        scope 8 {
+        }
+    }
+
+    bb0: {
+        StorageLive(_3);
+        _3 = copy (_2.0: bool);
+        switchInt(move _3) -> [0: bb19, otherwise: bb1];
+    }
+
+    bb1: {
+        StorageLive(_4);
+        StorageLive(_5);
+        StorageLive(_6);
+        _22 = no_retag copy ((*_1).0: &mut v16::MarketGroupV16HeaderAccount);
+        _6 = copy ((*_22).31: v16::V16PodU64);
+        _5 = V16PodU64::get(move _6) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        StorageDead(_6);
+        StorageLive(_7);
+        _7 = copy (_2.9: u64);
+        _4 = Gt(move _5, move _7);
+        switchInt(move _4) -> [0: bb18, otherwise: bb3];
+    }
+
+    bb3: {
+        StorageDead(_7);
+        StorageDead(_5);
+        StorageLive(_8);
+        StorageLive(_9);
+        StorageLive(_10);
+        StorageLive(_11);
+        StorageLive(_12);
+        StorageLive(_13);
+        _23 = no_retag copy ((*_1).0: &mut v16::MarketGroupV16HeaderAccount);
+        _13 = copy ((*_23).36: u8);
+        _12 = decode_market_mode(move _13) -> [return: bb4, unwind continue];
+    }
+
+    bb4: {
+        StorageDead(_13);
+        _11 = <Result<MarketModeV16, V16Error> as Try>::branch(move _12) -> [return: bb5, unwind continue];
+    }
+
+    bb5: {
+        StorageDead(_12);
+        _14 = discriminant(_11);
+        switchInt(move _14) -> [0: bb7, 1: bb8, otherwise: bb6];
+    }
+
+    bb6: {
+        unreachable;
+    }
+
+    bb7: {
+        StorageLive(_16);
+        _16 = copy ((_11 as Continue).0: v16::MarketModeV16);
+        _10 = copy _16;
+        StorageDead(_16);
+        _9 = &_10;
+        _8 = <MarketModeV16 as PartialEq>::eq(move _9, const v16::MarketGroupV16ViewMut::<'_, T>::ensure_close_progress_not_expired::promoted[0]) -> [return: bb10, unwind continue];
+    }
+
+    bb8: {
+        StorageLive(_15);
+        _15 = copy ((_11 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _15) -> [return: bb9, unwind continue];
+    }
+
+    bb9: {
+        StorageDead(_15);
+        StorageDead(_11);
+        StorageDead(_10);
+        StorageDead(_9);
+        goto -> bb20;
+    }
+
+    bb10: {
+        switchInt(move _8) -> [0: bb12, otherwise: bb11];
+    }
+
+    bb11: {
+        StorageDead(_11);
+        StorageDead(_10);
+        StorageDead(_9);
+        _0 = const Result::<(), V16Error>::Ok(());
+        goto -> bb20;
+    }
+
+    bb12: {
+        StorageDead(_11);
+        StorageDead(_10);
+        StorageDead(_9);
+        StorageDead(_8);
+        StorageLive(_17);
+        StorageLive(_18);
+        _18 = MarketGroupV16ViewMut::<'_, T>::declare_permissionless_recovery(move _1, const PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress) -> [return: bb13, unwind continue];
+    }
+
+    bb13: {
+        _17 = <Result<PermissionlessProgressOutcomeV16, V16Error> as Try>::branch(move _18) -> [return: bb14, unwind continue];
+    }
+
+    bb14: {
+        StorageDead(_18);
+        _19 = discriminant(_17);
+        switchInt(move _19) -> [0: bb15, 1: bb16, otherwise: bb6];
+    }
+
+    bb15: {
+        StorageLive(_21);
+        _21 = copy ((_17 as Continue).0: v16::PermissionlessProgressOutcomeV16);
+        StorageDead(_21);
+        StorageDead(_17);
+        _0 = const Result::<(), V16Error>::Err(V16Error::RecoveryRequired);
+        goto -> bb21;
+    }
+
+    bb16: {
+        StorageLive(_20);
+        _20 = copy ((_17 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _20) -> [return: bb17, unwind continue];
+    }
+
+    bb17: {
+        StorageDead(_20);
+        StorageDead(_17);
+        goto -> bb21;
+    }
+
+    bb18: {
+        StorageDead(_7);
+        StorageDead(_5);
+        goto -> bb19;
+    }
+
+    bb19: {
+        StorageDead(_4);
+        StorageDead(_3);
+        _0 = const Result::<(), V16Error>::Ok(());
+        goto -> bb22;
+    }
+
+    bb20: {
+        StorageDead(_8);
+        goto -> bb21;
+    }
+
+    bb21: {
+        StorageDead(_4);
+        StorageDead(_3);
+        goto -> bb22;
+    }
+
+    bb22: {
+        return;
+    }
+}

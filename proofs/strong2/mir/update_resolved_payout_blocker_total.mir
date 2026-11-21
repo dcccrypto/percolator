@@ -1,0 +1,88 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::update_resolved_payout_blocker_total(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: u64, _3: u64) -> Result<(), V16Error> {
+    debug self => _1;
+    debug old => _2;
+    debug new => _3;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+    let mut _4: v16::V16PodU64;
+    let mut _5: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, u64>;
+    let mut _6: core::result::Result<u64, v16::V16Error>;
+    let mut _7: u64;
+    let mut _8: v16::V16PodU64;
+    let mut _9: isize;
+    let _10: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let _11: u64;
+    let mut _12: &mut v16::MarketGroupV16HeaderAccount;
+    let mut _13: &mut v16::MarketGroupV16HeaderAccount;
+    scope 1 {
+        debug residual => _10;
+        scope 2 {
+        }
+    }
+    scope 3 {
+        debug val => _11;
+        scope 4 {
+        }
+    }
+
+    bb0: {
+        StorageLive(_4);
+        StorageLive(_5);
+        StorageLive(_6);
+        StorageLive(_7);
+        StorageLive(_8);
+        _12 = no_retag copy ((*_1).0: &mut v16::MarketGroupV16HeaderAccount);
+        _8 = copy ((*_12).15: v16::V16PodU64);
+        _7 = V16PodU64::get(move _8) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        StorageDead(_8);
+        _6 = MarketGroupV16ViewMut::<'_, T>::apply_total_delta_u64(move _7, move _2, move _3) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        StorageDead(_7);
+        _5 = <Result<u64, V16Error> as Try>::branch(move _6) -> [return: bb3, unwind continue];
+    }
+
+    bb3: {
+        StorageDead(_6);
+        _9 = discriminant(_5);
+        switchInt(move _9) -> [0: bb5, 1: bb6, otherwise: bb4];
+    }
+
+    bb4: {
+        unreachable;
+    }
+
+    bb5: {
+        _11 = copy ((_5 as Continue).0: u64);
+        _4 = V16PodU64::new(move _11) -> [return: bb8, unwind continue];
+    }
+
+    bb6: {
+        StorageLive(_10);
+        _10 = copy ((_5 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _10) -> [return: bb7, unwind continue];
+    }
+
+    bb7: {
+        StorageDead(_10);
+        StorageDead(_4);
+        StorageDead(_5);
+        goto -> bb9;
+    }
+
+    bb8: {
+        _13 = no_retag copy ((*_1).0: &mut v16::MarketGroupV16HeaderAccount);
+        ((*_13).15: v16::V16PodU64) = move _4;
+        StorageDead(_4);
+        StorageDead(_5);
+        _0 = const Result::<(), V16Error>::Ok(());
+        goto -> bb9;
+    }
+
+    bb9: {
+        return;
+    }
+}

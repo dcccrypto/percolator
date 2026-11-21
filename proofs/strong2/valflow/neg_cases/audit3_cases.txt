@@ -1,0 +1,104 @@
+a3_c01 pres 0 F R2: match Ok(v) => v as u64 (truncation: v=2^64 wrote, c=0, unchecked)
+a3_c02 pres 0 F R2: `? as u64` truncation
+a3_c03 pres 0 F R2: if-let Ok(v), `v as u8 != 0`
+a3_c04 pres 0 F R2: Result<u128,u128>, Err(0) after a write read as payload
+a3_c04b pres 0 F R2: or-pattern Ok(c)|Err(c)
+a3_c05 pres 0 F R1: mem::swap of two local Results via helper
+a3_c05b pres 0 F R1: mem::replace on a local Result
+a3_c06 pres 0 F R1: Result in a tuple field, field reassigned by writing callee
+a3_c06b pres 0 F R8: callee returns tuple field t.0 (Ok(0)) after write
+a3_c06c pres 0 F R8: callee returns array element Ok(0) after write
+a3_c07 pres 0 F R1: shadowed result out of loop-break
+a3_c08 pres 0 F R1: Result inside Option, reassigned
+a3_c09 pres 0 F R2: payload read through a reference chosen between two results
+a3_c09b pres 0 F R1: as_ref().map().unwrap_or(0) of writing callee
+a3_c09c pres 0 F R1: map(|v| v&0).and_then of writing callee
+a3_c10 pres 0 F R6: copy, `&= 0`, copy, test
+a3_c11 pres 0 F R5: signed payload -1 after write, test c > 0
+a3_c11b pres 0 F R5: signed casts + `c != -1`
+a3_c12 pres 0 F R5: payload 2^100 after write, test (c as u64) != 0
+a3_c12b pres 0 F R5: constants >= 2^62, no validation at all after a write
+a3_c13 pres 0 F R5: bool from (c & 1) != 0
+a3_c13b pres 0 F R5: bool from !(c==0) & (x==5)
+a3_c14 pres 0 F R7: is_none on a tuple field, inverted (validates only when nothing was written)
+a3_c14b pres 0 F R7/R4: option overwritten with None on a flag, then is_some
+a3_c14c pres 0 F R7: is_some on o.and(None)
+a3_c14d pres 0 F R7: is_some on a reference chosen between two options
+a3_c14e pres 0 F R7: is_some in a loop, option reassigned (second iteration returns unchecked after first-iteration write)
+a3_c14f pres 0 F R8/R4: callee returns Ok(None) after write (o.and(None))
+a3_c14g pres 0 T R4: Option<Option>: validates unless Some(None) (callee None = no write)
+a3_c14h pres 0 F R7: o.take() then is_some
+a3_c15 pres 0 F R8: callee writes in a loop and returns Ok(0)
+a3_c17 pres 0 F R8: recursive callee returns Ok(0) after writes
+a3_c17b pres 0 F R8: mutually recursive callee (entry a)
+a3_c17c pres 0 F R8: mutually recursive callee (entry b)
+a3_c18 pres 0 F R8: callee called on the other market with self as its second arg; it writes self
+a3_c18b pres 0 F R8: summary of a call on the OTHER market used to guard a check of ours after our write
+a3_c18c pres 0 F base: validate_shape of the other market
+a3_c19 est 1 F R8: swapped account args; callee validates its first account (= our second)
+a3_c19 est 2 T R8: swapped account args; our second account is validated
+a3_c21 pres 0 F R8: call through a fn pointer
+a3_c22 pres 0 F R2: tuple payload (0, x)
+a3_c23 pres 0 F R2: nested Result, `??`, inner Ok(1) after write, validates iff c != 1
+a3_c23b pres 0 F R2: nested Result, if-let on inner
+a3_c25 pres 0 F R2: ControlFlow returned directly, Break after write
+a3_c25b pres 0 F R2: ControlFlow continue_value().unwrap_or(0)
+a3_c29 pres 0 F R5: match c as usize (truncation) after writing callee
+a3_c30 pres 0 F R5: match with guard and range; 1..=7 after a write unchecked
+a3_c31 pres 0 T R5: bool payload, returns early iff false (no write)
+a3_c31b pres 0 F R5: bool payload, inverted
+a3_c31c pres 0 F R5: `b != true` validates only when nothing written
+a3_c33 pres 0 F R6: chain of copies and reassignments, test on y
+a3_c33b pres 0 F R6: mem::swap of two integer locals
+a3_c34 pres 0 F R2+R8: callee truncates payload with `as u64`, caller tests != 0
+a3_c35 pres 0 F R1: closure assigns the captured Result
+a3_c36 pres 0 F R2: if-let Ok(0)/Ok(1) on two different results
+a3_c37 pres 0 F R5: flag derived from c, write after, validates only if c != 0
+a3_c38 pres 0 F R5: signed cast, writes in the else branch
+a3_d01 pres 0 F R2: `Ok(ref v) => *v as u64` (ref-propagation may fold the cast onto the payload place)
+a3_d02 pres 0 F R2: `match &r { Ok(v) => *v as u64 }`
+a3_d03 pres 0 F R2: `if let Ok(ref v) = r { *v as u8 }`
+a3_d04 pres 0 F R2: `match *rr { Ok(v) => v as u64 }`
+a3_d05 pres 0 F R2: cast inside a tuple expr
+a3_d08 pres 0 F R1: `*(&mut r) = Ok(0)` after writing callee
+a3_d09 pres 0 F R1: `if let Ok(ref mut v) = r { *v = 0 }`
+a3_d09b pres 0 F R1: `Ok(ref mut v) => *v &= 0`
+a3_d10 pres 0 F R4/R7: option payload and option overwritten through &mut, then is_some
+a3_d11 pres 0 F R8: generic free fn writes and returns Ok(0)
+a3_d12 pres 0 F R8: trait method with the name of a no-write inherent method writes and returns Ok(0)
+a3_d13 pres 0 F R8: wrapper struct holding &mut market writes, returns Ok(0)
+a3_d14 pres 0 F R3: Ok(c) rebuilt, then replaced by writing callee result on a flag
+a3_d15 pres 0 F R1: early `return r` of a writing callee
+a3_d16 pres 0 F R5: constants at and above 2^62
+a3_d17 pres 0 F R5: `c as i8 == -1` returns unchecked
+a3_d18 pres 0 F R5: signed match with -1 arm after write unchecked
+a3_d19 pres 0 F R5: char comparison
+a3_d20 pres 0 F R5/R6: value shifted in a loop, test == 0 returns unchecked
+a3_d21 pres 0 F R8: second call (writing) takes first's payload
+a3_d22 pres 0 F R2: tuple of two Results
+a3_d23 pres 0 F R1: two Results moved through a tuple
+a3_d24 pres 0 F R7: two options swapped through mem::swap
+a3_d25 pres 0 F R7: bool algebra over is_none
+a3_d26 pres 0 F R7: is_none captured before a write, validates iff some... (wrote unconditionally after: only !b path checks; b path = unchecked write)
+a3_d27 pres 0 F R7: is_none as u8 arithmetic
+a3_e01 pres 0 F R8/R5: callee tests y==1, writes, returns y>>1 (2,3 -> Ok(1) after write)
+a3_e02 pres 0 F R8: callee's payload local set to 1 through &mut after write
+a3_e03 pres 0 T R8/R5: callee returns Ok(x) with x==1 only before writing (true)
+a3_e04 pres 0 F R8: countdown loop returns Ok(0) after writes
+a3_e05 pres 0 F R8/R6: callee returns Ok(y ^ y) after write
+a3_e06 pres 0 F R3: Ok(Some(0)) before write, Ok(None) after; caller checks only on Some(v != 0)
+a3_e06b pres 0 T R3/R7: same callee, validates iff is_none (true)
+a3_e07 pres 0 T R8: non-Result callee returning u128, 0 only before write (true)
+a3_e07b pres 0 F R8: non-Result callee returns x >> 1 after write
+a3_e08 pres 0 F R8: callee returns the other argument after write
+a3_e09 pres 0 F R8: callee selects via tuple swap
+a3_e10 pres 0 F join: e is c or d, chosen by x
+a3_e11 pres 0 F R8: write-always callee between; c == 0 path wrote (zw) and c2 == 0 unchecked
+a3_f06 pres 0 F R5: match 0 | 2 unchecked; callee returns Ok(2) after write
+a3_f07 pres 0 T R8 bot-clause: callee never returns Ok(1), so the write under c == 1 is dead (true)
+a3_f07b pres 0 F R8 bot-clause: callee can return Ok(1); write under c == 1 unchecked
+a3_f08 pres 0 F R1/R8: callee's result local overwritten to Ok(0) through &mut after write
+a3_f10 pres 0 F R1: is_ok() on a writing callee's result, returns unchecked
+a3_f10b pres 0 F R2: matches!(r, Ok(0)) on a writing callee's result
+a3_f12 pres 0 F R8: callee swallows a failed validation into Ok(0) after write
+a3_f12b pres 0 F R8: same, caller returns on c == 1 only

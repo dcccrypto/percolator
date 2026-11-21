@@ -9,7 +9,7 @@ MIR blocks: 117, locals: 119. market root: _1; accounts: none
 result = local 0 (0 is Ok); payload = local 1000000 (ghost: integer value or enum discriminant
 of the Ok payload; for Option: None = 0, Some = 1).
 callee summaries used (block, callee), each certified by its own module in this directory:
-  none
+  bb90 MarketGroupV16ViewMut::<'_, T>::adjust_provider_principal_for_domain
 summary clauses (the goal):
   result = 0: checks [0] hold
 -/
@@ -109,7 +109,7 @@ def cfg : Cfg := [
   /- bb87 -/ ⟨[.havoc 90, .havoc 1000090, .havoc 87, .havoc 1000087], .goto 108⟩,
   /- bb88 -/ ⟨[], .branch 91 92 1000091 1000092 89⟩,
   /- bb89 -/ ⟨[.havoc 92, .havoc 1000092, .copy 93 91, .copy 1000093 1000091], .switch 93 [(0, 90), (1, 91)] (some 3)⟩,
-  /- bb90 -/ ⟨[.havoc 91, .havoc 1000091], .call [96, 1000096] 93 [] []⟩,
+  /- bb90 -/ ⟨[.havoc 91, .havoc 1000091], .call [96, 1000096] 93 [] [⟨[(96, .eq 0)], .chk [] [0]⟩]⟩,
   /- bb91 -/ ⟨[.havoc 94, .havoc 1000094, .setD 0 1, .havoc 1000000], .goto 92⟩,
   /- bb92 -/ ⟨[.havoc 94, .havoc 1000094, .havoc 91, .havoc 1000091], .goto 108⟩,
   /- bb93 -/ ⟨[], .branch 95 96 1000095 1000096 94⟩,
@@ -117,7 +117,7 @@ def cfg : Cfg := [
   /- bb95 -/ ⟨[.havoc 95, .havoc 1000095], .call [99, 1000099] 98 [0] []⟩,
   /- bb96 -/ ⟨[.havoc 98, .havoc 1000098, .setD 0 1, .havoc 1000000], .goto 97⟩,
   /- bb97 -/ ⟨[.havoc 98, .havoc 1000098, .havoc 95, .havoc 1000095], .goto 108⟩,
-  /- bb98 -/ ⟨[.havoc 111, .havoc 1000111, .write [], .havoc 99, .havoc 1000099], .call [100, 1000100] 99 [0] []⟩,
+  /- bb98 -/ ⟨[.havoc 111, .havoc 1000111, .havoc 99, .havoc 1000099], .call [100, 1000100] 99 [0] []⟩,
   /- bb99 -/ ⟨[.havoc 112, .havoc 1000112, .write [], .havoc 100, .havoc 1000100, .havoc 103, .havoc 1000103], .call [102, 1000102] 100 [0] []⟩,
   /- bb100 -/ ⟨[.havoc 103, .havoc 1000103], .branch 101 102 1000101 1000102 101⟩,
   /- bb101 -/ ⟨[.havoc 102, .havoc 1000102, .copy 104 101, .copy 1000104 1000101], .switch 104 [(0, 102), (1, 103)] (some 3)⟩,

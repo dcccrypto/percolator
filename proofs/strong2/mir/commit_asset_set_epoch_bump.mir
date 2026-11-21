@@ -1,0 +1,30 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::commit_asset_set_epoch_bump(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: u64, _3: u64) -> () {
+    debug self => _1;
+    debug next_asset_set_epoch => _2;
+    debug next_risk_epoch => _3;
+    let mut _0: ();
+    let mut _4: v16::V16PodU64;
+    let mut _5: v16::V16PodU64;
+    let mut _6: &mut v16::MarketGroupV16HeaderAccount;
+    let mut _7: &mut v16::MarketGroupV16HeaderAccount;
+
+    bb0: {
+        StorageLive(_4);
+        _4 = V16PodU64::new(move _2) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        _6 = no_retag copy ((*_1).0: &mut v16::MarketGroupV16HeaderAccount);
+        ((*_6).24: v16::V16PodU64) = move _4;
+        StorageDead(_4);
+        StorageLive(_5);
+        _5 = V16PodU64::new(move _3) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        _7 = no_retag copy ((*_1).0: &mut v16::MarketGroupV16HeaderAccount);
+        ((*_7).23: v16::V16PodU64) = move _5;
+        StorageDead(_5);
+        return;
+    }
+}

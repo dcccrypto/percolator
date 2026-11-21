@@ -48,7 +48,9 @@ rules list; every other change of `_l` must be a `havoc` of `l` **and of `P(l)`*
 |---|---|---|
 | A10 | MIR reads the place `(_y as V).0` only when `_y` is of variant `V`. | rustc's MIR building for safe code (a read on another variant would be undefined behaviour); not checked by a scan. |
 | A11 | `core`: `Option::None` has discriminant 0 and `Some` 1; `Option::is_some(&o)` is `discriminant(o) != 0`, `is_none` the opposite, and neither writes; `<Result<T,E> as Try>::branch(Ok(x))` is `Continue(x)` with the same `x`. | `core` source; declaration order of the variants. |
-| A12 | The crate defines no item named `Option`, `Some`, `None`, `is_some`, `is_none`; a `let` declaration in MIR prints the full path of a type (`core::option::Option<..>`, `core::result::Result<..>`, `core::ops::ControlFlow<..>`), and the rules below require that printed path. | `valflow/check_assumptions2.py` (source and MIR scans); `out/assumptions_check.txt`. |
+| A12 | The crate defines no item named `Option`, `Some`, `None`, `is_some`, `is_none` (nor any of the sibling's A9 names), under any spelling (raw identifier, macro-generated, split over lines), and no module, alias or extern crate named `core`, `std` or `alloc`. Then a `let` declaration in MIR that prints `core::option::Option<..>`, `core::result::Result<..>`, `core::ops::ControlFlow<..>` means core's type, and the rules below require that printed path. | `valflow/check_assumptions2.py`: scans of the source text across line breaks, of the macro-expanded crate (`-Zunpretty=expanded`) and of the MIR; `out/assumptions_check.txt`. Audit round 3 broke the earlier, weaker form of this check (section 7). |
+| A13 | Memory layout facts of safe Rust: the market header object, the market slot array, the view structs and each account object are pairwise disjoint; distinct top-level fields of the header are disjoint. A store through a pointer derived (by reborrow, projection, or as the result of a call given only that pointer and plain values) from a pointer into one of these regions changes only bytes of that region. | Rust's reference rules together with A1, A2 (no `unsafe`, no raw pointers). |
+| A14 | `valflow/readset.py` over-approximates what each runtime check can read: the set of top-level header fields, and whether slot contents (as opposed to the slice length) are read. Section 4a. | The analysis is conservative by construction (anything not understood gives ALL); its result for this build is in `out/READSET.md` and can be compared with the source of `validate_shape` by eye. |
 
 ## 4. Added translation rules
 
@@ -72,6 +74,9 @@ small constant).
 | — | `<Result as FromResidual<..>>::from_residual(..)` into `_d` | statement `setD d 1` (then R1), `goto N` | base recognition; A6 |
 | — | a validator call (base recognition, unchanged) | `call [d, P(d)] N same [⟨[d = 0], est holds⟩]` | |
 
+| R9 | `_l = [v16::]NAME::VARIANT[(..)\|{ .. }]` (also as a constant), declared type of `_l` exactly `v16::NAME` | `setD l i`, `i` the index of `VARIANT` | `NAME` is in the table of plain enums of `src/v16.rs`: declared at top level without generics, no explicit discriminant, no attribute on any variant, name unique in the file. Also inside R3: `Ok(NAME::VARIANT..)` sets the payload ghost to `i` when the local is declared `core::result::Result<v16::NAME, ..>`. |
+| R10 | a store through a pointer, or a call given pointers, confined to a region of the market that a check does not read | the `write` / `call` keeps that check (it is added to `same`) | section 4a |
+
 **R8, callee summaries.** A summary is the goal of the callee's own module: clauses whose guards
 mention only local 0 (the result) and `P(0)`. At a call site with destination `_d` each clause is
 copied with 0 ↦ `d`, `P(0)` ↦ `P(d)`; its checks are renumbered by the sibling's argument map (the
@@ -86,6 +91,41 @@ reference world (`rebase` in `Core.lean`).
 value; each post-clause holds of the locals after the call, "preserved" meaning from the world
 before the call.
 
+## 4a. Rule R10: the read-set frame
+
+*Read-sets* (`readset.py`, trusted, A14). For check 0 the analysis starts at
+`MarketGroupV16ViewMut::validate_shape`, for checks k ≥ 1 at the two `validate_with_market`. In
+every function reached, a local whose declared type is a reference to the header, a market view
+(by value or reference) or the slot slice is a *carrier*. A carrier may be: copied or reborrowed
+into a carrier of the same kind; taken out of a view (`.0` header, `.1` slots); captured by value
+in a closure (whose body is then analysed); passed whole as an argument to a call that resolves to
+exactly one MIR body of the crate (then analysed); used as `Len`/`PtrMetadata` of the slice. A
+place `(*hdr).N` anywhere adds top-level field `N` to the read-set. Any other use of a header or
+view carrier, an unresolved callee, or a local of another type that mentions the header or a view
+makes the read-set ALL. Any other use of the slice pointer, or any local whose type mentions
+`Market<`, sets "slot contents may be read".
+
+*Regions* (in the function being translated). For a pointer local `_p` that is single-assigned,
+not escaped, not partially assigned, with the market root of type `&mut MarketGroupV16ViewMut`:
+- `_p = copy/move ((*_root).0: &mut MarketGroupV16HeaderAccount)` → region *header*;
+- `_p = copy/move ((*_root).1: &mut [Market<T>])` → region *slots*;
+- otherwise, if every non-plain local mentioned in its one assignment (for a call: callee and
+  arguments) has the same known region, `_p` has that region; `&mut ((*_h).N: T)…` with `_h` of
+  region *header* and exactly one dereference gives region *header field N*;
+- anything else: unknown.
+
+*The rule.* A store whose place is a projection of `(*_p)` with exactly one dereference keeps
+check k if `_p` has region *slots* and check k does not read slot contents, or `_p` has region
+*header field N* (or region *header* and the place's first projection is field `N`) and `N` is not
+in check k's read-set. A call keeps check k if no argument is a projected operand of a type that
+can write, the callee expression mentions no local, and every bare-local argument that can write
+either cannot reach check k's roots at all (base rule) or has a known region that check k does
+not read by the same test. Soundness: A3 (the check is a function of the memory it reads), A13,
+A14.
+
+For this build (`out/READSET.md`): `validate_shape` may read 28 of the 42 header fields and never
+reads slot contents; `validate_with_market` may read 4 header fields and may read slot contents.
+
 ## 5. What a generated theorem says
 
 `Returns chk ex cfg w0 b w1 env1`: the abstract program, started in world `w0`, returns from block
@@ -97,6 +137,12 @@ before the call.
 - `T15_*_checked_paths.row`: the same with `ex` = the listed blocks.
 - `S_<callee>.main`: every clause of the summary holds at every return.
 
+- `T15_*_conditional.row`: no excluded block; the callee contracts listed in the file header are
+  built into the abstract program as extra post-clauses at those call sites. They are
+  **assumptions**, not results.
+- `S_close_resolved_account_not_atomic.row`: for every return with `env1 0 = 0` and
+  `env1 1000000 = 1` (the `Ok` payload is `ResolvedCloseOutcomeV16::Closed`): both checks hold.
+
 ## 6. Known limits
 
 - Values of locals only. A condition on memory (`account.header.pnl.get() < 0`, a bitmap) is not
@@ -106,3 +152,26 @@ before the call.
 - A direct `match` on a `Result` (not through `?`) is not followed precisely (two negative-test
   cases are refused although true).
 - Panics, compute limits and termination are not addressed: every statement is "if it returns".
+
+## 7. Audit record
+
+- Negative tests (`valflow/negative_tests.py`, table in `out/NEGATIVE-TESTS.md`): attack functions
+  compiled into a scratch copy of the pinned source. 31 written with the rules, 21 for R10, the
+  sibling's 40, and the 104 of audit round 3.
+- **Audit round 3** (independent agent, told to break `T2`; it did not see this section): 104
+  questions over 103 attack methods on real MIR, 0 unsound. It found **two holes** in the
+  assumption scans and **one latent hole** in the code. None is triggered by the engine text.
+  - H1: a crate-root `enum r#Result { Err(E), Ok(T) }` (variants reordered, raw identifier). The
+    sibling's base rule read `Result::<..>::Ok` as discriminant 0 without looking at the declared
+    type, and the per-line name scans did not match `r#Result`. Fixed: `T2` never lets the base rule
+    see a `Result` variant whose local is not declared `core::result::Result<..>` (it becomes
+    `havoc`), and the scans now cover raw identifiers, line breaks and the macro-expanded crate.
+  - H2: a crate-root `mod core { mod option { enum r#Option { Some(T), None } } }` prints the same
+    path as core's type. No code fix is possible from the printed text; A12 now states it and the
+    scan rejects any module, alias or extern crate named `core`, `std`, `alloc`.
+  - R-a: the R2 pattern also matched `copy ((_4 as Ok).0: u128) as u64 (IntToInt)` (a truncating
+    cast). rustc did not emit that shape in the auditor's attempts or in the engine MIR (303
+    `IntToInt` casts, none with a projected operand); reproduced on hand-edited MIR. Fixed: the
+    payload read must be the whole rvalue.
+  Regression: the unit tests at the end of `out/NEGATIVE-TESTS.md`.
+- Mutation harness for the checker: `out/MUTANTS.md`.

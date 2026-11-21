@@ -1,0 +1,88 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::clear_leg_inner(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: &mut PortfolioV16ViewMut<'_>, _3: usize, _4: bool) -> Result<(), V16Error> {
+    debug self => _1;
+    debug account => _2;
+    debug asset_index => _3;
+    debug allow_attributed_terminal_trade => _4;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+    let mut _5: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, usize>;
+    let mut _6: core::result::Result<usize, v16::V16Error>;
+    let _7: &v16::PortfolioV16View<'_>;
+    let _8: v16::PortfolioV16View<'_>;
+    let mut _9: &v16::PortfolioV16ViewMut<'_>;
+    let mut _10: isize;
+    let _11: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let _12: usize;
+    scope 1 {
+        debug leg_slot => _12;
+    }
+    scope 2 {
+        debug residual => _11;
+        scope 3 {
+        }
+    }
+    scope 4 {
+        debug val => _12;
+        scope 5 {
+        }
+    }
+
+    bb0: {
+        StorageLive(_5);
+        StorageLive(_6);
+        StorageLive(_7);
+        StorageLive(_8);
+        StorageLive(_9);
+        _9 = &(*_2);
+        _8 = PortfolioV16ViewMut::<'_>::as_view(move _9) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        StorageDead(_9);
+        _7 = &_8;
+        _6 = MarketGroupV16ViewMut::<'_, T>::require_active_leg_slot_for_asset(move _7, copy _3) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        _5 = <Result<usize, V16Error> as Try>::branch(move _6) -> [return: bb3, unwind continue];
+    }
+
+    bb3: {
+        StorageDead(_6);
+        _10 = discriminant(_5);
+        switchInt(move _10) -> [0: bb5, 1: bb6, otherwise: bb4];
+    }
+
+    bb4: {
+        unreachable;
+    }
+
+    bb5: {
+        _12 = copy ((_5 as Continue).0: usize);
+        StorageDead(_8);
+        StorageDead(_7);
+        StorageDead(_5);
+        _0 = MarketGroupV16ViewMut::<'_, T>::clear_leg_at_slot_inner(move _1, move _2, move _3, move _12, move _4, const Option::<u128>::None) -> [return: bb8, unwind continue];
+    }
+
+    bb6: {
+        StorageLive(_11);
+        _11 = copy ((_5 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<(), V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _11) -> [return: bb7, unwind continue];
+    }
+
+    bb7: {
+        StorageDead(_11);
+        StorageDead(_8);
+        StorageDead(_7);
+        StorageDead(_5);
+        goto -> bb9;
+    }
+
+    bb8: {
+        goto -> bb9;
+    }
+
+    bb9: {
+        return;
+    }
+}

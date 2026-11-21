@@ -1,0 +1,16 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::apply_position_delta_with_lookup(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: &mut PortfolioV16ViewMut<'_>, _3: usize, _4: i128, _5: PositionDeltaLookupV16) -> Result<(), V16Error> {
+    debug self => _1;
+    debug account => _2;
+    debug asset_index => _3;
+    debug delta_q => _4;
+    debug lookup => _5;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+
+    bb0: {
+        _0 = MarketGroupV16ViewMut::<'_, T>::apply_position_delta_with_lookup_inner(move _1, move _2, move _3, move _4, move _5, const false) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}

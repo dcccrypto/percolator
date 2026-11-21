@@ -1,118 +1,106 @@
-ℹ [2/171] Replayed ClauseFlow.Core
+ℹ [2/145] Replayed ClauseFlow.Core
 info: ClauseFlow/Core.lean:1027:0: 'ClauseFlow.checkCert_sound' depends on axioms: [propext, Quot.sound]
 info: ClauseFlow/Core.lean:1028:0: 'ClauseFlow.call_of_cert' depends on axioms: [propext, Quot.sound]
-ℹ [59/171] Replayed ClauseFlow.AllGen
-info: ClauseFlow/AllGen.lean:58:0: 'ClauseFlow.Gen.T15_header_checked_paths.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:59:0: 'ClauseFlow.Gen.T15_header_conditional.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:60:0: 'ClauseFlow.Gen.T15_account_checked_paths.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:61:0: 'ClauseFlow.Gen.T15_account_conditional.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:62:0: 'ClauseFlow.Gen.S_add_account_source_positive_pnl_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:63:0: 'ClauseFlow.Gen.S_canonicalize_retired_empty_asset_slot_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:64:0: 'ClauseFlow.Gen.S_charge_account_backing_fee_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:65:0: 'ClauseFlow.Gen.S_claim_resolved_payout_topup_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:66:0: 'ClauseFlow.Gen.S_collect_account_backing_utilization_fee_for_domain_not_atomic.main' depends on axioms: [propext,
+ℹ [90/145] Replayed ClauseFlow.AllGen
+info: ClauseFlow/AllGen.lean:89:0: 'ClauseFlow.Gen.T15_header_checked_paths.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:90:0: 'ClauseFlow.Gen.T15_header_conditional.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:91:0: 'ClauseFlow.Gen.T15_account_checked_paths.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:92:0: 'ClauseFlow.Gen.T15_account_conditional.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:93:0: 'ClauseFlow.Gen.S_add_account_source_positive_pnl_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:94:0: 'ClauseFlow.Gen.S_canonicalize_retired_empty_asset_slot_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:95:0: 'ClauseFlow.Gen.S_update_resolved_payout_blocker_total.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:96:0: 'ClauseFlow.Gen.S_set_asset_state.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:97:0: 'ClauseFlow.Gen.S_band_observe_cert_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:98:0: 'ClauseFlow.Gen.S_charge_account_backing_fee_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:99:0: 'ClauseFlow.Gen.S_claim_resolved_payout_topup_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:100:0: 'ClauseFlow.Gen.S_collect_account_backing_utilization_fee_for_domain_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
-info: ClauseFlow/AllGen.lean:67:0: 'ClauseFlow.Gen.S_retire_source_credit_lien_from_counterparty_impaired_not_atomic.main' depends on axioms: [propext,
+info: ClauseFlow/AllGen.lean:101:0: 'ClauseFlow.Gen.S_retire_source_credit_lien_from_counterparty_impaired_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
-info: ClauseFlow/AllGen.lean:68:0: 'ClauseFlow.Gen.S_release_source_credit_lien_from_counterparty_terminal_not_atomic.main' depends on axioms: [propext,
+info: ClauseFlow/AllGen.lean:102:0: 'ClauseFlow.Gen.S_release_source_credit_lien_from_counterparty_terminal_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
-info: ClauseFlow/AllGen.lean:69:0: 'ClauseFlow.Gen.S_release_source_credit_lien_from_insurance_terminal_not_atomic.main' depends on axioms: [propext,
+info: ClauseFlow/AllGen.lean:103:0: 'ClauseFlow.Gen.S_set_insurance_reservation_for_domain.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:104:0: 'ClauseFlow.Gen.S_release_source_credit_lien_from_insurance_terminal_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
-info: ClauseFlow/AllGen.lean:70:0: 'ClauseFlow.Gen.S_release_source_credit_lien_from_insurance_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:71:0: 'ClauseFlow.Gen.S_release_account_source_credit_lien_for_domain_not_atomic.main' depends on axioms: [propext,
+info: ClauseFlow/AllGen.lean:105:0: 'ClauseFlow.Gen.S_release_source_credit_lien_from_insurance_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:106:0: 'ClauseFlow.Gen.S_release_account_source_credit_lien_for_domain_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
-info: ClauseFlow/AllGen.lean:72:0: 'ClauseFlow.Gen.S_release_account_source_credit_liens_if_unneeded_core_not_atomic.main' depends on axioms: [propext,
+info: ClauseFlow/AllGen.lean:107:0: 'ClauseFlow.Gen.S_release_account_source_credit_liens_if_unneeded_core_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
-info: ClauseFlow/AllGen.lean:73:0: 'ClauseFlow.Gen.S_release_account_source_credit_liens_if_unneeded_not_atomic.main' depends on axioms: [propext,
+info: ClauseFlow/AllGen.lean:108:0: 'ClauseFlow.Gen.S_release_account_source_credit_liens_if_unneeded_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
-info: ClauseFlow/AllGen.lean:74:0: 'ClauseFlow.Gen.S_apply_released_pnl_conversion_with_consumption_core_not_atomic.main' depends on axioms: [propext,
+info: ClauseFlow/AllGen.lean:109:0: 'ClauseFlow.Gen.S_apply_released_pnl_conversion_with_consumption_core_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
-info: ClauseFlow/AllGen.lean:75:0: 'ClauseFlow.Gen.S_apply_released_pnl_conversion_core_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:76:0: 'ClauseFlow.Gen.S_convert_released_pnl_to_capital_core_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:77:0: 'ClauseFlow.Gen.S_convert_released_pnl_to_capital_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:78:0: 'ClauseFlow.Gen.S_credit_account_from_insurance_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:79:0: 'ClauseFlow.Gen.S_credit_backing_provider_earnings_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:80:0: 'ClauseFlow.Gen.S_credit_domain_insurance_budgets_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:81:0: 'ClauseFlow.Gen.S_credit_domain_insurance_budget_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:82:0: 'ClauseFlow.Gen.S_cure_and_cancel_close_with_cert_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:83:0: 'ClauseFlow.Gen.S_cure_and_cancel_close_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:84:0: 'ClauseFlow.Gen.S_deposit_domain_insurance_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:85:0: 'ClauseFlow.Gen.S_deposit_fresh_counterparty_backing_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:86:0: 'ClauseFlow.Gen.S_deposit_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:87:0: 'ClauseFlow.Gen.S_execute_batch_band_scoped_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:88:0: 'ClauseFlow.Gen.S_execute_batch_with_fee_loss_stale_scoped_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:89:0: 'ClauseFlow.Gen.S_execute_trade_with_fee_loss_stale_scoped_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:90:0: 'ClauseFlow.Gen.S_force_asset_recovery_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:91:0: 'ClauseFlow.Gen.S_force_close_recovery_pair_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:92:0: 'ClauseFlow.Gen.S_mark_asset_drain_only_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:93:0: 'ClauseFlow.Gen.S_recredit_terminal_claim_free_residual_for_asset_not_atomic.main' depends on axioms: [propext,
+info: ClauseFlow/AllGen.lean:110:0: 'ClauseFlow.Gen.S_apply_released_pnl_conversion_core_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:111:0: 'ClauseFlow.Gen.S_convert_released_pnl_to_capital_core_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:112:0: 'ClauseFlow.Gen.S_convert_released_pnl_to_capital_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:113:0: 'ClauseFlow.Gen.S_credit_account_from_insurance_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:114:0: 'ClauseFlow.Gen.S_credit_backing_provider_earnings_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:115:0: 'ClauseFlow.Gen.S_credit_domain_insurance_budgets_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:116:0: 'ClauseFlow.Gen.S_credit_domain_insurance_budget_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:117:0: 'ClauseFlow.Gen.S_set_pending_domain_loss_barrier_count.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:118:0: 'ClauseFlow.Gen.S_drop_unowned_side_oi.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:119:0: 'ClauseFlow.Gen.S_begin_full_drain_reset_inner.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:120:0: 'ClauseFlow.Gen.S_begin_zero_oi_residue_resets.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:121:0: 'ClauseFlow.Gen.S_begin_legless_asset_resets.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:122:0: 'ClauseFlow.Gen.S_cure_and_cancel_close_with_cert_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:123:0: 'ClauseFlow.Gen.S_cure_and_cancel_close_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:124:0: 'ClauseFlow.Gen.S_deposit_domain_insurance_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:125:0: 'ClauseFlow.Gen.S_adjust_provider_principal_for_domain.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:126:0: 'ClauseFlow.Gen.S_deposit_fresh_counterparty_backing_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:127:0: 'ClauseFlow.Gen.S_deposit_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:128:0: 'ClauseFlow.Gen.S_deregister_empty_materialized_portfolio_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:129:0: 'ClauseFlow.Gen.S_execute_batch_band_scoped_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:130:0: 'ClauseFlow.Gen.S_execute_batch_with_fee_loss_stale_scoped_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:131:0: 'ClauseFlow.Gen.S_execute_trade_with_fee_loss_stale_scoped_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:132:0: 'ClauseFlow.Gen.S_finalize_side_reset_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:133:0: 'ClauseFlow.Gen.S_commit_asset_set_epoch_bump.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:134:0: 'ClauseFlow.Gen.S_force_asset_recovery_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:135:0: 'ClauseFlow.Gen.S_force_close_recovery_pair_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:136:0: 'ClauseFlow.Gen.S_retain_leg_as_pending_obligation.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:137:0: 'ClauseFlow.Gen.S_clear_leg_at_slot_inner.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:138:0: 'ClauseFlow.Gen.S_clear_leg_inner.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:139:0: 'ClauseFlow.Gen.S_clear_leg.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:140:0: 'ClauseFlow.Gen.S_mark_account_b_stale.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:141:0: 'ClauseFlow.Gen.S_mark_leg_b_stale.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:142:0: 'ClauseFlow.Gen.S_begin_close_progress_ledger.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:143:0: 'ClauseFlow.Gen.S_declare_permissionless_recovery.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:144:0: 'ClauseFlow.Gen.S_ensure_close_progress_not_expired.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:145:0: 'ClauseFlow.Gen.S_advance_close_progress_ledger.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:146:0: 'ClauseFlow.Gen.S_forfeit_recovery_leg_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:147:0: 'ClauseFlow.Gen.S_mark_asset_drain_only_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:148:0: 'ClauseFlow.Gen.S_recredit_terminal_claim_free_residual_for_asset_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
-info: ClauseFlow/AllGen.lean:94:0: 'ClauseFlow.Gen.S_release_source_credit_lien_from_counterparty_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:95:0: 'ClauseFlow.Gen.S_reset_empty_asset_oracle_anchor_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:96:0: 'ClauseFlow.Gen.S_resolve_market_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:97:0: 'ClauseFlow.Gen.S_normalize_terminal_empty_asset_history_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:98:0: 'ClauseFlow.Gen.S_restart_empty_asset_preserving_insurance_budget_not_atomic.main' depends on axioms: [propext,
+info: ClauseFlow/AllGen.lean:149:0: 'ClauseFlow.Gen.S_register_empty_materialized_portfolio_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:150:0: 'ClauseFlow.Gen.S_release_source_credit_lien_from_counterparty_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:151:0: 'ClauseFlow.Gen.S_reset_empty_asset_oracle_anchor_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:152:0: 'ClauseFlow.Gen.S_resolve_market_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:153:0: 'ClauseFlow.Gen.S_normalize_terminal_empty_asset_history_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:154:0: 'ClauseFlow.Gen.S_restart_empty_asset_preserving_insurance_budget_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
-info: ClauseFlow/AllGen.lean:99:0: 'ClauseFlow.Gen.S_retire_empty_asset_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:100:0: 'ClauseFlow.Gen.S_retire_terminal_unbudgeted_insurance_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:101:0: 'ClauseFlow.Gen.S_set_asset_raw_oracle_targets_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:102:0: 'ClauseFlow.Gen.S_set_asset_raw_oracle_target_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:103:0: 'ClauseFlow.Gen.S_charge_account_fee_current_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:104:0: 'ClauseFlow.Gen.S_sync_account_fee_to_slot_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:105:0: 'ClauseFlow.Gen.S_withdraw_backing_provider_earnings_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:106:0: 'ClauseFlow.Gen.S_withdraw_domain_insurance_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:107:0: 'ClauseFlow.Gen.S_withdraw_fresh_counterparty_backing_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:108:0: 'ClauseFlow.Gen.S_withdraw_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:109:0: 'ClauseFlow.Gen.S_prepare_one_source_domain_for_resolved_close_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:110:0: 'ClauseFlow.Gen.S_expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic.main' depends on axioms: [propext,
+info: ClauseFlow/AllGen.lean:155:0: 'ClauseFlow.Gen.S_retire_empty_asset_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:156:0: 'ClauseFlow.Gen.S_retire_terminal_unbudgeted_insurance_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:157:0: 'ClauseFlow.Gen.S_set_asset_raw_oracle_targets_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:158:0: 'ClauseFlow.Gen.S_set_asset_raw_oracle_target_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:159:0: 'ClauseFlow.Gen.S_charge_account_fee_current_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:160:0: 'ClauseFlow.Gen.S_sync_account_fee_to_slot_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:161:0: 'ClauseFlow.Gen.S_withdraw_backing_provider_earnings_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:162:0: 'ClauseFlow.Gen.S_withdraw_domain_insurance_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:163:0: 'ClauseFlow.Gen.S_withdraw_fresh_counterparty_backing_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:164:0: 'ClauseFlow.Gen.S_withdraw_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:165:0: 'ClauseFlow.Gen.S_prepare_one_source_domain_for_resolved_close_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:166:0: 'ClauseFlow.Gen.S_expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic.main' depends on axioms: [propext,
  Quot.sound]
-info: ClauseFlow/AllGen.lean:111:0: 'ClauseFlow.Gen.S_realize_one_source_domain_for_resolved_close_not_atomic.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:112:0: 'ClauseFlow.Gen.S_clear_fully_diluted_resolved_receipt_if_terminal.main' depends on axioms: [propext, Quot.sound]
-info: ClauseFlow/AllGen.lean:113:0: 'ClauseFlow.Gen.S_close_resolved_account_not_atomic.main' depends on axioms: [propext, Quot.sound]
-✔ [113/171] Built ClauseFlow.GenMut.M_S_release_source_credit_lien_from_insurance_not_atomic (1.1s)
-✔ [114/171] Built ClauseFlow.GenMut.M_S_claim_resolved_payout_topup_not_atomic (2.0s)
-✔ [115/171] Built ClauseFlow.GenMut.M_S_release_account_source_credit_liens_if_unneeded_not_atomic (429ms)
-✔ [116/171] Built ClauseFlow.GenMut.M_S_canonicalize_retired_empty_asset_slot_not_atomic (4.3s)
-✔ [117/171] Built ClauseFlow.GenMut.M_S_add_account_source_positive_pnl_not_atomic (4.4s)
-✔ [118/171] Built ClauseFlow.GenMut.M_S_release_account_source_credit_lien_for_domain_not_atomic (5.0s)
-✔ [119/171] Built ClauseFlow.GenMut.M_S_apply_released_pnl_conversion_core_not_atomic (941ms)
-✔ [120/171] Built ClauseFlow.GenMut.M_S_retire_source_credit_lien_from_counterparty_impaired_not_atomic (7.6s)
-✔ [121/171] Built ClauseFlow.GenMut.M_S_release_source_credit_lien_from_counterparty_terminal_not_atomic (7.5s)
-✔ [122/171] Built ClauseFlow.GenMut.M_S_release_source_credit_lien_from_insurance_terminal_not_atomic (7.6s)
-✔ [123/171] Built ClauseFlow.GenMut.M_S_credit_domain_insurance_budget_not_atomic (479ms)
-✔ [124/171] Built ClauseFlow.GenMut.M_S_credit_backing_provider_earnings_not_atomic (3.0s)
-✔ [125/171] Built ClauseFlow.GenMut.M_S_convert_released_pnl_to_capital_not_atomic (4.3s)
-✔ [126/171] Built ClauseFlow.GenMut.M_S_credit_domain_insurance_budgets_not_atomic (2.2s)
-✔ [127/171] Built ClauseFlow.GenMut.M_S_convert_released_pnl_to_capital_core_not_atomic (6.7s)
-✔ [128/171] Built ClauseFlow.GenMut.M_S_execute_trade_with_fee_loss_stale_scoped_not_atomic (626ms)
-✔ [129/171] Built ClauseFlow.GenMut.M_S_deposit_fresh_counterparty_backing_not_atomic (2.6s)
-✔ [130/171] Built ClauseFlow.GenMut.M_S_execute_batch_with_fee_loss_stale_scoped_not_atomic (482ms)
-✔ [131/171] Built ClauseFlow.GenMut.M_S_credit_account_from_insurance_not_atomic (5.4s)
-✔ [132/171] Built ClauseFlow.GenMut.M_S_deposit_domain_insurance_not_atomic (6.2s)
-✔ [133/171] Built ClauseFlow.GenMut.M_S_cure_and_cancel_close_not_atomic (789ms)
-✔ [134/171] Built ClauseFlow.GenMut.M_S_collect_account_backing_utilization_fee_for_domain_not_atomic (16s)
-✔ [135/171] Built ClauseFlow.GenMut.M_S_force_asset_recovery_not_atomic (3.5s)
-✔ [136/171] Built ClauseFlow.GenMut.M_S_release_source_credit_lien_from_counterparty_not_atomic (498ms)
-✔ [137/171] Built ClauseFlow.GenMut.M_S_mark_asset_drain_only_not_atomic (2.5s)
-✔ [138/171] Built ClauseFlow.GenMut.M_S_recredit_terminal_claim_free_residual_for_asset_not_atomic (1.1s)
-✔ [139/171] Built ClauseFlow.GenMut.M_S_apply_released_pnl_conversion_with_consumption_core_not_atomic (15s)
-✔ [140/171] Built ClauseFlow.GenMut.M_S_resolve_market_not_atomic (888ms)
-✔ [141/171] Built ClauseFlow.GenMut.M_S_deposit_not_atomic (8.0s)
-✔ [142/171] Built ClauseFlow.GenMut.M_S_execute_batch_band_scoped_not_atomic (11s)
-✔ [143/171] Built ClauseFlow.GenMut.M_S_reset_empty_asset_oracle_anchor_not_atomic (4.4s)
-✔ [144/171] Built ClauseFlow.GenMut.M_S_normalize_terminal_empty_asset_history_not_atomic (4.2s)
-✔ [145/171] Built ClauseFlow.GenMut.M_S_retire_terminal_unbudgeted_insurance_not_atomic (1.0s)
-✔ [146/171] Built ClauseFlow.GenMut.M_S_set_asset_raw_oracle_target_not_atomic (397ms)
-✔ [147/171] Built ClauseFlow.GenMut.M_S_charge_account_fee_current_not_atomic (1.5s)
-✔ [148/171] Built ClauseFlow.GenMut.M_S_retire_empty_asset_not_atomic (4.9s)
-✔ [149/171] Built ClauseFlow.GenMut.M_S_withdraw_backing_provider_earnings_not_atomic (1.8s)
-✔ [150/171] Built ClauseFlow.GenMut.M_S_force_close_recovery_pair_not_atomic (13s)
-✔ [151/171] Built ClauseFlow.GenMut.M_S_restart_empty_asset_preserving_insurance_budget_not_atomic (8.0s)
-✔ [152/171] Built ClauseFlow.GenMut.M_S_expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic (3.8s)
-✔ [153/171] Built ClauseFlow.GenMut.M_S_set_asset_raw_oracle_targets_not_atomic (9.8s)
-✔ [154/171] Built ClauseFlow.GenMut.M_S_cure_and_cancel_close_with_cert_not_atomic (23s)
-✔ [155/171] Built ClauseFlow.GenMut.M_S_withdraw_domain_insurance_not_atomic (9.0s)
-ℹ [156/171] Replayed ClauseFlow.AllGenR08d4fd09
+info: ClauseFlow/AllGen.lean:167:0: 'ClauseFlow.Gen.S_attach_leg_at_slot.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:168:0: 'ClauseFlow.Gen.S_resize_leg_same_side_at_slot.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:169:0: 'ClauseFlow.Gen.S_apply_position_delta_with_lookup_inner.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:170:0: 'ClauseFlow.Gen.S_apply_position_delta_with_lookup.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:171:0: 'ClauseFlow.Gen.S_apply_position_delta.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:172:0: 'ClauseFlow.Gen.S_detach_solvent_active_legs_for_resolved_close.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:173:0: 'ClauseFlow.Gen.S_realize_one_source_domain_for_resolved_close_not_atomic.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:174:0: 'ClauseFlow.Gen.S_clear_fully_diluted_resolved_receipt_if_terminal.main' depends on axioms: [propext, Quot.sound]
+info: ClauseFlow/AllGen.lean:175:0: 'ClauseFlow.Gen.S_close_resolved_account_not_atomic.main' depends on axioms: [propext, Quot.sound]
+ℹ [144/145] Replayed ClauseFlow.AllGenR08d4fd09
 info: ClauseFlow/AllGenR08d4fd09.lean:55:0: 'ClauseFlow.GenR08d4fd09.T15_header_checked_paths.main' depends on axioms: [propext, Quot.sound]
 info: ClauseFlow/AllGenR08d4fd09.lean:56:0: 'ClauseFlow.GenR08d4fd09.T15_header_conditional.main' depends on axioms: [propext, Quot.sound]
 info: ClauseFlow/AllGenR08d4fd09.lean:57:0: 'ClauseFlow.GenR08d4fd09.T15_account_checked_paths.main' depends on axioms: [propext, Quot.sound]
@@ -185,18 +173,4 @@ info: ClauseFlow/AllGenR08d4fd09.lean:105:0: 'ClauseFlow.GenR08d4fd09.S_realize_
 info: ClauseFlow/AllGenR08d4fd09.lean:106:0: 'ClauseFlow.GenR08d4fd09.S_clear_fully_diluted_resolved_receipt_if_terminal.main' depends on axioms: [propext,
  Quot.sound]
 info: ClauseFlow/AllGenR08d4fd09.lean:107:0: 'ClauseFlow.GenR08d4fd09.S_close_resolved_account_not_atomic.main' depends on axioms: [propext, Quot.sound]
-✔ [157/171] Built ClauseFlow.GenMut.M_S_clear_fully_diluted_resolved_receipt_if_terminal (2.2s)
-✔ [158/171] Built ClauseFlow.GenMut.M_S_withdraw_not_atomic (15s)
-✔ [159/171] Built ClauseFlow.GenMut.M_S_sync_account_fee_to_slot_not_atomic (18s)
-✔ [160/171] Built ClauseFlow.GenMut.M_S_withdraw_fresh_counterparty_backing_not_atomic (18s)
-✔ [161/171] Built ClauseFlow.GenMut.M_S_charge_account_backing_fee_not_atomic (46s)
-✔ [162/171] Built ClauseFlow.GenMut.M_S_prepare_one_source_domain_for_resolved_close_not_atomic (21s)
-✔ [163/171] Built ClauseFlow.GenMut.M_S_release_account_source_credit_liens_if_unneeded_core_not_atomic (50s)
-✔ [164/171] Built ClauseFlow.GenMut.M_S_realize_one_source_domain_for_resolved_close_not_atomic (37s)
-✔ [165/171] Built ClauseFlow.GenMut.M_T15_header_conditional (98s)
-✔ [166/171] Built ClauseFlow.GenMut.M_T15_account_conditional (101s)
-✔ [167/171] Built ClauseFlow.GenMut.M_T15_header_checked_paths (101s)
-✔ [168/171] Built ClauseFlow.GenMut.M_T15_account_checked_paths (101s)
-✔ [169/171] Built ClauseFlow.GenMut.M_S_close_resolved_account_not_atomic (84s)
-✔ [170/171] Built ClauseFlow.AllGenMut (383ms)
-Build completed successfully (171 jobs).
+Build completed successfully (145 jobs).

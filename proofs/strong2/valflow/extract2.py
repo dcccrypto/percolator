@@ -69,6 +69,12 @@ def enum_variant(rhs, enum, variants):
     return None, None
 
 
+# R10: read-sets of the checks, filled by run2 from readset.compute. None = rule off.
+#   READ = {"fields": {0: set|"ALL", 1: set|"ALL"}, "mk": {0: bool, 1: bool}}; index 1 stands for every k >= 1.
+READ = None
+HDR_MUT = re.compile(r"^&mut (v16::)?MarketGroupV16HeaderAccount$")
+MKT_MUT = re.compile(r"^&mut \[(v16::)?Market<T>\]$")
+
 ENUMS = {}   # R9: crate enum name -> variant names in declaration order (filled by run2.enum_table)
 
 
@@ -124,6 +130,19 @@ def crate_enum_variant(r, want):
     return ENUMS[want].index(m.group(2))
 
 
+def single_group(s):
+    """s is exactly one parenthesised group: its first `(` closes at its last character."""
+    if not s.startswith("("):
+        return False
+    depth = 0
+    for i, c in enumerate(s):
+        depth += c == "("
+        depth -= c == ")"
+        if depth == 0:
+            return i == len(s) - 1
+    return False
+
+
 def is_option_pred(fnpath, name):
     """Exactly `Option::<ARGS>::is_some` / `is_none` with ARGS bracket-matched."""
     if not fnpath.startswith("Option::<"):
@@ -145,6 +164,70 @@ class T2(X.Translator):
 
     def decl(self, l):
         return self.fn.types.get(l, "")
+
+    # ---- R10: which part of the market a pointer points into
+    def region(self, l, seen=()):
+        """("hdr", N): into top-level field N of the market root's header (N None: the whole
+        header); ("mkt",): into the market root's slot array; None: unknown."""
+        if not hasattr(self, "_region"):
+            self._region = {}
+        if l in self._region:
+            return self._region[l]
+        r = None
+        if self.market is not None and l not in seen and l not in self.escaped and l not in self.partial \
+                and l not in self.fn.args and len(self.assigns.get(l, [])) == 1 \
+                and re.match(r"^&mut (v16::)?MarketGroupV16ViewMut<", self.decl(self.market)):
+            rhs = self.assigns[l][0].strip()
+            if rhs.startswith("no_retag "):
+                rhs = rhs[len("no_retag "):]
+            m = re.fullmatch(r"(?:copy|move) \(\(\*_(\d+)\)\.([01]): (.*)\)", rhs)
+            if m and int(m.group(1)) == self.market:
+                if m.group(2) == "0" and HDR_MUT.match(m.group(3)) and HDR_MUT.match(self.decl(l)):
+                    r = ("hdr", None)
+                elif m.group(2) == "1" and MKT_MUT.match(m.group(3)) and MKT_MUT.match(self.decl(l)):
+                    r = ("mkt",)
+            else:
+                locs = [x for x in X.locals_in(rhs) if not X.is_plain(self.fn.types.get(x, "&"))]
+                regs = set(self.region(x, seen + (l,)) for x in locs)
+                if len(regs) == 1 and None not in regs:
+                    r = regs.pop()
+                    if r == ("hdr", None):
+                        # a reborrow of one field: `&mut ((*_h).N: T)` (possibly projected further)
+                        fm = re.match(r"^&mut \(*\(\*_(\d+)\)\.(\d+): ", rhs)
+                        if fm and int(fm.group(1)) in locs and rhs.count("(*") == 1:
+                            r = ("hdr", int(fm.group(2)))
+        if not seen:
+            self._region[l] = r
+        return r
+
+    def region_keeps(self, r, k, place=None):
+        """A write confined to region r cannot change check k (by the read-sets)."""
+        if READ is None or r is None:
+            return False
+        i = 0 if k == 0 else 1
+        if r == ("mkt",):
+            return READ["mk"][i] is False
+        n = r[1]
+        if n is None and place is not None:
+            pm = re.match(r"^\(*\(\*_\d+\)\.(\d+): ", place)
+            if pm and place.count("(*") == 1:
+                n = int(pm.group(1))
+        f = READ["fields"][i]
+        return n is not None and f != "ALL" and n not in f
+
+    def store(self, place, stmts, rhs=None):
+        ls = X.locals_in(place)
+        if not ls or "(*" not in place or READ is None:
+            return super().store(place, stmts, rhs)
+        base = ls[0]
+        if rhs is None or not self.rvalue_plain(rhs):
+            return super().store(place, stmts, rhs)     # raises Unsupported, as in the base class
+        same = self.same_for(self.prov(base))
+        r = self.region(base) if re.match(r"^\(*\(\*_%d\)" % base, place) and place.count("(*") == 1 else None
+        if r is not None:
+            same = sorted(set(same) | set(k for k in self.checks if self.region_keeps(r, k, place)))
+        if same != self.checks:
+            stmts.append(("write", same))
 
     def is_intlike(self, l):
         return self.decl(l) in INT_T
@@ -187,6 +270,11 @@ class T2(X.Translator):
         r = rhs.strip()
         # R2: read of the payload of variant 0
         m = re.fullmatch(r"(?:copy|move) \(\(_(\d+) as (Continue|Ok)\)\.0: (.*)\)", r)
+        if m and not single_group(r.split(" ", 1)[1]):
+            # e.g. `copy ((_4 as Ok).0: u128) as u64 (IntToInt)`: a cast of the payload, not the
+            # payload (audit round 3, risk R-a)
+            stmts.append(("havoc", l))
+            return
         if m:
             y, var = int(m.group(1)), m.group(2)
             ty = self.decl(y)
@@ -220,6 +308,11 @@ class T2(X.Translator):
                     if ci is not None:
                         pay = ("const", ci)
             stmts.append(("okv", l, pay))
+            return
+        if v is not None or X.result_variant(r) is not None:
+            # printed like a `Result` variant but the local is not declared `core::result::Result<..>`
+            # (a crate type named Result; audit round 3, hole H1): nothing is known about it
+            stmts.append(("havoc", l))
             return
         # R4: Option variants
         v, inner = enum_variant(r, "Option", ("None", "Some"))
@@ -314,6 +407,34 @@ class T2(X.Translator):
                     if not ls:
                         S |= {X.ALL}
         same = self.same_for(S)
+        if READ is not None and same != self.checks:
+            # R10: a check is also kept if every argument that can write points into a region
+            # of the market that the check does not read
+            writers, unknown = [], False
+            for p in places + [None if not X.locals_in(fnpath) else fnpath]:
+                if p is None:
+                    continue
+                if p is fnpath:
+                    unknown = True
+                    continue
+                l = X.bare_local(p)
+                if l is not None:
+                    if not X.cannot_write(fn.types[l]):
+                        writers.append(l)
+                else:
+                    tm = re.search(r": ([^:]*)\)$", p)
+                    t = tm.group(1) if tm else "&mut ?"
+                    if not X.cannot_write(t):
+                        unknown = True
+            if not unknown:
+                extra = []
+                for k in self.checks:
+                    if k in same:
+                        continue
+                    if all((not (self.deps[k] & self.prov(w)) and X.ALL not in self.prov(w))
+                           or self.region_keeps(self.region(w), k) for w in writers):
+                        extra.append(k)
+                same = sorted(set(same) | set(extra))
         post = []
         est = []
         if fnpath == X.SHAPE_FN and len(args) == 1 and arg_locals[0] is not None \

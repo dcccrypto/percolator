@@ -9,7 +9,7 @@ MIR blocks: 163, locals: 188. market root: _1; accounts: _2 (mut)
 result = local 0 (0 is Ok); payload = local 1000000 (ghost: integer value or enum discriminant
 of the Ok payload; for Option: None = 0, Some = 1).
 callee summaries used (block, callee), each certified by its own module in this directory:
-  none
+  bb65 MarketGroupV16ViewMut::<'_, T>::band_observe_cert_not_atomic
 summary clauses (the goal):
   result = 0: checks [0, 1] preserved
   result = 0 ∧ payload = 1: checks [0, 1] hold
@@ -84,8 +84,8 @@ def cfg : Cfg := [
   /- bb61 -/ ⟨[.copy 74 1000067, .havoc 1000074], .call [66, 1000066] 64 [0, 1] []⟩,
   /- bb62 -/ ⟨[.havoc 73, .havoc 1000073, .setD 0 1, .havoc 1000000], .goto 63⟩,
   /- bb63 -/ ⟨[.havoc 73, .havoc 1000073, .havoc 66, .havoc 1000066, .havoc 67, .havoc 1000067], .goto 160⟩,
-  /- bb64 -/ ⟨[.havoc 175, .havoc 1000175, .write [], .havoc 66, .havoc 1000066, .havoc 67, .havoc 1000067, .havoc 76, .havoc 1000076], .call [75, 1000075] 65 [0, 1] []⟩,
-  /- bb65 -/ ⟨[.havoc 176, .havoc 1000176, .write [0], .havoc 75, .havoc 1000075, .havoc 76, .havoc 1000076, .havoc 79, .havoc 1000079], .call [78, 1000078] 66 [] []⟩,
+  /- bb64 -/ ⟨[.havoc 175, .havoc 1000175, .write [1], .havoc 66, .havoc 1000066, .havoc 67, .havoc 1000067, .havoc 76, .havoc 1000076], .call [75, 1000075] 65 [0, 1] []⟩,
+  /- bb65 -/ ⟨[.havoc 176, .havoc 1000176, .write [0], .havoc 75, .havoc 1000075, .havoc 76, .havoc 1000076, .havoc 79, .havoc 1000079], .call [78, 1000078] 66 [] [⟨[(78, .eq 0)], .chk [] [0]⟩]⟩,
   /- bb66 -/ ⟨[], .branch 77 78 1000077 1000078 67⟩,
   /- bb67 -/ ⟨[.havoc 78, .havoc 1000078, .copy 80 77, .copy 1000080 1000077], .switch 80 [(0, 68), (1, 69)] (some 3)⟩,
   /- bb68 -/ ⟨[.havoc 79, .havoc 1000079, .havoc 77, .havoc 1000077], .switch 4 [(0, 100)] (some 71)⟩,
@@ -140,7 +140,7 @@ def cfg : Cfg := [
   /- bb117 -/ ⟨[.copy 130 1000125, .havoc 1000130, .havoc 125, .havoc 1000125], .call [131, 1000131] 120 [0, 1] []⟩,
   /- bb118 -/ ⟨[.havoc 129, .havoc 1000129, .setD 0 1, .havoc 1000000], .goto 119⟩,
   /- bb119 -/ ⟨[.havoc 129, .havoc 1000129, .havoc 125, .havoc 1000125], .goto 156⟩,
-  /- bb120 -/ ⟨[.havoc 179, .havoc 1000179, .write [], .havoc 131, .havoc 1000131], .call [133, 1000133] 121 [] []⟩,
+  /- bb120 -/ ⟨[.havoc 179, .havoc 1000179, .write [1], .havoc 131, .havoc 1000131], .call [133, 1000133] 121 [] []⟩,
   /- bb121 -/ ⟨[], .branch 132 133 1000132 1000133 122⟩,
   /- bb122 -/ ⟨[.havoc 133, .havoc 1000133, .copy 134 132, .copy 1000134 1000132], .switch 134 [(0, 123), (1, 124)] (some 3)⟩,
   /- bb123 -/ ⟨[.havoc 132, .havoc 1000132, .havoc 138, .havoc 1000138], .call [137, 1000137] 126 [0, 1] []⟩,

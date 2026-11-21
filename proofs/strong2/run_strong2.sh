@@ -14,6 +14,7 @@ export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/Users/khubair/agent-work/e2e-proofs
 SRC=$WORK/src-$REV
 if [ "$REV" = c38b6b1e ]; then OUT=$HERE/out; GENNS=Gen; MIRDIR=$HERE/mir; SIB=out-c38b6b1e
 else OUT=$HERE/out-$REV; GENNS=GenR$REV; MIRDIR=$HERE/mir-$REV; SIB=out; fi
+MUT=${MUT---mutants}
 GENDIR=$HERE/lean/ClauseFlow/$GENNS
 mkdir -p "$SRC" "$WORK/mir" "$OUT" "$MIRDIR" "$GENDIR"
 git -C "$REPO" archive "$REV" Cargo.toml Cargo.lock src | tar -x -C "$SRC"
@@ -36,11 +37,12 @@ echo "full MIR dump sha256: $(shasum -a 256 "$WORK/mir/$REV.mir" | cut -d' ' -f1
 
 # assumptions A1..A9 of the sibling method (its script, unchanged) and A10..A12 of this one
 python3 "$HERE/../novel/mirflow/check_assumptions.py" "$SRC" "$WORK/mir/$REV.mir" > "$OUT/assumptions_check.txt"
-python3 "$HERE/valflow/check_assumptions2.py" "$SRC" "$WORK/mir/$REV.mir" >> "$OUT/assumptions_check.txt"
+( cd "$SRC" && cargo +$NIGHTLY rustc -j 4 --release --lib -- -Zunpretty=expanded > "$WORK/mir/$REV.expanded.rs" 2>/dev/null )
+python3 "$HERE/valflow/check_assumptions2.py" "$SRC" "$WORK/mir/$REV.mir" "$WORK/mir/$REV.expanded.rs" >> "$OUT/assumptions_check.txt"
 
 # generated files are rewritten by run2.py; stale modules of an earlier run are removed by it
 python3 "$HERE/valflow/run2.py" --mir "$WORK/mir/$REV.mir" --spans-mir "$WORK/mir/$REV.spans.mir" \
-  --src "$SRC/src/v16.rs" --gen "$GENDIR" --mirdir "$MIRDIR" --out "$OUT" --genns $GENNS --clean --mutants --sibling "$HERE/../novel/$SIB/ledger_results.tsv" \
+  --src "$SRC/src/v16.rs" --gen "$GENDIR" --mirdir "$MIRDIR" --out "$OUT" --genns $GENNS --clean $MUT --sibling "$HERE/../novel/$SIB/ledger_results.tsv" \
   --pin "engine: $ENGINE@$REV, src/v16.rs blob $V16; $RUSTC; $FLAGS" > "$OUT/run.txt"
 cat "$OUT/run.txt"
 ( cd "$HERE/lean" && PATH="$LEAN_TC/bin:$PATH" lake build 2>&1 | grep -v '^info: toolchain' > "$OUT/lake_build.log"; tail -1 "$OUT/lake_build.log" )

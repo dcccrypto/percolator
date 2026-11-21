@@ -10,6 +10,8 @@ result = local 0 (0 is Ok); payload = local 1000000 (ghost: integer value or enu
 of the Ok payload; for Option: None = 0, Some = 1).
 callee summaries used (block, callee), each certified by its own module in this directory:
   bb20 MarketGroupV16ViewMut::<'_, T>::normalize_terminal_empty_asset_history_not_atomic
+  bb35 MarketGroupV16ViewMut::<'_, T>::set_asset_state
+  bb43 MarketGroupV16ViewMut::<'_, T>::commit_asset_set_epoch_bump
   bb48 MarketGroupV16ViewMut::<'_, T>::normalize_terminal_empty_asset_history_not_atomic
 summary clauses (the goal):
   result = 0: checks [0] hold
@@ -55,7 +57,7 @@ def cfg : Cfg := [
   /- bb32 -/ ⟨[.havoc 30, .havoc 1000030, .havoc 26, .havoc 1000026], .goto 59⟩,
   /- bb33 -/ ⟨[.havoc 33, .havoc 1000033], .branch 31 32 1000031 1000032 34⟩,
   /- bb34 -/ ⟨[.havoc 32, .havoc 1000032, .copy 34 31, .copy 1000034 1000031], .switch 34 [(0, 35), (1, 36)] (some 3)⟩,
-  /- bb35 -/ ⟨[.copy 36 1000031, .havoc 1000036, .havoc 31, .havoc 1000031, .havoc 36, .havoc 1000036, .havoc 36, .havoc 1000036], .call [38, 1000038] 38 [] []⟩,
+  /- bb35 -/ ⟨[.copy 36 1000031, .havoc 1000036, .havoc 31, .havoc 1000031, .havoc 36, .havoc 1000036, .havoc 36, .havoc 1000036], .call [38, 1000038] 38 [] [⟨[(38, .eq 0)], .chk [] [0]⟩]⟩,
   /- bb36 -/ ⟨[.havoc 35, .havoc 1000035, .setD 0 1, .havoc 1000000], .goto 37⟩,
   /- bb37 -/ ⟨[.havoc 35, .havoc 1000035, .havoc 31, .havoc 1000031], .goto 58⟩,
   /- bb38 -/ ⟨[], .branch 37 38 1000037 1000038 39⟩,
@@ -63,7 +65,7 @@ def cfg : Cfg := [
   /- bb40 -/ ⟨[.havoc 37, .havoc 1000037], .call [41, 1000041] 43 [0] []⟩,
   /- bb41 -/ ⟨[.havoc 40, .havoc 1000040, .setD 0 1, .havoc 1000000], .goto 42⟩,
   /- bb42 -/ ⟨[.havoc 40, .havoc 1000040, .havoc 37, .havoc 1000037], .goto 58⟩,
-  /- bb43 -/ ⟨[.havoc 54, .havoc 1000054, .write [], .havoc 41, .havoc 1000041], .call [42, 1000042] 44 [] []⟩,
+  /- bb43 -/ ⟨[.havoc 54, .havoc 1000054, .write [], .havoc 41, .havoc 1000041], .call [42, 1000042] 44 [] [⟨[], .chk [] [0]⟩]⟩,
   /- bb44 -/ ⟨[.havoc 43, .havoc 1000043], .call [0, 1000000] 45 [0] [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
   /- bb45 -/ ⟨[.havoc 43, .havoc 1000043], .goto 57⟩,
   /- bb46 -/ ⟨[], .branch 44 45 1000044 1000045 47⟩,
@@ -122,12 +124,12 @@ def inv : List (Option AState) := [
   /- bb35 -/ some ⟨[], [⟨[], .chk [0] []⟩]⟩,
   /- bb36 -/ some ⟨[], [⟨[], .chk [0] []⟩]⟩,
   /- bb37 -/ some ⟨[(0, .eq 1)], [⟨[], .chk [0] []⟩]⟩,
-  /- bb38 -/ some ⟨[], []⟩,
-  /- bb39 -/ some ⟨[], []⟩,
-  /- bb40 -/ some ⟨[], []⟩,
+  /- bb38 -/ some ⟨[], [⟨[(38, .eq 0)], .chk [0] []⟩]⟩,
+  /- bb39 -/ some ⟨[], [⟨[(37, .eq 0)], .chk [0] []⟩]⟩,
+  /- bb40 -/ some ⟨[], [⟨[], .chk [0] []⟩]⟩,
   /- bb41 -/ some ⟨[], []⟩,
   /- bb42 -/ some ⟨[(0, .eq 1)], []⟩,
-  /- bb43 -/ some ⟨[], []⟩,
+  /- bb43 -/ some ⟨[], [⟨[], .chk [0] []⟩]⟩,
   /- bb44 -/ some ⟨[], []⟩,
   /- bb45 -/ some ⟨[], [⟨[(0, .eq 0)], .chk [0] []⟩]⟩,
   /- bb46 -/ some ⟨[], []⟩,
