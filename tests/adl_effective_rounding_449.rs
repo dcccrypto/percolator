@@ -369,48 +369,67 @@ fn issue_449_invariant_exact_exposure_within_oi_eff_and_no_per_op_gain() {
             trade(&mut header, &mut markets, leg, &mut s[1], q - q / 2).unwrap();
         }
     }
+    // `reduced[s]`: the op reduced a leg on side s. For such a side the
+    // exact-over-OI residue G must not rise (the leg kept no more exact
+    // exposure than the oi_eff it removed). A passive (ADL'd) side is only
+    // checked against (1): flooring A can legitimately move a negative G up
+    // toward 0.
     let check = |markets: &[Market<u64>],
                  accts: &[PortfolioAccountV16Account],
                  prev: [i128; 2],
+                 reduced: [bool; 2],
                  op: &str| {
         let a = asset(markets);
         let c = census(markets, accts);
         let oi = [a.oi_eff_long_q, a.oi_eff_short_q];
         let g = [0, 1].map(|s| c[s].1 as i128 - (oi[s] * ADL_ONE) as i128);
         for s in 0..2 {
+            if reduced[s] {
+                assert!(
+                    g[s] <= prev[s],
+                    "{op}: side {s} residue grew by {:.6} raw units in one op",
+                    (g[s] - prev[s]) as f64 / ADL_ONE as f64
+                );
+            }
             assert!(
                 g[s] <= 0,
                 "{op}: side {s} exact exposure exceeds oi_eff by {:.6} raw units",
                 g[s] as f64 / ADL_ONE as f64
             );
-            assert!(
-                g[s] <= prev[s].max(0),
-                "{op}: side {s} residue grew {} -> {}",
-                prev[s],
-                g[s]
-            );
         }
         g
     };
-    let mut g = check(&markets, &accts, [0, 0], "open");
+    let mut g = check(&markets, &accts, [0, 0], [false, false], "open");
     {
         let (_, s) = accts.split_at_mut(N);
-        let s0_eff = raw_and_basis(&s[0]).unwrap().1;
-        rebalance(&mut header, &mut markets, &mut s[0], s0_eff * 2 / 3).unwrap();
+        let s0_raw = raw_and_basis(&s[0]).unwrap().1;
+        rebalance(&mut header, &mut markets, &mut s[0], s0_raw * 2 / 3).unwrap();
     }
-    g = check(&markets, &accts, g, "initial ADL");
+    g = check(&markets, &accts, g, [false, true], "initial ADL");
     for r in 0..50 {
         {
             let (_, s) = accts.split_at_mut(N);
             rebalance(&mut header, &mut markets, &mut s[0], 1).unwrap();
         }
-        g = check(&markets, &accts, g, &format!("round {r} short rebalance"));
+        g = check(
+            &markets,
+            &accts,
+            g,
+            [false, true],
+            &format!("round {r} short rebalance"),
+        );
         for i in 0..N {
             {
                 let (l, s) = accts.split_at_mut(N);
                 trade(&mut header, &mut markets, &mut s[1], &mut l[i], 1).unwrap();
             }
-            g = check(&markets, &accts, g, &format!("round {r} long {i} reduce"));
+            g = check(
+                &markets,
+                &accts,
+                g,
+                [true, true],
+                &format!("round {r} long {i} reduce"),
+            );
         }
     }
 }
