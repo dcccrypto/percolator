@@ -1,4 +1,12 @@
-# proofs/aristotle/ours: one Aristotle job, prepared and not submitted
+# Resolved close: Aristotle results
+
+A full resolved close never pays out more than the pool, for any number of accounts and any close order. Seven properties (RC1–RC7) were proved on Harmonic's Aristotle; none were refuted, and the invariant was used as written. The run took about 87 minutes.
+
+These proofs are of a Rust transcription of the close path, not of the engine source itself. They assume the `wide_mul_div_floor_u128` contract. Kani already covers the same path for one or two accounts with bounded amounts.
+
+Details, credits, timing and the full list of caveats are in [JOB.md](JOB.md). The Lean statements Aristotle returned are in [result/](result/).
+
+# How the job was prepared
 
 One invariant on one end-to-end path: **the full resolved close never pays more than the snapshot
 holds, for any number of accounts and any close order.** Nothing here is proved. Nothing was
