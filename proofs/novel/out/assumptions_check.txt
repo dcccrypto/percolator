@@ -2,7 +2,7 @@ PASS  A1 crate denies unsafe code (#![deny(unsafe_code)] in src/lib.rs) (1 hits)
       #![deny(unsafe_code)]
 PASS  A1 no unsafe block or unsafe fn (only `unsafe trait` / `unsafe impl` marker items allowed)
 PASS  A1 `#[allow(unsafe_code)]` appears only directly above an `unsafe trait`/`unsafe impl`
-PASS  A2 no interior mutability or shared mutable state (Cell, RefCell, UnsafeCell, Mutex, RwLock, Atomic*, OnceCell, OnceLock, static mut, thread_local)
+PASS  A2 no interior mutability or shared mutable state (Cell, RefCell, UnsafeCell, Mutex, RwLock, Atomic*, OnceCell, OnceLock, static mut, thread_local) and no `static` item [MIR of the analysed build]
 PASS  A2 no raw pointers (*const, *mut, as_ptr, as_mut_ptr, addr_of)
 PASS  A3 no clock, randomness, environment, file or network access (std::time, rand, std::env, std::fs, std::net)
 PASS  A3 no extern blocks / FFI

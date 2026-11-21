@@ -6,6 +6,7 @@ import re
 import sys
 
 root = sys.argv[1]
+mir_path = sys.argv[2] if len(sys.argv) > 2 else None
 files = {}
 for dp, _, fs in os.walk(os.path.join(root, "src")):
     for f in fs:
@@ -47,9 +48,26 @@ report("A1 `#[allow(unsafe_code)]` appears only directly above an `unsafe trait`
         if "allow(unsafe_code)" in strip_comment(l)
         and not re.search(r"\bunsafe (trait|impl)\b", lines[i + 1] if i + 1 < len(lines) else "")
         for h in ["%s:%d: %s" % (f, i + 1, l.strip())]])
-report("A2 no interior mutability or shared mutable state "
-       "(Cell, RefCell, UnsafeCell, Mutex, RwLock, Atomic*, OnceCell, OnceLock, static mut, thread_local)",
-       scan(r"\b(Cell|RefCell|UnsafeCell|Mutex|RwLock|OnceCell|OnceLock|LazyLock)\b|\bAtomic[A-Z]\w*|static\s+mut\b|thread_local!"))
+A2_PAT = r"\b(Cell|RefCell|UnsafeCell|Mutex|RwLock|OnceCell|OnceLock|LazyLock)\b|\bAtomic[A-Z]\w*|static\s+mut\b|thread_local!"
+A2_NAME = ("A2 no interior mutability or shared mutable state "
+           "(Cell, RefCell, UnsafeCell, Mutex, RwLock, Atomic*, OnceCell, OnceLock, static mut, thread_local)")
+src_hits = scan(A2_PAT)
+if mir_path is None:
+    report(A2_NAME + " [source text, every configuration]", src_hits)
+else:
+    # The MIR dump is the compiled configuration: items behind a disabled `cfg` are not in it.
+    mir_hits = []
+    with open(mir_path) as f:
+        for i, l in enumerate(f, 1):
+            c = l.split("//")[0]
+            if re.search(A2_PAT, c) or re.match(r"^static\b", c):
+                mir_hits.append("MIR:%d: %s" % (i, l.strip()[:100]))
+    report(A2_NAME + " and no `static` item [MIR of the analysed build]", mir_hits)
+    if src_hits:
+        print("INFO  the source text has %d such line(s) in code that is not in the analysed build "
+              "(behind a `cfg`):" % len(src_hits))
+        for h in src_hits[:12]:
+            print("      " + h)
 report("A2 no raw pointers (*const, *mut, as_ptr, as_mut_ptr, addr_of)",
        scan(r"\*const\b|\*mut\b|\bas_ptr\b|\bas_mut_ptr\b|addr_of"))
 report("A3 no clock, randomness, environment, file or network access (std::time, rand, std::env, std::fs, std::net)",

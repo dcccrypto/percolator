@@ -1,0 +1,30 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::credit_domain_insurance_budget_not_atomic(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: usize, _3: u128) -> Result<(), V16Error> {
+    debug self => _1;
+    debug domain => _2;
+    debug amount => _3;
+    let mut _0: core::result::Result<(), v16::V16Error>;
+    let mut _4: &[(usize, u128)];
+    let _5: &[(usize, u128); 1];
+    let _6: [(usize, u128); 1];
+    let mut _7: (usize, u128);
+
+    bb0: {
+        StorageLive(_4);
+        StorageLive(_5);
+        StorageLive(_6);
+        StorageLive(_7);
+        _7 = (copy _2, copy _3);
+        _6 = [move _7];
+        StorageDead(_7);
+        _5 = &_6;
+        _4 = copy _5 as &[(usize, u128)] (PointerCoercion(Unsize, Implicit));
+        _0 = MarketGroupV16ViewMut::<'_, T>::credit_domain_insurance_budgets_not_atomic(move _1, move _4) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        StorageDead(_4);
+        StorageDead(_6);
+        StorageDead(_5);
+        return;
+    }
+}

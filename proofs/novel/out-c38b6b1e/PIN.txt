@@ -1,0 +1,9 @@
+engine: dcccrypto/percolator
+revision: c38b6b1e948393613059d133337d16dcc09cbd16
+src/v16.rs blob: 7d3edfe86be1a80f49793cf551c39687a8766a4d
+src/wide_math.rs blob: 97c6b16d4079aa5c83a9dd79c528e25db1027886
+src/lib.rs blob: 9d1cadf771d179ee1213709f0237e106cd989abe
+rustc: rustc 1.99.0-nightly (d0babd8b6 2026-07-15)
+mir command: cargo rustc -j 4 --release --lib  -- -Zunpretty=mir -Zinline-mir=no (variant: default)
+lean: Lean (version 4.34.0, arm64-apple-darwin24.6.0, commit 293d5d0c0c3f3dded4688b3ccd6a33939ac5102b, Release)
+full MIR dump sha256: cf0b54d51036d1c566a4aa6e2ae2ff27ba7253122da4b37bc3f2394b7ba0712b (345922 lines)

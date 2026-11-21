@@ -1,0 +1,100 @@
+fn v16::<impl at src/v16.rs:10377:1: 10377:41>::execute_trade_with_fee_loss_stale_scoped_not_atomic(_1: &mut MarketGroupV16ViewMut<'_, T>, _2: &mut PortfolioV16ViewMut<'_>, _3: &mut PortfolioV16ViewMut<'_>, _4: TradeRequestV16, _5: bool) -> Result<TradeOutcomeV16, V16Error> {
+    debug self => _1;
+    debug long_account => _2;
+    debug short_account => _3;
+    debug request => _4;
+    debug taker_is_long_account => _5;
+    let mut _0: core::result::Result<v16::TradeOutcomeV16, v16::V16Error>;
+    let mut _6: core::ops::ControlFlow<core::result::Result<core::convert::Infallible, v16::V16Error>, v16::BatchTradeOutcomeV16>;
+    let mut _7: core::result::Result<v16::BatchTradeOutcomeV16, v16::V16Error>;
+    let _8: &[v16::TradeRequestV16];
+    let _9: &v16::TradeRequestV16;
+    let mut _10: isize;
+    let _11: core::result::Result<core::convert::Infallible, v16::V16Error>;
+    let mut _12: v16::TradeOutcomeV16;
+    let _13: u32;
+    let _14: u128;
+    let _15: u128;
+    let _16: u128;
+    scope 1 {
+        debug ((outcome: BatchTradeOutcomeV16).0: u32) => _13;
+        debug ((outcome: BatchTradeOutcomeV16).1: u128) => _14;
+        debug ((outcome: BatchTradeOutcomeV16).2: u128) => _15;
+        debug ((outcome: BatchTradeOutcomeV16).3: u128) => _16;
+    }
+    scope 2 {
+        debug residual => _11;
+        scope 3 {
+        }
+    }
+    scope 4 {
+        debug ((val: BatchTradeOutcomeV16).0: u32) => _13;
+        debug ((val: BatchTradeOutcomeV16).1: u128) => _14;
+        debug ((val: BatchTradeOutcomeV16).2: u128) => _15;
+        debug ((val: BatchTradeOutcomeV16).3: u128) => _16;
+        scope 5 {
+        }
+    }
+
+    bb0: {
+        StorageLive(_6);
+        StorageLive(_7);
+        StorageLive(_8);
+        StorageLive(_9);
+        _9 = &_4;
+        _8 = core::slice::from_ref::<TradeRequestV16>(move _9) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        _7 = MarketGroupV16ViewMut::<'_, T>::execute_batch_with_fee_loss_stale_scoped_not_atomic(move _1, move _2, move _3, move _8, move _5) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        _6 = <Result<BatchTradeOutcomeV16, V16Error> as Try>::branch(move _7) -> [return: bb3, unwind continue];
+    }
+
+    bb3: {
+        StorageDead(_7);
+        _10 = discriminant(_6);
+        switchInt(move _10) -> [0: bb5, 1: bb6, otherwise: bb4];
+    }
+
+    bb4: {
+        unreachable;
+    }
+
+    bb5: {
+        StorageLive(_13);
+        _13 = copy (((_6 as Continue).0: v16::BatchTradeOutcomeV16).0: u32);
+        _14 = copy (((_6 as Continue).0: v16::BatchTradeOutcomeV16).1: u128);
+        _15 = copy (((_6 as Continue).0: v16::BatchTradeOutcomeV16).2: u128);
+        _16 = copy (((_6 as Continue).0: v16::BatchTradeOutcomeV16).3: u128);
+        StorageDead(_13);
+        StorageDead(_9);
+        StorageDead(_8);
+        StorageDead(_6);
+        StorageLive(_12);
+        _12 = TradeOutcomeV16 { fee_a: copy _14, fee_b: copy _15, notional: copy _16 };
+        _0 = Result::<TradeOutcomeV16, V16Error>::Ok(move _12);
+        StorageDead(_12);
+        goto -> bb8;
+    }
+
+    bb6: {
+        StorageLive(_11);
+        _11 = copy ((_6 as Break).0: core::result::Result<core::convert::Infallible, v16::V16Error>);
+        _0 = <Result<TradeOutcomeV16, V16Error> as FromResidual<Result<Infallible, V16Error>>>::from_residual(move _11) -> [return: bb7, unwind continue];
+    }
+
+    bb7: {
+        StorageDead(_11);
+        StorageDead(_9);
+        StorageDead(_8);
+        StorageDead(_6);
+        goto -> bb8;
+    }
+
+    bb8: {
+        return;
+    }
+}

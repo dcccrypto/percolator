@@ -19,6 +19,12 @@ if [ "$VARIANT" = default ]; then
 else
   OUT=$HERE/out-$VARIANT; GENNS=GenAuditScan; FEAT="--features $VARIANT"; SCAN="--scan-rows"; MIRDIR=$HERE/mir-$VARIANT; TAG=$REV-$VARIANT
 fi
+# Another revision (e.g. REV=c38b6b1e, our v2.2 line): its own tables and Lean namespace.
+# ENGINE names the repository the revision belongs to, for the pin line only.
+ENGINE=${ENGINE:-aeyakovenko/percolator}
+if [ "$REV" != 08d4fd09 ]; then
+  OUT=$OUT-$REV; GENNS=${GENNS}R$REV; MIRDIR=$MIRDIR-$REV
+fi
 
 mkdir -p "$SRC" "$WORK/mir" "$OUT" "$MIRDIR" "$HERE/lean/MirFlow/$GENNS"
 rm -rf "$SRC/src"
@@ -29,6 +35,7 @@ LIB=$(git -C "$REPO" rev-parse "$REV:src/lib.rs")
 RUSTC=$(rustc +$NIGHTLY --version)
 FLAGS="cargo rustc -j 4 --release --lib $FEAT -- -Zunpretty=mir -Zinline-mir=no"
 {
+  echo "engine: $ENGINE"
   echo "revision: $(git -C "$REPO" rev-parse "$REV")"
   echo "src/v16.rs blob: $V16"
   echo "src/wide_math.rs blob: $WM"
@@ -42,13 +49,13 @@ FLAGS="cargo rustc -j 4 --release --lib $FEAT -- -Zunpretty=mir -Zinline-mir=no"
 ( cd "$SRC" && cargo +$NIGHTLY rustc -j 4 --release --lib $FEAT -- -Zunpretty=mir -Zinline-mir=no -Zmir-include-spans=yes > "$WORK/mir/$TAG.spans.mir" 2>/dev/null )
 echo "full MIR dump sha256: $(shasum -a 256 "$WORK/mir/$TAG.mir" | cut -d' ' -f1) ($(wc -l < "$WORK/mir/$TAG.mir" | tr -d ' ') lines)" >> "$OUT/PIN.txt"
 
-python3 "$HERE/mirflow/check_assumptions.py" "$SRC" > "$OUT/assumptions_check.txt"
+python3 "$HERE/mirflow/check_assumptions.py" "$SRC" "$WORK/mir/$TAG.mir" > "$OUT/assumptions_check.txt"
 
 rm -f "$HERE"/lean/MirFlow/$GENNS/*.lean "$MIRDIR"/*.mir
 python3 "$HERE/mirflow/ledger_run.py" --mir "$WORK/mir/$TAG.mir" --spans-mir "$WORK/mir/$TAG.spans.mir" \
   --src "$SRC/src/v16.rs" --ledger "$HERE/ledger/proof_ledger_08d4fd09.tsv" \
   --gen "$HERE/lean/MirFlow/$GENNS" --mirdir "$MIRDIR" --out "$OUT" --genns $GENNS $SCAN \
-  --pin "engine: aeyakovenko/percolator@$REV, src/v16.rs blob $V16; $RUSTC; $FLAGS"
+  --pin "engine: $ENGINE@$REV, src/v16.rs blob $V16; $RUSTC; $FLAGS"
 
 ( cd "$HERE/lean" && "$LEAN_TC/bin/lake" build 2>&1 | grep -v '^info: toolchain' > "$OUT/lake_build.log"; \
   tail -1 "$OUT/lake_build.log" )
