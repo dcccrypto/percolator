@@ -1,0 +1,43 @@
+{
+ "accounts": [
+  [
+   2,
+   "mut"
+  ]
+ ],
+ "blocks": 297,
+ "checks": [
+  0,
+  1
+ ],
+ "exempt": [],
+ "fn": "v16::<impl at src/v16.rs:10377:1: 10377:41>::close_resolved_account_not_atomic",
+ "ir_blocks": 297,
+ "locals": 322,
+ "market": 1,
+ "mir_sha256": "88947ad537a56c59da673c69bb81a24b9ad4b18f8e55855302a9b404d8bdccd3",
+ "notes": [],
+ "ok_only": true,
+ "open_ok_sites": [],
+ "open_returns": [],
+ "returns": {
+  "296": "ok"
+ },
+ "summaries_used": [
+  [
+   9,
+   "MarketGroupV16ViewMut::<'_, T>::prepare_one_source_domain_for_resolved_close_not_atomic",
+   "certified"
+  ],
+  [
+   75,
+   "MarketGroupV16ViewMut::<'_, T>::sync_account_fee_to_slot_not_atomic",
+   "certified"
+  ],
+  [
+   232,
+   "MarketGroupV16ViewMut::<'_, T>::clear_fully_diluted_resolved_receipt_if_terminal",
+   "certified"
+  ]
+ ]
+}

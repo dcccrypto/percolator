@@ -52,9 +52,22 @@ through a value that may carry a mutable reference derived from an argument.**
 
 ## 4. Translation rules
 
-Types. *Plain*: the printed type contains none of `&`, `'`, `*`, `{`, `dyn `, `fn(`, `impl `.
+Text. Every MIR line is first passed through `mask_literals`: the contents of string and char
+literals are replaced by dots, so nothing inside a literal can look like a bracket, a comma or a
+local. Bracket structure is then checked; an unbalanced line rejects the function.
+
+Types. *Plain*: the printed type contains none of `&`, `'`, `*`, `{`, `dyn `, `fn(`, `impl `,
+` as `, and every identifier in it is a primitive (`u8`…`u128`, `i8`…`i128`, `usize`, `isize`,
+`bool`, `char`), or `T` (A5), or a path with `::` (a concrete type), or a name of at least three
+characters with a lower-case letter (a concrete type printed without its path). A short
+all-capitals name other than `T` is taken to be a type parameter and is not plain.
 *Shared reference*: starts with `&` and not `&mut`. *Cannot write*: plain, or a shared reference,
 or one of the two by-value view types of A4.
+
+*Plain rvalue* (a value that cannot carry a reference): a constant; `Len(..)`, `discriminant(..)`;
+an arithmetic, bit or comparison operator; `copy`/`move` of a place whose printed type (for an
+array or slice element: the indexed type) is plain; any other rvalue all of whose locals have
+plain types. A borrow (`&..`) is never plain.
 
 Roots. The function's non-plain arguments. The first argument of type
 `&[mut] MarketGroupV16ViewMut<_>` is the market root; account roots as in section 2. A root must
@@ -67,7 +80,8 @@ right-hand side (for a call: in the callee expression and the arguments). Anythi
 
 `same(S)`: the checks that do not depend on any root in `S` (none if `S` contains ALL).
 
-Escaped locals: a local whose address is taken by `&mut` or `&raw` anywhere in the function.
+Escaped locals: a local whose address is taken by `&mut` or `&raw` (after an optional
+`no_retag`) anywhere in the function, in a place without a dereference.
 Nothing is ever recorded about an escaped local: assignments to it are dropped, reads of it are
 replaced by reads of a fresh unconstrained local.
 
@@ -76,14 +90,14 @@ Statements.
 | MIR | Abstract instruction |
 |---|---|
 | `StorageLive`, `FakeRead`, `PlaceMention`, `AscribeUserType`, `Coverage`, `Retag`, `ConstEvalCounter`, `nop`, `assume(..)` | nothing |
-| `StorageDead(_l)`, `Deinit(_l)` | `havoc l` |
+| `StorageDead(_l)`, `Deinit(_l)`, `discriminant(_l) = N` | `havoc l` |
 | `_l = copy _m`, `_l = move _m`, `_l = discriminant(_m)` | `copy l m` |
 | `_l = Result::<..>::Ok(..)` / `Err(..)` (also printed as a constant) | `setD l 0` / `setD l 1` |
 | `_l = const N_<int>` , `const true/false` | `setD l N` / `1` / `0` |
-| `discriminant(_l) = N` | `setD l N` |
 | any other assignment to a bare local | `havoc l` |
 | assignment to a projection of `_l` without a dereference | `havoc l` |
-| assignment to a place with a dereference, base local `_p` | `write same(prov(p))`, omitted if every check is kept |
+| assignment to a place with a dereference (`(*_p)…`), base local `_p`, of a plain rvalue | `write same(prov(p))`, omitted if every check is kept |
+| assignment to a place with a dereference of an rvalue that is not plain | **the function is rejected** (a stored reference could make one argument's memory reach another's; audit finding 1) |
 | anything else | **the function is rejected** |
 
 Terminators.
@@ -104,7 +118,9 @@ Terminators.
 Calls. `S` = union of `prov` of every argument whose type is not "cannot write" (for a projected
 operand whose printed type cannot be read: treated as able to write), plus `prov` of every local in
 the callee expression (closures, function pointers). `same = same(S)`. If the destination is a
-projection, the write or `havoc` it implies happens in an extra block after the call. Then:
+projection, the write or `havoc` it implies happens in an extra block after the call (numbered
+after the function's own blocks, in order of creation); a destination behind a dereference whose
+type is not plain rejects the function. Then:
 
 - **The shape check.** Callee is exactly `MarketGroupV16ViewMut::<'_, T>::validate_shape` and its
   argument is a reborrow chain of single assignments ending at the market root: `est = [0]`.

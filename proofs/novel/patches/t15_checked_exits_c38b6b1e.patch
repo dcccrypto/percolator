@@ -1,0 +1,33 @@
+--- a/src/v16.rs
++++ b/src/v16.rs
+@@ -26591,6 +26591,8 @@
+             if preparation == ResolvedSourcePreparationV16::BackingNormalized
+                 || Self::account_has_source_liens(&account.as_view())
+             {
++                self.validate_shape()?;
++                account.validate_with_market(&self.as_view())?;
+                 return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+             }
+         }
+@@ -26611,6 +26613,7 @@
+             )?
+         {
+             self.validate_shape()?;
++            account.validate_with_market(&self.as_view())?;
+             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+         }
+         self.sync_account_fee_to_slot_not_atomic(
+@@ -26628,9 +26631,13 @@
+             || decode_bool(account.header.b_stale_state)?
+             || decode_bool(account.header.stale_state)?
+         {
++            self.validate_shape()?;
++            account.validate_with_market(&self.as_view())?;
+             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+         }
+         if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
++            self.validate_shape()?;
++            account.validate_with_market(&self.as_view())?;
+             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+         }
+         if self.realize_one_source_domain_for_resolved_close_not_atomic(account)?
