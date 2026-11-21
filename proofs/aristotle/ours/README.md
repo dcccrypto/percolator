@@ -8,9 +8,7 @@ Details, credits, timing and the full list of caveats are in [JOB.md](JOB.md). T
 
 # How the job was prepared
 
-One invariant on one end-to-end path: **the full resolved close never pays more than the snapshot
-holds, for any number of accounts and any close order.** Nothing here is proved. Nothing was
-submitted: there is no Aristotle account or key on the preparing machine.
+This section is the original preparation note. The results of the run are at the top of this file and in [JOB.md](JOB.md).
 
 Why this path and not the trade or the full refresh:
 
