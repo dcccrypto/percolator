@@ -13452,7 +13452,12 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
     header.insurance = V16PodU128::new(insurance);
     header.negative_pnl_account_count = V16PodU64::new(1); // the one negative account
 
-    let mut acct_header = PortfolioAccountV16Account::default();
+    // A canonically initialised empty account (EMPTY legs, a_basis = ADL_ONE), the only empty
+    // account the engine can produce. `PortfolioAccountV16Account::default()` is all-zero bytes:
+    // its legs decode as inactive-but-non-empty (`HiddenLeg`) and `validate_with_market` rejects it
+    // (`ProvenanceMismatch`), so every path that reads the legs (the partial-settlement hlock mark,
+    // `mark_bankruptcy_hlock_for_account`) failed closed and `result.is_ok()` failed.
+    let mut acct_header = empty_account_fixture(market_id, 2);
     acct_header.capital = V16PodU128::new(capital);
     acct_header.pnl = V16PodI128::new(pnl);
 
