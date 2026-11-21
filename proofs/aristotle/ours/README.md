@@ -2,7 +2,7 @@
 
 A full resolved close never pays out more than the pool, for any number of accounts and any close order. Seven properties (RC1–RC7) were proved on Harmonic's Aristotle; none were refuted, and the invariant was used as written. The run took about 87 minutes.
 
-These proofs are of a Rust transcription of the close path, not of the engine source itself. They assume the `wide_mul_div_floor_u128` contract. Kani already covers the same path for one or two accounts with bounded amounts.
+These proofs are of a Rust transcription of the close path, not of the engine source itself. Only `wide_math.rs` and the rate/claimable/receipt-payment helpers are the engine's own text, byte for byte; the three functions that move the payout (`create_resolved_payout_receipt_if_needed`, the close tail, the top-up) are rewritten over plain structs, with the engine's account views, byte decoding, the receipt-clearing call `clear_fully_diluted_resolved_receipt_if_terminal`, the snapshot initialisation, the validation calls and everything before the close tail removed. RC3 (never returns an error) therefore does not carry over to the engine, and nothing here shows the engine always reaches the close in a state that satisfies the invariant. The proofs assume the `wide_mul_div_floor_u128` contract. Kani already covers the same path for one or two accounts with bounded amounts. Per-function differences with the actual diff hunks: [SLICE-DIFF.md](SLICE-DIFF.md). A stronger slice generated from the engine text is in progress under `../ours2/`.
 
 Details, credits, timing and the full list of caveats are in [JOB.md](JOB.md). The Lean statements Aristotle returned are in [result/](result/).
 
