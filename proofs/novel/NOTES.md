@@ -41,3 +41,11 @@ Times are `date -u` output at the moment of writing.
   fixture in one constructor "avoiding three full validation scans in one CBMC query"), so a
   verdict from them cannot be imported as an all-states summary.
 - Aristotle: no job submitted by this session; 0 credits used.
+- 05:19 Independent audit (round 1) returned: TWO REPRODUCED SOUNDNESS HOLES in the trusted
+  translator (a reference stored through a pointer into another argument's memory; string/char
+  literals with brackets hiding a `&mut` argument), plus 4 risks. Neither pattern occurs in the
+  engine's MIR (auditor's scans: 0 and 0 of 12,848 calls). All fixed; details in AUDIT-EXTRACTOR.md.
+- 05:21 After the fixes: summary table identical (178, 0 changed), generated Lean byte-identical,
+  the auditor's 37 cases as a regression test: 0 unsound. Mutation tests: 0 unsound of 18.
+- 05:22 Round-2 audit started against the fixed translator. T15.header frontier written
+  (`out/T15-header-frontier.md`): 16 leaf functions.

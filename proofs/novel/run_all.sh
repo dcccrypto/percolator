@@ -54,4 +54,6 @@ python3 "$HERE/mirflow/ledger_run.py" --mir "$WORK/mir/$TAG.mir" --spans-mir "$W
   tail -1 "$OUT/lake_build.log" )
 ( cd "$HERE/lean" && "$LEAN_TC/bin/lake" env "$LEAN_TC/bin/lean" MirFlow/All$GENNS.lean > "$OUT/axioms.txt" 2>&1 || true )
 python3 "$HERE/mirflow/make_results.py" "$OUT" $GENNS > "$OUT/RESULTS.md"
+python3 "$HERE/mirflow/frontier.py" --mir "$WORK/mir/$TAG.mir" --src "$SRC/src/v16.rs" \
+  --fn close_resolved_account_not_atomic --check 0 > "$OUT/T15-header-frontier.md"
 echo "done: see $OUT/RESULTS.md"

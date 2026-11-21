@@ -78,6 +78,8 @@ def main():
             return False
         return any(visit(p) for p in list(summ))
     cyclic = cyc()
+    if cyclic:
+        raise SystemExit("the callee-summary graph is cyclic; refusing to generate modules")
 
     rows = list(csv.reader(open(a.ledger), delimiter="\t"))
     results = []

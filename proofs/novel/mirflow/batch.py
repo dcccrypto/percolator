@@ -115,8 +115,10 @@ def summarize(fns, unsupported):
                 if s["est"] or s["pres"] or old is not None:
                     summ[path] = s
                     changed = True
-        if not changed or rounds > 50:
+        if not changed:
             break
+        if rounds > 50:
+            raise SystemExit("summary iteration did not converge in 50 rounds")
     return summ, rounds
 
 

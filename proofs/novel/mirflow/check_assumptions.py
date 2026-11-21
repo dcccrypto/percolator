@@ -57,6 +57,19 @@ report("A3 no clock, randomness, environment, file or network access (std::time,
 report("A3 no extern blocks / FFI", scan(r"\bextern\s+\"|\bextern\s*\{"))
 
 
+report("A6 no user type named `Result` (the tool reads `Result::Ok/Err` as core's)",
+       scan(r"\b(enum|struct|union|trait)\s+Result\b"))
+report("A5 no method of the market view has type parameters of its own (`fn name<T..>` inside "
+       "`impl<'a, T> MarketGroupV16ViewMut<'a, T>`); lifetimes are allowed",
+       [h for h in (lambda: [
+           "src/v16.rs:%d: %s" % (i + 1, l.strip()[:100])
+           for i, l, inside in (lambda ls: [
+               (i, l, ins) for i, (l, ins) in enumerate(zip(ls, __import__("itertools").accumulate(
+                   ls, lambda acc, x: True if x.startswith("impl<'a, T> MarketGroupV16ViewMut<'a, T> {")
+                   else (False if x.startswith("}") else acc), initial=False)))])(files["src/v16.rs"])
+           if inside and re.search(r"\bfn\s+\w+\s*<\s*(?!')[A-Za-z]", strip_comment(l))])()])
+
+
 def struct_fields(name):
     lines = files["src/v16.rs"]
     for i, l in enumerate(lines):

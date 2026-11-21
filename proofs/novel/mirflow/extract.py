@@ -32,16 +32,31 @@ ACCT_CHECK_FN = {
 }
 BRANCH_RE = re.compile(r"^<Result<.*> as Try>::branch$")
 RESIDUAL_RE = re.compile(r"^<Result<.*> as FromResidual<Result<Infallible, .*>>>::from_residual$")
-RESULT_VARIANT_RE = re.compile(r"^(?:const )?(?:[\w]+::)*Result::<.*?>::(Ok|Err)\b")
+RESULT_VARIANT_RE = re.compile(r"^(?:const )?(?:core::result::)?Result::<.*?>::(Ok|Err)\b")
 
 
 class Unsupported(Exception):
     pass
 
 
+PRIMS = {"u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+         "bool", "char"}
+
+
 def is_plain(t):
-    """A type that cannot carry a pointer into the world."""
-    return not any(x in t for x in ("&", "'", "*", "{", "dyn ", "fn(", "impl "))
+    """A type that cannot carry a pointer into the world. Whitelist: primitives, the impl's
+    parameter `T` (assumption A5), concrete named types without lifetime parameters, and arrays,
+    tuples and generic applications of those. A bare short all-capitals identifier other than `T`
+    is taken to be a type parameter and is not plain; so is any associated-type projection."""
+    if any(x in t for x in ("&", "'", "*", "{", "dyn ", "fn(", "impl ", " as ")):
+        return False
+    for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*", t):
+        if "::" in ident or ident in PRIMS or ident == "T":
+            continue
+        if len(ident) >= 3 and any(c.islower() for c in ident):
+            continue
+        return False
+    return True
 
 
 def is_shared_ref(t):
@@ -50,6 +65,33 @@ def is_shared_ref(t):
 
 def cannot_write(t):
     return is_plain(t) or is_shared_ref(t) or bool(READONLY_BYVALUE.match(t))
+
+
+def mask_literals(s):
+    """Replace the contents of string and char literals by dots, so that brackets, commas and
+    things that look like locals inside a literal cannot affect parsing. A quote that opens a
+    lifetime (`'a`, `'_`) is not a char literal: it is not closed after one character."""
+    out, i, n = [], 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == '"':
+            j = i + 1
+            while j < n and s[j] != '"':
+                j += 2 if s[j] == "\\" else 1
+            if j >= n:
+                raise Unsupported("unterminated string literal: " + s[:80])
+            out.append('"' + "." * (j - i - 1) + '"')
+            i = j + 1
+            continue
+        if c == "'":
+            m = re.match(r"'(\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|.)|[^\\'])'", s[i:])
+            if m:
+                out.append("'" + "." * (len(m.group(0)) - 2) + "'")
+                i += len(m.group(0))
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def split_top(s, sep=","):
@@ -62,12 +104,16 @@ def split_top(s, sep=","):
             depth -= 1
         elif c == ">" and not (i > 0 and s[i - 1] in "-="):
             depth -= 1
+        if depth < 0:
+            raise Unsupported("unbalanced brackets: " + s[:80])
         if c == sep and depth == 0:
             out.append(cur.strip())
             cur = ""
         else:
             cur += c
         i += 1
+    if depth != 0:
+        raise Unsupported("unbalanced brackets: " + s[:80])
     if cur.strip():
         out.append(cur.strip())
     return out
@@ -97,6 +143,8 @@ def strip_operand(op):
 
 class Fn:
     def __init__(self, header, body_lines):
+        header = mask_literals(header)
+        body_lines = [mask_literals(l) for l in body_lines]
         self.header = header
         m = re.match(r"^fn (.*?)\((.*)\) -> (.*) \{$", header)
         if not m:
@@ -233,16 +281,19 @@ class Translator:
                 bl = bare_local(place)
                 if bl is not None:
                     self.assigns.setdefault(bl, []).append(rhs)
-                elif "*" not in place:
+                elif "(*" not in place:
                     ls = locals_in(place)
                     if ls:
                         self.partial.add(ls[0])
-                if rhs.startswith("&mut ") or rhs.startswith("&raw ") or rhs.startswith("&two_phase "):
-                    pl = rhs.split(" ", 2)[-1] if rhs.startswith("&raw ") else rhs.split(" ", 1)[1]
-                    if "*" not in pl:
+                r0 = rhs[len("no_retag "):] if rhs.startswith("no_retag ") else rhs
+                if r0.startswith("&mut ") or r0.startswith("&raw ") or r0.startswith("&two_phase "):
+                    pl = r0.split(" ", 2)[-1] if r0.startswith("&raw ") else r0.split(" ", 1)[1]
+                    if "(*" not in pl:
                         ls = locals_in(pl)
                         if ls:
                             self.escaped.add(ls[0])
+                # (a borrow is always the whole rvalue in MIR; `&mut` elsewhere in an rvalue is
+                # part of a printed type, e.g. `copy ((*_1).0: &mut Header)`)
         for r in self.roots:
             if r in self.assigns or r in self.partial or r in self.escaped:
                 raise Unsupported("argument _%d is reassigned or mutably borrowed" % r)
@@ -317,13 +368,70 @@ class Translator:
             return
         stmts.append(("havoc", l))
 
-    def store(self, place, stmts):
-        """Effects of writing to PLACE (not a bare local)."""
+    def place_type(self, place):
+        """Printed type of a place: a bare local's declared type, or the annotation of the
+        outermost projection `(... : TYPE)`. None if it cannot be read."""
+        l = bare_local(place)
+        if l is not None:
+            return self.fn.types.get(l)
+        if not (place.startswith("(") and place.endswith(")")):
+            return None
+        depth, last = 0, None
+        inner = place[1:-1]
+        for i, c in enumerate(inner):
+            if c in "([{<":
+                depth += 1
+            elif c in ")]}" or (c == ">" and not (i > 0 and inner[i - 1] in "-=")):
+                depth -= 1
+            elif depth == 0 and inner.startswith(": ", i):
+                last = i
+        return inner[last + 2:] if last is not None else None
+
+    def rvalue_plain(self, rhs):
+        """The value of this rvalue cannot carry a pointer into the world."""
+        r = rhs.strip()
+        if r.startswith("no_retag "):
+            r = r[len("no_retag "):]
+        if r.startswith("&"):
+            return False
+        if r.startswith("const ") and not locals_in(r):
+            return True
+        if re.match(r"^(Len|discriminant)\(", r):
+            return True
+        # arithmetic, bit and comparison operators yield integers, bools or (integer, bool)
+        if re.match(r"^(Add|Sub|Mul|Shl|Shr)(Unchecked|WithOverflow)?\(|^(Div|Rem|BitXor|BitAnd|BitOr|"
+                    r"Eq|Lt|Le|Ne|Ge|Gt|Cmp|Not|Neg)\(", r):
+            return True
+        for pfx in ("copy ", "move "):
+            if r.startswith(pfx) and " as " not in r:
+                pl = r[len(pfx):].strip()
+                # an element of an array or slice is plain if the indexed type is
+                while pl.endswith("]") and not pl.startswith("["):
+                    depth = 0
+                    for i in range(len(pl) - 1, -1, -1):
+                        depth += pl[i] == "]"
+                        depth -= pl[i] == "["
+                        if depth == 0:
+                            break
+                    pl = pl[:i]
+                t = self.place_type(pl)
+                return t is not None and is_plain(t)
+        # anything else (aggregates, casts, arithmetic): plain only if every local it mentions is
+        return all(is_plain(self.fn.types.get(l, "&")) for l in locals_in(r))
+
+    def store(self, place, stmts, rhs=None):
+        """Effects of writing to PLACE (not a bare local). `rhs` is the stored rvalue when known."""
         ls = locals_in(place)
         if not ls:
             raise Unsupported("place: " + place)
         base = ls[0]
-        if "*" in place:
+        if "(*" in place:
+            # A reference stored through a pointer could make memory behind one argument reach
+            # memory behind another; the per-root reasoning below would then be wrong. Such
+            # functions are not analysed.
+            if rhs is None or not self.rvalue_plain(rhs):
+                raise Unsupported("store of a possibly non-plain value through a pointer: %s = %s"
+                                  % (place[:60], (rhs or "?")[:60]))
             same = self.same_for(self.prov(base))
             if same != self.checks:
                 stmts.append(("write", same))
@@ -346,16 +454,18 @@ class Translator:
                 if bl not in self.escaped:
                     stmts.append(("havoc", bl))
             else:
-                self.store(m.group(1), stmts)
+                self.store(m.group(1), stmts, "const 0_u8")
             return
         m = re.fullmatch(r"discriminant\((.*)\) = (\d+);", s)
         if m:
+            # SetDiscriminant takes a variant index, which need not be the discriminant value:
+            # record nothing about the local.
             bl = bare_local(m.group(1))
             if bl is not None:
                 if bl not in self.escaped:
-                    stmts.append(("setD", bl, int(m.group(2))))
+                    stmts.append(("havoc", bl))
             else:
-                self.store(m.group(1), stmts)
+                self.store(m.group(1), stmts, "const 0_u8")
             return
         sa = split_assign(s)
         if sa is None or not s.endswith(";"):
@@ -365,7 +475,7 @@ class Translator:
         if bl is not None:
             self.assign_local(bl, rhs, stmts)
         else:
-            self.store(place, stmts)
+            self.store(place, stmts, rhs)
 
     def call(self, b, dest, fnpath, args, target, stmts, extra_blocks):
         """Returns the terminator for a call; may append a synthetic block for a projected destination."""
@@ -374,7 +484,8 @@ class Translator:
         dl = bare_local(dest)
         if dl is None or dl in self.escaped:
             if dl is None:
-                self.store(dest, post)
+                dt = self.place_type(dest)
+                self.store(dest, post, "const 0_u8" if (dt is not None and is_plain(dt)) else None)
             dl = self.new_local()
         if post:
             nb = len(fn.blocks) + len(extra_blocks)
@@ -495,7 +606,7 @@ class Translator:
         # no store through a pointer in block b before the check call (calls end blocks)
         for s in fn.blocks[b][0]:
             sa2 = split_assign(s)
-            if sa2 is not None and bare_local(sa2[0]) is None and "*" in sa2[0]:
+            if sa2 is not None and bare_local(sa2[0]) is None and "(*" in sa2[0]:
                 return False
         return True
 
