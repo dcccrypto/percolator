@@ -45,6 +45,7 @@ statement about the engine function only together with items 1 and 2.
 | A5 | The generic parameter `T` is not a reference type and holds no references. | It is bounded by `MarketWrapperPod: bytemuck::Pod` (`src/v16.rs:5786`), and the only instantiation used is `()` (Toly's `summaries/s2.md`). |
 | A6 | Two facts about `core`: `<Result<T,E> as Try>::branch` returns `Continue` (discriminant 0) for `Ok` and `Break` (1) for `Err`; `<Result<T,F> as FromResidual<Result<Infallible,E>>>::from_residual` returns `Err`. Discriminants: `Ok = 0`, `Err = 1`. | `core::result` source; declaration order of the variants. |
 | A7 | `bytemuck`'s safe functions do what their signatures say. | Not examined. |
+| A9 | Printed names denote what the tool takes them for: the crate defines no item named `Try`, `FromResidual`, `Infallible`, `ControlFlow`, `Result`, `Ok` or `Err`, and exactly one of each view type (rustc prints the shortest unambiguous path, so a homonym would be misread; audit round 2). | `check_assumptions.py`, on the source and on the MIR. |
 | A8 | Unwinding never ends in a normal return of the same function (cleanup blocks do not reach `return`). | MIR well-formedness. |
 
 From A1 and A2 follows the rule used everywhere: **a call or statement can change the world only
@@ -92,7 +93,7 @@ Statements.
 | `StorageLive`, `FakeRead`, `PlaceMention`, `AscribeUserType`, `Coverage`, `Retag`, `ConstEvalCounter`, `nop`, `assume(..)` | nothing |
 | `StorageDead(_l)`, `Deinit(_l)`, `discriminant(_l) = N` | `havoc l` |
 | `_l = copy _m`, `_l = move _m`, `_l = discriminant(_m)` | `copy l m` |
-| `_l = Result::<..>::Ok(..)` / `Err(..)` (also printed as a constant) | `setD l 0` / `setD l 1` |
+| `_l = Result::<ARGS>::Ok(..)` / `Err(..)` with `ARGS` matched by brackets (also printed as a constant) | `setD l 0` / `setD l 1` |
 | `_l = const N_<int>` , `const true/false` | `setD l N` / `1` / `0` |
 | any other assignment to a bare local | `havoc l` |
 | assignment to a projection of `_l` without a dereference | `havoc l` |
@@ -142,6 +143,20 @@ The meaning of `call` in Lean: locals other than the destination are unchanged; 
 keep their value; if `uncond` or the result has discriminant 0, checks in `pres` that held before
 hold after and checks in `est` hold after.
 
+Clarifications added after the independent re-implementation (section 7):
+
+- Operands may carry a `no_retag` prefix; it is ignored.
+- "Mutably borrowed" means `&mut`/`&raw` of a place **without** a dereference; `&mut (*_1)` is a
+  reborrow, not a borrow of `_1`.
+- A reborrow chain: the root itself, or single-assigned locals whose right-hand side is
+  `&(*_x)`, `&mut (*_x)`, `copy/move (*_x)` or `copy/move _x`, ending at the root.
+- A `havoc` of an escaped local is omitted (nothing is recorded about it anyway). A read of an
+  escaped local is `havoc F; <read F>` for a fresh `F` (numbered 100001, 100002, … in order).
+- Entries of `pres` that are already in `same` or `est` are omitted from the `call` instruction.
+- The shape and account rules take precedence: a summary is consulted only when neither applied.
+- In a summary, check `j ≥ 1` refers to the callee's j-th argument of role `account`.
+- `&'a mut T` is a mutable reference, not a shared one.
+
 ## 5. What a generated theorem says
 
 `Returns chk ex cfg w0 b w1 env1`: the abstract program, started in world `w0`, returns from block
@@ -163,3 +178,15 @@ hold after and checks in `est` hold after.
 - Preservation of a check through code that writes the market but keeps the predicate true
   (the `[real]` rows) is out of reach by construction.
 - Panics, compute limits and termination are not addressed: every statement is "if it returns Ok".
+
+## 7. Independent re-implementation (N-version check)
+
+A separate agent wrote a second translator from this file and `Core.lean` alone, without reading
+`extract.py`, and compared its output with the generated `cfg` of all 41 functions in `mir/`
+(2,627 blocks). Reported result: 2,441 blocks identical; the 186 others fall into three families
+(a `pres` entry already in `same`; a `havoc` of an escaped local; one extra `havoc` of a fresh
+local), in each of which the two outputs mean the same or `extract.py` is the more conservative;
+**no block where `extract.py` is less conservative than the rules** (no missing `write`, no larger
+`same`, no extra `est`, no differing edge). The gaps it found in this file are the clarifications
+at the end of section 4. Its files were left in `/tmp/novel-nversion/` and are not part of the
+repository; the comparison is reported, not reproduced by `run_all.sh`.

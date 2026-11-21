@@ -61,6 +61,9 @@ CASES = {
     "audit_c3": ("1", "", True, "helper checks its 2nd account; caller passes them swapped; asking for the right one"),
     "audit_c3#2": ("2", "", False, "same, asking for the wrong account"),
     "audit_c5": ("0", "", True, "helper panics on a failed check (harmless; a refusal is only imprecise)"),
+    "r2_c3": ("0", "", False, "ROUND 2 HOLE 1 (fixed): `Ok(Err::<(), E>)` (fn item `Err` as payload) was read as `Err`"),
+    "r2_c3#p": ("", "0", False, "same, preservation asked"),
+    "r2_c4": ("0", "", False, "ROUND 2 HOLE 1 (fixed): caller of the above through its summary"),
     "audit_c5w": ("0", "", False, "same, then a header write"),
 }
 

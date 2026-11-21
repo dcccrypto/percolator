@@ -30,10 +30,61 @@ ACCT_CHECK_FN = {
     "mut": "PortfolioV16ViewMut::<'_>::validate_with_market::<T>",
     "view": "PortfolioV16View::<'_>::validate_with_market::<T>",
 }
-BRANCH_RE = re.compile(r"^<Result<.*> as Try>::branch$")
-RESIDUAL_RE = re.compile(r"^<Result<.*> as FromResidual<Result<Infallible, .*>>>::from_residual$")
-RESULT_VARIANT_RE = re.compile(r"^(?:const )?(?:core::result::)?Result::<.*?>::(Ok|Err)\b")
 
+def _close_angle(s, i):
+    """s[i] is '<'; index of the matching '>' (an arrow `->` is not a bracket), or -1."""
+    depth = 0
+    for k in range(i, len(s)):
+        c = s[k]
+        if c == "<":
+            depth += 1
+        elif c == ">" and not (k > 0 and s[k - 1] in "-="):
+            depth -= 1
+            if depth == 0:
+                return k
+    return -1
+
+
+def result_variant(rhs):
+    """'Ok' / 'Err' if rhs is `[const ][core::result::]Result::<ARGS>::Ok|Err...` where ARGS is
+    the whole bracket-matched generic argument list; else None. (Audit round 2, finding 1: a
+    lazy regex stopped inside ARGS when a payload type was the fn item `Result::<..>::Err`.)"""
+    r = rhs
+    if r.startswith("const "):
+        r = r[6:]
+    if r.startswith("core::result::"):
+        r = r[len("core::result::"):]
+    if not r.startswith("Result::<"):
+        return None
+    k = _close_angle(r, len("Result::"))
+    if k < 0:
+        return None
+    m = re.match(r"::(Ok|Err)(\(|$)", r[k + 1:])
+    return m.group(1) if m else None
+
+
+def is_result_branch(fnpath):
+    """Exactly `<Result<ARGS> as Try>::branch` with ARGS bracket-matched."""
+    if not fnpath.startswith("<Result<"):
+        return False
+    k = _close_angle(fnpath, len("<Result"))
+    return k > 0 and fnpath[k + 1:] == " as Try>::branch"
+
+
+def is_result_residual(fnpath):
+    """Exactly `<Result<A> as FromResidual<Result<Infallible, E>>>::from_residual`."""
+    if not fnpath.startswith("<Result<"):
+        return False
+    k = _close_angle(fnpath, len("<Result"))
+    if k < 0:
+        return False
+    rest = fnpath[k + 1:]
+    pfx = " as FromResidual<Result<Infallible, "
+    if not rest.startswith(pfx):
+        return False
+    a = len(" as FromResidual")
+    k2 = _close_angle(rest, a)
+    return k2 > 0 and rest[k2 + 1:] == ">::from_residual"
 
 class Unsupported(Exception):
     pass
@@ -179,6 +230,9 @@ class Fn:
                 if not s or s.startswith("//"):
                     continue
                 self.blocks[cur][0].append(s)
+        for ln in body_lines:
+            if "as core::ops::Try>" in ln or "as core::ops::FromResidual<" in ln:
+                raise Unsupported("core's Try/FromResidual printed with a path: a crate item shadows the name")
         for b, (st, _, cl) in list(self.blocks.items()):
             if not st:
                 raise Unsupported("empty block bb%d" % b)
@@ -355,9 +409,9 @@ class Translator:
         if m:
             stmts.append(("copy", l, self.src(int(m.group(1)), stmts)))
             return
-        rm = RESULT_VARIANT_RE.match(rhs)
-        if rm:
-            stmts.append(("setD", l, 0 if rm.group(1) == "Ok" else 1))
+        rv = result_variant(rhs)
+        if rv:
+            stmts.append(("setD", l, 0 if rv == "Ok" else 1))
             return
         cm = re.fullmatch(r"const (\d+)_(?:u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize)", rhs)
         if cm and int(cm.group(1)) < 2 ** 62:
@@ -494,9 +548,9 @@ class Translator:
         places = [strip_operand(a) for a in args]
         arg_locals = [bare_local(p) if p is not None else None for p in places]
 
-        if BRANCH_RE.match(fnpath) and len(args) == 1 and arg_locals[0] is not None:
+        if is_result_branch(fnpath) and len(args) == 1 and arg_locals[0] is not None:
             return ("branch", dl, self.src(arg_locals[0], stmts), target)
-        if RESIDUAL_RE.match(fnpath) and len(args) == 1:
+        if is_result_residual(fnpath) and len(args) == 1:
             return ("residual", dl, target)
 
         # what the call may write, by the types of what it is given
@@ -605,6 +659,8 @@ class Translator:
             return False
         # no store through a pointer in block b before the check call (calls end blocks)
         for s in fn.blocks[b][0]:
+            if s.startswith("Deinit(") and "(*" in s:
+                return False
             sa2 = split_assign(s)
             if sa2 is not None and bare_local(sa2[0]) is None and "(*" in sa2[0]:
                 return False

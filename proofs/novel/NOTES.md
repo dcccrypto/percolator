@@ -49,3 +49,11 @@ Times are `date -u` output at the moment of writing.
   the auditor's 37 cases as a regression test: 0 unsound. Mutation tests: 0 unsound of 18.
 - 05:22 Round-2 audit started against the fixed translator. T15.header frontier written
   (`out/T15-header-frontier.md`): 16 leaf functions.
+- 05:25 Ran the tool on our fork c38b6b1e: 33 header / 12 account rows. Assumption check caught
+  `static AtomicU64` behind `cfg(feature = "x1-diff")`; the check now reads the MIR of the build.
+- 05:30 N-version check returned: 2,627 blocks, none where extract.py is less conservative.
+- 05:35 Our fork's tests, base vs T15 patch (own target dirs): 1,480 passed / 0 failed both.
+- 05:47 Audit round 2 returned: TWO MORE HOLES (lazy regex reading `Ok(Err::<..>)` as Err;
+  crate-root homonyms of trusted names). Not triggered by the engine. Fixed; A9 added.
+- 05:49 Everything rerun after the fixes: summaries 178/0 changed, 32+11, 39, 33+12, both patch
+  theorems, mutation 0/18, regression 0/40.

@@ -1,7 +1,7 @@
-ℹ [2/158] Replayed MirFlow.Core
+ℹ [2/160] Replayed MirFlow.Core
 info: MirFlow/Core.lean:721:0: 'MirFlow.checkCert_sound' depends on axioms: [propext, Quot.sound]
 info: MirFlow/Core.lean:722:0: 'MirFlow.call_of_cert' depends on axioms: [propext, Quot.sound]
-ℹ [62/158] Replayed MirFlow.AllGenAuditScan
+ℹ [63/160] Replayed MirFlow.AllGenAuditScan
 info: MirFlow/AllGenAuditScan.lean:62:0: 'MirFlow.GenAuditScan.S_accrue_asset_path_to_not_atomic.main' depends on axioms: [propext, Quot.sound]
 info: MirFlow/AllGenAuditScan.lean:63:0: 'MirFlow.GenAuditScan.S_accrue_asset_to_not_atomic.main' depends on axioms: [propext, Quot.sound]
 info: MirFlow/AllGenAuditScan.lean:64:0: 'MirFlow.GenAuditScan.S_add_account_source_positive_pnl_not_atomic.main' depends on axioms: [propext, Quot.sound]
@@ -72,7 +72,7 @@ info: MirFlow/AllGenAuditScan.lean:117:0: 'MirFlow.GenAuditScan.T15_account_chec
 info: MirFlow/AllGenAuditScan.lean:118:0: 'MirFlow.GenAuditScan.T15_account_conditional.main' depends on axioms: [propext, Quot.sound]
 info: MirFlow/AllGenAuditScan.lean:119:0: 'MirFlow.GenAuditScan.T15_header_checked_paths.main' depends on axioms: [propext, Quot.sound]
 info: MirFlow/AllGenAuditScan.lean:120:0: 'MirFlow.GenAuditScan.T15_header_conditional.main' depends on axioms: [propext, Quot.sound]
-ℹ [110/158] Replayed MirFlow.AllGenRc38b6b1e
+ℹ [111/160] Replayed MirFlow.AllGenRc38b6b1e
 info: MirFlow/AllGenRc38b6b1e.lean:50:0: 'MirFlow.GenRc38b6b1e.S_add_account_source_positive_pnl_not_atomic.main' depends on axioms: [propext, Quot.sound]
 info: MirFlow/AllGenRc38b6b1e.lean:51:0: 'MirFlow.GenRc38b6b1e.S_canonicalize_retired_empty_asset_slot_not_atomic.main' depends on axioms: [propext, Quot.sound]
 info: MirFlow/AllGenRc38b6b1e.lean:52:0: 'MirFlow.GenRc38b6b1e.S_charge_account_backing_fee_not_atomic.main' depends on axioms: [propext, Quot.sound]
@@ -133,7 +133,7 @@ info: MirFlow/AllGenRc38b6b1e.lean:93:0: 'MirFlow.GenRc38b6b1e.T15_account_check
 info: MirFlow/AllGenRc38b6b1e.lean:94:0: 'MirFlow.GenRc38b6b1e.T15_account_conditional.main' depends on axioms: [propext, Quot.sound]
 info: MirFlow/AllGenRc38b6b1e.lean:95:0: 'MirFlow.GenRc38b6b1e.T15_header_checked_paths.main' depends on axioms: [propext, Quot.sound]
 info: MirFlow/AllGenRc38b6b1e.lean:96:0: 'MirFlow.GenRc38b6b1e.T15_header_conditional.main' depends on axioms: [propext, Quot.sound]
-ℹ [156/158] Replayed MirFlow.AllGen
+ℹ [157/160] Replayed MirFlow.AllGen
 info: MirFlow/AllGen.lean:47:0: 'MirFlow.Gen.S_add_account_source_positive_pnl_not_atomic.main' depends on axioms: [propext, Quot.sound]
 info: MirFlow/AllGen.lean:48:0: 'MirFlow.Gen.S_canonicalize_retired_empty_asset_slot_not_atomic.main' depends on axioms: [propext, Quot.sound]
 info: MirFlow/AllGen.lean:49:0: 'MirFlow.Gen.S_canonicalize_spent_backing_history_not_atomic.main' depends on axioms: [propext, Quot.sound]
@@ -181,6 +181,8 @@ info: MirFlow/AllGen.lean:87:0: 'MirFlow.Gen.T15_account_checked_paths.main' dep
 info: MirFlow/AllGen.lean:88:0: 'MirFlow.Gen.T15_account_conditional.main' depends on axioms: [propext, Quot.sound]
 info: MirFlow/AllGen.lean:89:0: 'MirFlow.Gen.T15_header_checked_paths.main' depends on axioms: [propext, Quot.sound]
 info: MirFlow/AllGen.lean:90:0: 'MirFlow.Gen.T15_header_conditional.main' depends on axioms: [propext, Quot.sound]
-ℹ [157/158] Replayed MirFlow.AllGenT15Patch
+ℹ [158/160] Replayed MirFlow.AllGenT15PatchRc38b6b1e
+info: MirFlow/AllGenT15PatchRc38b6b1e.lean:2:0: 'MirFlow.GenT15PatchRc38b6b1e.T15_patched.main' depends on axioms: [propext, Quot.sound]
+ℹ [159/160] Replayed MirFlow.AllGenT15Patch
 info: MirFlow/AllGenT15Patch.lean:2:0: 'MirFlow.GenT15Patch.T15_patched.main' depends on axioms: [propext, Quot.sound]
-Build completed successfully (158 jobs).
+Build completed successfully (160 jobs).

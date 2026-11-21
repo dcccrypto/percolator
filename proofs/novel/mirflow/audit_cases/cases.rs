@@ -248,3 +248,21 @@
         other.header.asset_slot_capacity.bytes = [0xff; 4];
         Ok(())
     }
+    // ---- audit round 2, finding 1 ----
+    pub fn r2_c3(&mut self, n: u8) -> V16Result<()> {
+        self.header.asset_slot_capacity.bytes = [0xff; 4];
+        let mut r = Err(V16Error::LockActive);
+        let mut i = 0u8;
+        while i < n {
+            r = Ok(Err::<(), V16Error>);
+            i += 1;
+        }
+        match r {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+    pub fn r2_c4(&mut self) -> V16Result<()> {
+        self.r2_c3(1)?;
+        Ok(())
+    }

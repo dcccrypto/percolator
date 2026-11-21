@@ -36,6 +36,9 @@
 | audit_c3 | helper checks its 2nd account; caller passes them swapped; asking for the right one | est 1 | certified | certified | ok |
 | audit_c3 | same, asking for the wrong account | est 2 | refused | refused | ok |
 | audit_c5 | helper panics on a failed check (harmless; a refusal is only imprecise) | est 0 | certified | refused | imprecise |
+| r2_c3 | ROUND 2 HOLE 1 (fixed): `Ok(Err::<(), E>)` (fn item `Err` as payload) was read as `Err` | est 0 | refused | refused | ok |
+| r2_c3 | same, preservation asked | pres 0 | refused | refused | ok |
+| r2_c4 | ROUND 2 HOLE 1 (fixed): caller of the above through its summary | est 0 | refused | refused | ok |
 | audit_c5w | same, then a header write | est 0 | refused | refused | ok |
 
-unsound answers: 0 of 37 cases
+unsound answers: 0 of 40 cases

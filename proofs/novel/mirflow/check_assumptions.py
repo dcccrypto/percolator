@@ -77,15 +77,41 @@ report("A3 no extern blocks / FFI", scan(r"\bextern\s+\"|\bextern\s*\{"))
 
 report("A6 no user type named `Result` (the tool reads `Result::Ok/Err` as core's)",
        scan(r"\b(enum|struct|union|trait)\s+Result\b"))
-report("A5 no method of the market view has type parameters of its own (`fn name<T..>` inside "
-       "`impl<'a, T> MarketGroupV16ViewMut<'a, T>`); lifetimes are allowed",
-       [h for h in (lambda: [
-           "src/v16.rs:%d: %s" % (i + 1, l.strip()[:100])
-           for i, l, inside in (lambda ls: [
-               (i, l, ins) for i, (l, ins) in enumerate(zip(ls, __import__("itertools").accumulate(
-                   ls, lambda acc, x: True if x.startswith("impl<'a, T> MarketGroupV16ViewMut<'a, T> {")
-                   else (False if x.startswith("}") else acc), initial=False)))])(files["src/v16.rs"])
-           if inside and re.search(r"\bfn\s+\w+\s*<\s*(?!')[A-Za-z]", strip_comment(l))])()])
+def own_type_params():
+    hits, inside = [], False
+    for i, l in enumerate(files["src/v16.rs"], 1):
+        if l.startswith("impl<'a, T> MarketGroupV16ViewMut<'a, T> {"):
+            inside = True
+        elif l.startswith("}"):
+            inside = False
+        if inside:
+            m = re.search(r"\bfn\s+\w+\s*<([^>]*)>", strip_comment(l))
+            if m and any(not q.strip().startswith("'") for q in m.group(1).split(",") if q.strip()):
+                hits.append("src/v16.rs:%d: %s" % (i, l.strip()[:100]))
+    return hits
+
+
+report("A5 no method of the market view has type or const parameters of its own (lifetimes allowed)",
+       own_type_params())
+# Audit round 2, finding 2: rustc prints an item by its shortest unambiguous path, so a crate item
+# with the name of a trusted one would be read as the trusted one.
+report("A9 the crate defines or imports-as no item named Try, FromResidual, Infallible, ControlFlow, Result, Ok, Err",
+       scan(r"\b(trait|struct|enum|union|type|fn|mod|const|static)\s+(Try|FromResidual|Infallible|ControlFlow|Result|Ok|Err)\b"
+            r"|\bas\s+(Try|FromResidual|Infallible|ControlFlow|Result|Ok|Err)\b"))
+for nm in ("MarketGroupV16ViewMut", "MarketGroupV16View", "PortfolioV16View", "PortfolioV16ViewMut"):
+    defs = scan(r"\b(struct|enum|union|type|trait)\s+%s\b|\bas\s+%s\b" % (nm, nm))
+    good = len(defs) == 1 and defs[0].startswith("src/v16.rs:")
+    ok = ok and good
+    print("%s  A9 exactly one definition of `%s`, in src/v16.rs: %s" % ("PASS" if good else "FAIL", nm, defs))
+for nm in ("validate_shape", "validate_with_market", "as_view"):
+    print("INFO  definitions of `fn %s`: %s" % (nm, [h.split(": ")[0] for h in scan(r"\bfn\s+%s\b" % nm)]))
+if mir_path is not None:
+    q = []
+    with open(mir_path) as f:
+        for i, l in enumerate(f, 1):
+            if "as core::ops::Try>" in l or "as core::ops::FromResidual<" in l:
+                q.append("MIR:%d: %s" % (i, l.strip()[:100]))
+    report("A9 core's Try/FromResidual are printed unqualified in the MIR (no shadowing item)", q)
 
 
 def struct_fields(name):

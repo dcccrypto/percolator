@@ -11,7 +11,16 @@ PASS  A2 no raw pointers (*const, *mut, as_ptr, as_mut_ptr, addr_of)
 PASS  A3 no clock, randomness, environment, file or network access (std::time, rand, std::env, std::fs, std::net)
 PASS  A3 no extern blocks / FFI
 PASS  A6 no user type named `Result` (the tool reads `Result::Ok/Err` as core's)
-PASS  A5 no method of the market view has type parameters of its own (`fn name<T..>` inside `impl<'a, T> MarketGroupV16ViewMut<'a, T>`); lifetimes are allowed
+PASS  A5 no method of the market view has type or const parameters of its own (lifetimes allowed)
+PASS  A9 the crate defines or imports-as no item named Try, FromResidual, Infallible, ControlFlow, Result, Ok, Err
+PASS  A9 exactly one definition of `MarketGroupV16ViewMut`, in src/v16.rs: ["src/v16.rs:6231: pub struct MarketGroupV16ViewMut<'a, T> {"]
+PASS  A9 exactly one definition of `MarketGroupV16View`, in src/v16.rs: ["src/v16.rs:6226: pub struct MarketGroupV16View<'a, T> {"]
+PASS  A9 exactly one definition of `PortfolioV16View`, in src/v16.rs: ["src/v16.rs:6298: pub struct PortfolioV16View<'a> {"]
+PASS  A9 exactly one definition of `PortfolioV16ViewMut`, in src/v16.rs: ["src/v16.rs:6302: pub struct PortfolioV16ViewMut<'a> {"]
+INFO  definitions of `fn validate_shape`: ['src/v16.rs:9996', 'src/v16.rs:10378']
+INFO  definitions of `fn validate_with_market`: ['src/v16.rs:6475', 'src/v16.rs:6865']
+INFO  definitions of `fn as_view`: ['src/v16.rs:6290', 'src/v16.rs:6354']
+PASS  A9 core's Try/FromResidual are printed unqualified in the MIR (no shadowing item)
 PASS  A4 by-value view `MarketGroupV16View` holds only shared references: ["pub header: &'a MarketGroupV16HeaderAccount,", "pub markets: &'a [Market<T>],"]
 PASS  A4 by-value view `PortfolioV16View` holds only shared references: ["pub header: &'a PortfolioAccountV16Account,"]
 INFO  dependencies of the library: ['bytemuck = { version = "1.23", default-features = false, features = ["derive"] }']
