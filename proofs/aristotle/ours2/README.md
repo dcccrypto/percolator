@@ -2,7 +2,7 @@
 
 ## Result so far
 
-- **Nothing new is proved yet.** The v3 Aristotle job has not returned results (see [JOB.md](JOB.md)).
+- **Nothing new is proved yet.** The v3 Aristotle job (project `b2fa5632`, task `42085a7d`, submitted 2026-11-21 04:53:00Z) has not returned results (see [JOB.md](JOB.md)).
 - **F3 (`wide_mul_div_floor_u128`): proved (upstream Aristotle, add1d027; confirmed identical text).**
   Toly's `changed_fns.py`, run unchanged on `src/wide_math.rs` add1d027 → our c38b6b1e: the function's own text is the same, it reaches no changed or new function and names no changed type ([evidence](evidence/f3_changed_fns_add1d027_vs_c38b6b1e.txt)). No credits were spent on F3.
 - **No T15 row (the full resolved close) is attempted** in v3. A whole-method proof of the close is out of this budget (ROADMAP: 3 of 32 such properties for about 1,970 credits). What v3 asks for instead, and which rows it does and does not close, is in [LEDGER-MAP.md](LEDGER-MAP.md).
