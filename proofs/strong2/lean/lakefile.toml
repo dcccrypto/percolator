@@ -1,0 +1,6 @@
+name = "clauseflow"
+defaultTargets = ["ClauseFlow"]
+
+[[lean_lib]]
+name = "ClauseFlow"
+globs = ["ClauseFlow.+"]
