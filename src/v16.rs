@@ -10714,6 +10714,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(asset.stale_account_count_long.get() != 0 || asset.stale_account_count_short.get() != 0)
     }
 
+    /// upstream 5e3af071 `release_provider_principal_after`: fresh reserved backing that leaves
+    /// a domain without being consumed (an expiry or an impairment; a withdrawal subtracts its
+    /// own amount) takes provider principal with it, so the S10 mirror never counts principal
+    /// the provider has lost. Consumption moves backing to `spent` and leaves principal alone.
+    fn release_provider_principal_after(
+        &mut self,
+        domain: usize,
+        reserved_before: u128,
+        reserved_after: u128,
+    ) -> V16Result<()> {
+        let left = reserved_before.saturating_sub(reserved_after);
+        if left == 0 {
+            return Ok(());
+        }
+        self.adjust_provider_principal_for_domain(domain, left, false)
+    }
+
     /// S10: `delta` is added to (`add`) or saturating-subtracted from the principal mirror.
     fn adjust_provider_principal_for_domain(
         &mut self,
@@ -11527,13 +11544,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             0
         };
+        let source_before = self.source_credit_for_domain(domain)?;
         let (bucket, source) = V16Core::prepare_counterparty_backing_expiry_delta(
             self.backing_bucket_for_domain(domain)?,
-            self.source_credit_for_domain(domain)?,
+            source_before,
             now_slot,
         )?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
+        self.release_provider_principal_after(
+            domain,
+            source_before.fresh_reserved_backing_num,
+            source.fresh_reserved_backing_num,
+        )?;
         self.refresh_source_credit_domain_after_mutation(domain)?;
         if snapshot_captured {
             // upstream a7577b0b: principal released after the terminal snapshot
@@ -11853,9 +11876,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if amount == 0 {
             return Ok(());
         }
+        let source_before = self.source_credit_for_domain(domain)?;
         let (bucket, source) = V16Core::prepare_counterparty_lien_impair_delta(
             self.backing_bucket_for_domain(domain)?,
-            self.source_credit_for_domain(domain)?,
+            source_before,
             amount,
         )?;
         let (source, next_risk_epoch) = V16Core::prepare_source_credit_domain_recompute_for_epoch(
@@ -11871,6 +11895,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         .validate()?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
+        self.release_provider_principal_after(
+            domain,
+            source_before.fresh_reserved_backing_num,
+            source.fresh_reserved_backing_num,
+        )?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         Ok(())
     }
@@ -16150,7 +16179,50 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // claims instead of recreating ownerless source backing. Impaired
             // provider buckets likewise leave new losses as junior support.
             // (upstream 0b861efb)
-            self.credit_post_snapshot_residual_not_atomic(amount)?;
+            //
+            // upstream 5e3af071: except for what a provider fronted here and was not
+            // repaid. That part of the late debt is owed to the provider, so a terminal
+            // domain that is not Impaired takes min(provider receivable, provider
+            // principal - fresh reserved backing) as backing, until the payout snapshot
+            // is captured. The receivable alone over-counts (it includes consumed
+            // loser-paid backing), so it is capped by what the provider is still out.
+            // v2.2: "principal" is the S10 mirror; the source part is rounded UP to a
+            // whole atom (as in the creditor-final split below) and booked only if the
+            // bucket can take backing now.
+            let refill_atoms = if self.backing_bucket_for_domain(domain)?.status
+                != BackingBucketStatusV16::Impaired
+                && !decode_bool(self.header.payout_snapshot_captured)?
+                && self.loss_domain_accepts_realized_backing(domain)?
+            {
+                let source = self.source_credit_for_domain(domain)?;
+                let refill_num = source.provider_receivable_num.min(
+                    self.provider_principal_for_domain(domain)?
+                        .saturating_sub(source.fresh_reserved_backing_num),
+                );
+                amount.min(
+                    refill_num
+                        .checked_add(BOUND_SCALE - 1)
+                        .ok_or(V16Error::ArithmeticOverflow)?
+                        / BOUND_SCALE,
+                )
+            } else {
+                0
+            };
+            if refill_atoms != 0 {
+                let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
+                self.add_fresh_counterparty_backing_unchecked(
+                    domain,
+                    refill_atoms
+                        .checked_mul(BOUND_SCALE)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                    expiry_slot,
+                )?;
+            }
+            self.credit_post_snapshot_residual_not_atomic(
+                amount
+                    .checked_sub(refill_atoms)
+                    .ok_or(V16Error::CounterUnderflow)?,
+            )?;
         } else {
             // F-LIVE-2 (v22live; upstream 13ebf86b / #216, narrowed): in Live, an Impaired bucket
             // (a lapsed one that still carries liens) cannot take new backing. The loss then stays
