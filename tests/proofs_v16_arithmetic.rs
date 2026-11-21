@@ -416,6 +416,7 @@ fn proof_v16_trade_fee_notional_ceil_strictly_exceeds_floor_when_unaligned() {
 /// reaches (|basis| in [1, MAX_POSITION_ABS_Q], a_basis in [MIN_A_SIDE, ADL_ONE]) the result is the
 /// exact ceiling of |basis| * SOCIAL_WEIGHT_SCALE / a_basis, which is what the U512 path computed.
 #[kani::proof]
+#[kani::unwind(20)]
 #[kani::solver(cadical)]
 fn proof_v16_loss_weight_is_exact_ceil_on_validated_leg_domain() {
     let abs_basis_q: u128 = kani::any();
@@ -432,7 +433,8 @@ fn proof_v16_loss_weight_is_exact_ceil_on_validated_leg_domain() {
 
 /// Same function against the original U512 computation, value and error, including a_basis 0,
 /// the unscaled shortcut and non-divisible cases (small symbolic domain: the U512 reference is a
-/// bit-serial divide under Kani).
+/// bit-serial divide under Kani). The u128-overflow fallback is outside this domain; it is the old
+/// body verbatim and is covered by tests/loss_weight_u128_fast_path.rs.
 #[kani::proof]
 #[kani::unwind(20)]
 #[kani::solver(cadical)]

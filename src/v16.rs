@@ -29472,14 +29472,14 @@ fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     V16Core::mul_div_ceil_u128_or_wide(abs_basis_q, SOCIAL_WEIGHT_SCALE, a_basis)
 }
 
-/// Test hooks for `tests/loss_weight_u128_fast_path.rs`: the production loss weight, and the
-/// U512 computation it replaced (kept verbatim as the reference).
-#[doc(hidden)]
+/// Test hooks for `tests/loss_weight_u128_fast_path.rs` (`--features fuzz`) and the Kani
+/// harnesses: the production loss weight, and the U512 computation it replaced (kept verbatim).
+#[cfg(any(kani, feature = "fuzz"))]
 pub fn loss_weight_for_basis_for_test(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     loss_weight_for_basis(abs_basis_q, a_basis)
 }
 
-#[doc(hidden)]
+#[cfg(any(kani, feature = "fuzz"))]
 pub fn loss_weight_for_basis_wide_reference_for_test(
     abs_basis_q: u128,
     a_basis: u128,

@@ -102,9 +102,8 @@ pub use v16::{
 #[cfg(all(not(kani), feature = "fork-facade"))]
 pub use v16::kani_active_bitmap_set;
 
-// Loss-weight u128 fast path vs. the U512 computation it replaced (differential test only).
-#[cfg(not(kani))]
-#[doc(hidden)]
+// Loss-weight u128 path vs. the U512 computation it replaced (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::{loss_weight_for_basis_for_test, loss_weight_for_basis_wide_reference_for_test};
 
 // ADL effective-quantity kernels for the fuzz targets (kani builds get them from the blanket re-export).

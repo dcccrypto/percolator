@@ -2,6 +2,8 @@
 //! ceil(abs_basis_q * SOCIAL_WEIGHT_SCALE / a_basis) in u128 when the product fits (and returns
 //! abs_basis_q directly for an unscaled side) instead of always going through U512. This pins the
 //! result and the error to the original U512 computation for every input class.
+//! Needs `--features fuzz` (exposes the hooks, same as tests/rounding_edge.rs).
+#![cfg(feature = "fuzz")]
 use percolator::{
     loss_weight_for_basis_for_test as fast, loss_weight_for_basis_wide_reference_for_test as wide,
     ADL_ONE, MAX_POSITION_ABS_Q, MIN_A_SIDE, POS_SCALE, SOCIAL_WEIGHT_SCALE,
