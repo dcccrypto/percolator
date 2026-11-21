@@ -902,7 +902,17 @@ fn f2_regression_matched_liquidation_on_a_latched_asset_neither_deepens_nor_lift
     let lp_eff0 = eff_q(&w.markets, &w.lp);
     let o = liquidate_other(&mut w, &mut t2, true);
     assert!(o.closed_q > 0);
-    assert_eq!(w.a(), (al, ash), "A did not move");
+    // #449 (upstream c030aa40): the side's A index is re-derived from its
+    // effective OI and raw-basis sum after every change, so a same-side
+    // reduction can move it by rounding (here 984126888888888 ->
+    // 984126980541821). The matched close gives up at least its own share, so
+    // the index does not fall (no deeper haircut), and it stays below unit A.
+    let (al1, ash1) = w.a();
+    assert_eq!(al1, al, "the long side's A did not move");
+    assert!(
+        ash1 >= ash && ash1 < ADL_ONE,
+        "matched close: A_short {ash} -> {ash1} neither deepens nor reaches unit A"
+    );
     let lp_eff1 = eff_q(&w.markets, &w.lp);
     // eff_q rounds up per leg; the matched delta is exact up to that rounding
     assert!(

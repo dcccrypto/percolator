@@ -9085,6 +9085,13 @@ fn v16_trade_keeps_two_sided_risk_reduction_open_during_side_recovery() {
 // The gate must reject with LockActive and mutate NOTHING -- not the asset
 // ledger, not vault/c_tot/insurance, not either leg -- proving this is a
 // preflight rejection, not a partial-apply rollback.
+//
+// Since #449 (upstream c030aa40) this test pins a refusal by the ADL
+// reduce-only gate (AdlReduceOnly), not by E5: a coherent side whose A index
+// is derived from its raw-basis sum cannot show a leg above its side's OI, so
+// the E5 masking shape is unreachable through the public trade path. The E5
+// kernel gate keeps its own proof,
+// proof_v16_trade_reductions_are_funded_only_by_preexisting_side_oi.
 #[test]
 fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
     const MATCHED_Q: u128 = 10 * POS_SCALE;

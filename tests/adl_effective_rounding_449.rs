@@ -575,6 +575,10 @@ fn issue_449_a_fill_certifies_the_position_it_left() {
 ///   (3) on a side the op reduced, G rises by less than the pre-op R (less
 ///       than R / ADL_ONE raw units): the re-derived floor can move G up
 ///       inside (-R, 0], but no op moves a raw-grid step of exposure into it
+/// (1) and (2) carry the claim: (3) follows from (1) after the op and (2)
+/// before it. (3) is checked first only so that a failure names the op that
+/// leaked. The PR #381 version asserted that G never rises at all, which the
+/// fix does not promise: A is re-derived with a floor after every op.
 /// On the engine before the port it fails at the first 1-unit long reduce
 /// after the ADL ("side 0 residue grew by 0.333333 raw units in one op", far
 /// above the R / ADL_ONE window of about 0.000004 raw units here).

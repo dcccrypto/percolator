@@ -350,11 +350,21 @@ fn funding_split_accrual_equals_single_segment() {
 #[test]
 fn funding_asymmetric_a_rounds_payer_up_receiver_down() {
     let price = 3_086u64;
-    for &a_long in &[MIN_A_SIDE, ADL_ONE / 3, ADL_ONE - 1] {
+    // #449 (upstream c030aa40): a side's A index is derived from its effective OI and raw-basis
+    // sum, and the audit scan holds the asset to it. The haircut long side is written as a
+    // raw-basis sum over the 10-unit OI whose derived index is the A under test: 10x OI gives
+    // MIN_A_SIDE, 3x gives ADL_ONE / 3, and OI + 1 gives an index just below unit
+    // (ADL_ONE - 1 itself is the index of no raw-basis sum at this OI).
+    let oi = 10 * POS_SCALE;
+    for &raw_sum in &[10 * oi, 3 * oi, oi + 1] {
+        let a_long = ADL_ONE * oi / raw_sum;
         for &rate in &[111i128, -111] {
             let (mut s, _l, _s) = book(price, 10);
             let mut a = asset(&s);
+            assert_eq!(a.oi_eff_long_q, oi);
             a.a_long = a_long;
+            a.raw_basis_sum_long_q = raw_sum;
+            a.loss_weight_sum_long = a.loss_weight_sum_long.max(raw_sum);
             s.1[0].engine.asset = AssetStateV16Account::from_runtime(&a);
             let start = a.slot_last;
             accrue(&mut s, start + 3, price, rate);

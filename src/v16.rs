@@ -2584,6 +2584,13 @@ impl V16Core {
     /// `MAX_OI_SIDE_Q`) whatever the history of reductions (percolator-prog
     /// #449; ported from upstream c030aa40).
     ///
+    /// Upstream bounds a side's raw basis through its trade side-OI cap; this
+    /// fork checks `MAX_OI_SIDE_Q` only in the audit scan. A side whose raw
+    /// basis exceeds `ADL_ONE * oi_eff` (more than ten maximum-size legs at a
+    /// near-total haircut) is held at index 1, where its exact exposure
+    /// `raw_basis_sum / ADL_ONE` is above `oi_eff`. Porting the cap is a
+    /// follow-up.
+    ///
     /// - No current-epoch basis: the index is unused and keeps its value, so a
     ///   haircut side still shows `A != ADL_ONE` until it resets.
     /// - `oi_eff == raw_basis_sum`: unit A, without a division.
@@ -2606,8 +2613,8 @@ impl V16Core {
         if oi_eff_q == raw_basis_sum_q {
             return Ok(ADL_ONE);
         }
-        // `oi_eff < raw_basis_sum`, and raw basis never exceeds twice
-        // `MAX_OI_SIDE_Q`, so the product fits a u128 with room to spare.
+        // `oi_eff < raw_basis_sum`; a checked product (an overflow needs an
+        // effective OI above 3e23 and fails closed).
         let derived = ADL_ONE
             .checked_mul(oi_eff_q)
             .ok_or(V16Error::ArithmeticOverflow)?
@@ -2705,8 +2712,8 @@ impl V16Core {
         let reduce_q = effective_abs_q - next_effective_abs_q;
         let oi_after = oi_eff_q - reduce_q;
         let other_raw = raw_basis_sum_q - raw_abs_q;
-        // Every operand is at most `raw_basis_sum`, which never exceeds twice
-        // `MAX_OI_SIDE_Q`, so the products fit a u128 with room to spare.
+        // Every operand is at most `raw_basis_sum`; the products are checked
+        // and fail closed on overflow.
         //
         // Share falls by at least `reduce_q`: give up ceil(reduce * R / OI).
         let given_up_num = reduce_q
@@ -22562,7 +22569,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // basis: A is re-derived from the two totals, never scaled from its
         // previous value, so its rounding cannot accumulate (#449, upstream
         // c030aa40). With raw basis at most `MAX_OI_SIDE_Q` the derived index
-        // is at least 10 while any effective OI remains.
+        // is at least 10 while any effective OI remains (this fork does not
+        // enforce that bound on fills; see `kernel_side_adl_index`).
         let asset = self.sync_side_adl_index(asset, opp, 0)?;
         self.set_asset_state(asset_index, asset)?;
         if opp_oi_after == 0 {

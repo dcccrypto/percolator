@@ -126,11 +126,14 @@ fn drain_only_holdout(
     // InvalidConfig before either asserting test reached its subject (AS-03).
     asset.oi_eff_long_q = oi;
     asset.loss_weight_sum_long = oi;
+    // #449 (upstream c030aa40): each side's raw-basis sum carries its legs' raw basis.
+    asset.raw_basis_sum_long_q = oi;
     asset.stored_pos_count_long = 1;
     asset.a_long = ADL_ONE;
     asset.mode_long = SideModeV16::DrainOnly;
     asset.oi_eff_short_q = oi;
     asset.loss_weight_sum_short = oi;
+    asset.raw_basis_sum_short_q = oi;
     asset.stored_pos_count_short = 1;
     asset.a_short = ADL_ONE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);

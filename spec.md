@@ -1112,10 +1112,15 @@ at least `d` and its new share is at most `e'`, but not less than the side needs
 carry `OI'` at `A_side <= ADL_ONE`, and not less than one unit; `r' = e'` at
 `A_side == ADL_ONE`. The rounding of a reduction is taken from the reducing leg,
 whose effective quantity afterwards is at most `e'` and can be lower by rounding.
-A full close, or a conversion to a pending obligation, removes
-`min(abs(effective_pos_q), OI_eff_side)` from the side's effective OI and the leg's
-whole raw basis from `raw_basis_sum_side`. `begin_full_drain_reset` zeroes
+A full close, or a conversion to a pending obligation, removes the leg's
+`abs(effective_pos_q)` from the side's effective OI (this fork clamps it to
+`OI_eff_side` only for a side's last stored leg, GH#290) and the leg's whole raw
+basis from `raw_basis_sum_side`. `begin_full_drain_reset` zeroes
 `raw_basis_sum_side` and sets `A_side = ADL_ONE`.
+
+Upstream bounds `R` through a trade side-OI cap; this fork checks
+`MAX_OI_SIDE_Q_PER_ASSET` only in the audit scan, so the bounds above assume it.
+A side whose raw basis exceeds `ADL_ONE * OI_eff_side` is held at `A_side = 1`.
 
 Because `A_side` is re-derived on same-side transitions, a leg's
 `effective_pos_q` can change by one unit through another leg's reduction or
