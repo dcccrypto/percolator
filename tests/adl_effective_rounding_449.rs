@@ -349,7 +349,8 @@ fn issue_449_characterize_resize_rounding_surplus_compounds_hardening_gap() {
 /// dcccrypto addition (not upstream): the invariant the post-fix engine
 /// (upstream c030aa40) is meant to hold, checked directly after every op.
 ///   (1) per side, exact exposure sum(raw * A / a_basis) <= oi_eff
-///   (2) no op raises a side's exact-over-OI residue
+///   (2) no op raises the exact-over-OI residue of a side it reduced; the
+///       passive (ADL'd) side is held only to (1)
 /// Ignored because the current v2.2 engine still has the pre-fix A index, so
 /// it is expected to fail. Run with `--ignored` to see the first violation.
 #[test]
