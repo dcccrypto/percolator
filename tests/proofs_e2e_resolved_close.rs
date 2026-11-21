@@ -246,7 +246,7 @@ fn native_sampled_resolved_close_flat_domain() {
 }
 
 /// Narrow form of (d'), sized like the suite's
-/// `proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault` (which finishes):
+/// `proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault` (not timed tonight). Did not finish here (72 min in symex):
 /// C in 0..=5 and L in 0..=5 symbolic, O = 3, I = 2, U = 1 concrete. Same check function.
 // Did not finish on the 2026-11-21 machine (REPORT.md); compiled only with `--features e2e-long`.
 #[cfg(all(kani, feature = "e2e-long"))]
