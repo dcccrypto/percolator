@@ -6934,18 +6934,25 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
             .unwrap();
         assert_eq!(reservation_after_reversal.valid_liened_insurance_num, 0);
         assert_eq!(source_after_reversal.valid_liened_insurance_num, 0);
+        // upstream 7d2e243d restates this branch (8d6c99b0 ported only its new tests):
+        // the unliened face is the same leg's unrealized gain and is netted one for one.
+        let long_loss_domain_backing_after = market.markets[0]
+            .engine
+            .source_credit_long
+            .fresh_reserved_backing_num
+            .get();
         assert_eq!(
             reservation_after_reversal.consumed_insurance_num,
-            reservation_before_reversal.consumed_insurance_num
-                + unliened_support_consumed * BOUND_SCALE,
-            "only realizable unliened support consumes insurance"
+            reservation_before_reversal.consumed_insurance_num,
+            "netting the same leg's unrealized gain spends no insurance"
         );
-        assert_eq!(
-            market.header.insurance.get() + unliened_support_consumed,
-            insurance_before_reversal,
-            "the fused burn spends each insurance-backed support atom exactly once"
-        );
+        assert_eq!(market.header.insurance.get(), insurance_before_reversal);
         assert_eq!(backing_after_reversal, backing_before_reversal);
+        assert_eq!(
+            long_loss_domain_backing_after,
+            long_loss_domain_backing_before + principal_loss * BOUND_SCALE,
+            "with no counterparty principal in the twin, only the principal loss is booked"
+        );
     } else {
         // upstream 1683b11d restates this branch. The liened face is the rest of the same
         // unrealized gain, and the short paid in the backing behind it as well. It follows the

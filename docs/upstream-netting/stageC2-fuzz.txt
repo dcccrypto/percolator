@@ -1,0 +1,518 @@
+   Compiling percolator v0.1.1 (/Users/khubair/agent-work/wt/J-20261120-ENG-PORT-TOLYNETTINGg)
+warning: variable does not need to be mutable
+     --> src/v16.rs:22362:13
+      |
+22362 |         let mut ledger = account.header.close_progress.try_to_runtime()?;
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scaled_adl_delta_fast` is never used
+     --> src/v16.rs:30478:4
+      |
+30478 | fn scaled_adl_delta_fast(abs_basis_q: u128, a_basis: u128, then: i128, now: i128) -> Option<i128> {
+      |    ^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `percolator` (lib) generated 2 warnings (run `cargo fix --lib -p percolator` to apply 1 suggestion)
+warning: variable does not need to be mutable
+     --> tests/v16_spec_tests.rs:11928:30
+      |
+11928 |             let (mut header, mut markets) = market_fixture(1, 100);
+      |                              ----^^^^^^^
+      |                              |
+      |                              help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> tests/v16_spec_tests.rs:15180:13
+      |
+15180 |         let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> tests/v16_spec_tests.rs:15181:13
+      |
+15181 |         let mut long = PortfolioV16ViewMut::new(&mut w.long);
+      |             ----^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: unused variable: `capital_before_reversal`
+     --> tests/v16_spec_tests.rs:15444:9
+      |
+15444 |     let capital_before_reversal = long.header.capital.get();
+      |         ^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_capital_before_reversal`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `lien_effective`
+     --> tests/v16_spec_tests.rs:15445:9
+      |
+15445 |     let lien_effective = lien_before.source_lien_effective_reserved.get();
+      |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_lien_effective`
+
+warning: unused variable: `backing_before_reversal`
+     --> tests/v16_spec_tests.rs:15446:9
+      |
+15446 |     let backing_before_reversal = market.markets[0]
+      |         ^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_backing_before_reversal`
+
+warning: unused variable: `reservation_before_reversal`
+     --> tests/v16_spec_tests.rs:15451:9
+      |
+15451 |     let reservation_before_reversal = market.markets[0]
+      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_reservation_before_reversal`
+
+warning: unused variable: `insurance_before_reversal`
+     --> tests/v16_spec_tests.rs:15456:9
+      |
+15456 |     let insurance_before_reversal = market.header.insurance.get();
+      |         ^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_insurance_before_reversal`
+
+warning: unused variable: `risk_epoch_before_reversal`
+     --> tests/v16_spec_tests.rs:15457:9
+      |
+15457 |     let risk_epoch_before_reversal = market.header.risk_epoch.get();
+      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_risk_epoch_before_reversal`
+
+warning: unused variable: `source_credit_epoch_before_reversal`
+     --> tests/v16_spec_tests.rs:15458:9
+      |
+15458 |     let source_credit_epoch_before_reversal = market.markets[0]
+      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_source_credit_epoch_before_reversal`
+
+warning: unused variable: `cert`
+     --> tests/v16_spec_tests.rs:15474:9
+      |
+15474 |     let cert = market
+      |         ^^^^ help: if this is intentional, prefix it with an underscore: `_cert`
+
+warning: unreachable pattern
+     --> tests/v16_spec_tests.rs:15593:17
+      |
+15593 |                 Ok(other) => panic!("{label}: unexpected outcome {other:?}"),
+      |                 ^^^^^^^^^ no value can reach this
+      |
+note: multiple earlier patterns match some of the same values
+     --> tests/v16_spec_tests.rs:15593:17
+      |
+15588 |                 Ok(ResolvedCloseOutcomeV16::ProgressOnly) => continue,
+      |                 ----------------------------------------- matches some of the same values
+15589 |                 Ok(ResolvedCloseOutcomeV16::Closed { payout }) => {
+      |                 ---------------------------------------------- matches some of the same values
+...
+15593 |                 Ok(other) => panic!("{label}: unexpected outcome {other:?}"),
+      |                 ^^^^^^^^^ collectively making this unreachable
+      = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `oi_eff_short_q` is never read
+     --> tests/v16_spec_tests.rs:13699:5
+      |
+13698 | struct AssetSnapshot {
+      |        ------------- field in this struct
+13699 |     oi_eff_short_q: u128,
+      |     ^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `percolator` (test "v16_spec_tests") generated 13 warnings (run `cargo fix --test "v16_spec_tests" -p percolator` to apply 11 suggestions)
+    Finished `release` profile [optimized] target(s) in 4m 52s
+     Running tests/v16_kf_loss_liened_face.rs (/tmp/jnettingg-target/release/deps/v16_kf_loss_liened_face-5a72ee83eaa69215)
+
+running 7 tests
+test liened_twin_face_never_takes_the_provider_principal_with_it ... ok
+test loss_met_by_liened_face_pays_the_domain_it_is_owed_to ... ok
+test loss_met_by_liened_face_is_refresh_order_independent ... ok
+test reversal_against_liened_twin_face_returns_the_loser_paid_backing ... ok
+test liened_face_pays_a_loss_exactly_as_unliened_face_does ... ok
+test loss_beyond_the_unliened_face_pays_the_domain_it_is_owed_to ... ok
+test random_histories_with_liens_keep_every_domain_exactly_backed ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.83s
+
+     Running tests/v16_lien_claim_rate.rs (/tmp/jnettingg-target/release/deps/v16_lien_claim_rate-66afedc7324816fa)
+
+running 14 tests
+test lien_on_a_fully_backed_domain_leaves_the_other_claimant_at_full_rate ... ok
+test lien_on_an_under_backed_domain_stays_conservative_and_is_full_once_backed ... ok
+test conversion_beside_a_live_lien_pays_the_full_backed_claim ... ok
+test provider_withdrawal_watermark_is_unchanged_beside_a_lien ... ok
+test expiry_with_a_live_lien_never_raises_the_rate_and_matches_the_lien_free_world ... ok
+test insurance_backed_lien_leaves_the_other_claimant_at_full_rate ... ok
+test a_loss_on_the_lien_holder_does_not_cut_the_other_claimant ... ok
+test rate_kernel::fractional_liens_overstate_soft_credit_by_less_than_one_atom_each_and_never_overdraw ... ok
+test rate_kernel::scripted_lifecycle_reaches_every_step ... ok
+test resolved_close_beside_a_flat_holders_lien_pays_the_full_backed_claim_at_once ... ok
+test random_trading::random_trading_alphabet_reaches_a_live_lien ... ok
+test resolved_close_pays_every_claimant_in_full_in_either_order ... ok
+test random_trading::random_trading_never_over_credits_and_liens_never_cut_a_backed_domain ... ok
+test rate_kernel::lien_lifecycle_never_over_credits_and_never_cuts_a_backed_domain ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.99s
+
+     Running tests/v16_spec_tests.rs (/tmp/jnettingg-target/release/deps/v16_spec_tests-c7a59d11275047e5)
+
+running 277 tests
+test gh292_bp_writeoff_does_not_fire_with_open_risk ... ok
+test e6_resolved_close_on_bankruptcy_without_prior_close_is_not_blocked ... ok
+test direct_live_lien_release_leaves_a_certificate_the_conversion_can_use ... ok
+test e6_second_bankruptcy_reopens_finalized_inert_close_ledger ... ok
+test e6_second_bankruptcy_completes_without_insurance ... ok
+test expired_im_lien_release_is_live_and_does_not_restore_backing ... ok
+test gh292_bp_trade_path_flat_locked_deficit_is_released_by_permissionless_steps ... ok
+test gh302_292_fixture_stays_live_on_liquidation_and_trade_routes ... ok
+test gh292_flat_locked_deficit_does_not_latch_group_hlock ... ok
+test issue105_expired_lien_does_not_cover_initial_margin_source_credit ... ok
+test f5_fully_netted_loss_into_lapsed_loss_domain_does_not_revert ... FAILED
+test im_lien_is_released_when_the_position_closes_in_live ... ok
+test issue176_liquidation_selects_same_leg_for_any_slot_order ... ok
+test issue204_deposit_frames_the_close_episode_until_booking ... ok
+test issue105_expired_trade_created_lien_does_not_prevent_liquidation ... ok
+test issue204_full_principal_cure_releases_the_domain_barrier ... ok
+test issue204_live_advance_close_charges_only_the_post_deposit_residual ... ok
+test issue204_non_principal_credit_cures_ledger_and_releases_barrier ... ok
+test issue204_principal_then_non_principal_cure_then_close_no_double_cure ... ok
+test issue204_principal_then_close_cures_once_and_releases_barrier_once ... ok
+test issue204_resolved_close_charges_only_the_post_deposit_residual ... ok
+test gh302_trade_route_never_recovery_and_partial_insurance ... ok
+test issue206_live_loss_on_lapsed_lien_impairs_and_stays_crankable ... ok
+test gh302_liquidation_route_never_recovery_and_partial_insurance ... ok
+test live_lien_release_leaves_a_current_certificate_so_conversion_succeeds ... ok
+test issue206_resolved_close_impairs_lapsed_lien_in_either_order ... ok
+test s10_provider_share_after_consumption_and_refill_is_never_moved ... FAILED
+test s16_resolved_close_walk_pins_late_debt_payouts_and_liveness ... FAILED
+test source_reclass_same_leg_reversal_counterparty_backed_im_liened ... ignored, known residual: liened support is unpledged, not consumed (see roundtrip-engine-fix-2026-09-30.md)
+test source_reclass_cross_asset_same_refresh_loss_leg_first ... ok
+test source_reclass_cross_asset_same_refresh_profit_leg_first ... ok
+test source_reclass_cross_asset_time_separated_loss_leg_first ... ok
+test source_reclass_cross_asset_time_separated_profit_leg_first ... ok
+test source_reclass_same_leg_reversal_counterparty_backed ... ok
+test s16ac_excess_late_loss_funds_junior_residual_once_creditors_are_final ... FAILED
+test s16ac_early_winner_keeps_backing_that_arrives_after_its_close ... ok
+test source_reclass_same_leg_reversal_insurance_backed_im_liened ... ignored, known residual: liened support is unpledged, not consumed (see roundtrip-engine-fix-2026-09-30.md)
+test resolved_close_order_matrix_pays_exact_endpoints ... ok
+test v16_accrual_on_positioned_asset_still_works_after_other_asset_oracle_reset ... ok
+test source_reclass_same_leg_reversal_insurance_backed ... FAILED
+test triage_roundtrip_winner_support_follows_consumed_cross_domain_backing ... ok
+test v16_activate_rejects_disabled_slot_insurance_budget_without_mutation ... ok
+test v16_asset_local_committed_accrual_can_trail_global_clock ... ok
+test v16_adl_reduced_basis_caps_exit_to_effective_oi_then_detaches_residue ... ok
+test v16_auto_crank_classifies_close_expiry_at_the_authenticated_slot ... ok
+test v16_auto_crank_classifies_fresh_account_stale_then_refreshes_to_clean ... ok
+test v16_auto_crank_classifies_payout_ready_resolved_winner_without_snapshot ... ok
+test v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate ... ok
+test v16_auto_crank_clears_released_recovery_obligation_with_finalized_close ... ok
+test v16_auto_crank_commits_recovery_for_uncovered_cross_margin_liquidation ... ok
+test v16_auto_crank_close_resolved_advances_the_resolved_settlement_clock ... ok
+test v16_auto_crank_declares_recovery_for_expired_live_close ... ok
+test v16_auto_crank_converges_in_a_moving_market ... ok
+test v16_auto_crank_detaches_prior_reset_obligation_after_asset_recovery ... ok
+test v16_auto_crank_does_not_liquidate_against_unmatched_effective_oi ... ok
+test v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point ... ok
+test v16_auto_crank_does_not_release_source_liens_against_stale_backing ... ok
+test v16_auto_crank_expires_one_lapsed_live_source_domain_per_step ... ok
+test v16_auto_crank_expires_lapsed_source_backing_before_normalizing_an_impaired_lien ... ok
+test v16_auto_crank_finalizes_recovery_into_resolved_without_moving_value ... ok
+test v16_auto_crank_liquidates_current_account_without_observation ... ok
+test v16_auto_crank_migrates_exhausted_residue_behind_a_current_certificate ... ok
+test v16_auto_crank_migrates_legacy_normal_adl_residue_into_reset_cleanup ... ok
+test v16_auto_crank_missing_observation_is_clean_nonprogress_no_mutation ... ok
+test v16_auto_crank_normalizes_empty_resolved_account_fee_anchor ... ok
+test v16_auto_crank_normalizes_impaired_flat_source_lien_into_the_impaired_claim_lane ... ok
+test v16_auto_crank_refresh_leaves_a_current_certificate_in_a_moving_market ... ok
+test v16_auto_crank_reaches_liquidation_in_a_persistently_moving_market ... ok
+test v16_auto_crank_refreshes_recovery_kf_without_forfeiting_position ... ok
+test v16_auto_crank_releases_current_flat_pending_obligations_on_both_sides ... ok
+test v16_auto_crank_releases_flat_source_credit_lien_for_conversion ... ok
+test v16_auto_crank_retains_released_obligation_while_the_opposite_side_is_live ... ok
+test v16_auto_crank_settles_b_stale_leg ... ok
+test v16_auto_crank_settles_released_recovery_obligation_before_finalizing_recovery ... ok
+test v16_auto_crank_settles_latent_b_delta_on_recovery_leg ... ok
+test v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation ... ok
+test v16_auto_crank_progress_realizable_without_observation_for_every_class ... ok
+test v16_auto_crank_skips_recovery_first_leg_for_live_refresh ... ok
+test v16_backing_provider_earnings_credit_and_withdraw_are_engine_accounted ... ok
+test v16_b_settlement_loss_retires_the_legs_own_source_domain_first ... ok
+test v16_b_settlement_loss_spills_past_an_exhausted_own_source_domain ... ok
+test v16_backing_provider_earnings_credit_rejects_without_vault_slack ... ok
+test v16_batch_trade_checks_initial_margin_on_final_portfolio ... ok
+test v16_batch_trade_applies_multiple_fills_after_inline_refresh ... ok
+test v16_batch_trade_is_bounded_by_configured_portfolio_asset_cap ... ok
+test v16_batch_trade_rejects_loss_stale_risk_increase_after_inline_settlement ... ok
+test v16_batch_trade_self_settles_stale_certificates_once_before_fills ... ok
+test v16_batch_trade_starts_terminal_residual_only_at_final_fill ... ok
+test v16_canonical_accrual_path_bounds_long_gap_work_and_remains_actionable ... ok
+test v16_batch_trade_supports_mixed_signed_spread_legs ... ok
+test v16_canonical_accrual_path_carries_sub_atom_price_progress_across_calls ... ok
+test v16_canonical_accrual_path_rejects_discontinuous_remainder_before_mutation ... ok
+test v16_canonical_accrual_path_matches_every_complete_transaction_partition ... ok
+test v16_canonical_accrual_path_requires_the_complete_bounded_prefix ... ok
+test v16_canonicalize_retired_empty_asset_slot_clears_inert_domain_state ... ok
+test v16_canonical_accrual_path_scales_indices_after_quantity_adl ... ok
+test v16_credit_account_from_insurance_respects_additional_reserved ... ok
+test v16_credit_account_from_insurance_uses_unbudgeted_surplus_only ... ok
+test v16_cross_domain_unbacked_loss_burns_only_matching_positive_face ... ok
+test v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi ... ok
+test v16_domain_insurance_bulk_credit_accumulates_duplicates_with_one_exact_delta ... ok
+test v16_domain_insurance_deposit_and_withdraw_use_engine_budget_accounting ... ok
+test v16_equity_exactly_at_maintenance_is_not_liquidatable ... ok
+test v16_exact_oi_cross_starts_reset_for_adl_basis_residue ... ok
+test v16_cross_asset_loss_beyond_partially_backed_face_is_paid_once ... ok
+test v16_exact_oi_liquidation_close_starts_reset_for_adl_basis_residue ... ok
+test v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue ... ok
+test v16_favorable_action_rejects_a_certificate_stale_on_the_risk_epoch_alone ... ok
+test v16_fee_sync_on_nonflat_account_settles_hidden_k_loss_before_fee ... ok
+test v16_cross_asset_loss_does_not_burn_a_partially_backed_gain_beyond_the_loss ... ok
+test v16_finalize_side_reset_is_public_value_neutral_and_epoch_bumping ... ok
+test v16_finalize_side_reset_rejects_blocked_pending_side ... ok
+test v16_finalized_zero_residual_close_does_not_block_dematerialization ... ok
+test v16_fractional_social_loss_carry_normalizes_on_reset_and_clear ... ok
+test v16_finalized_zero_residual_close_does_not_block_withdraw ... ok
+test v16_funding_counter_layout_canary_places_fields_before_fee_state ... ok
+test v16_fully_accrued_kf_cohort_blocks_fresh_risk_until_every_side_settles ... ok
+test v16_funding_counters_ignore_inactive_accounts_when_market_funding_moves ... ok
+test v16_funding_counters_record_forfeited_dead_leg_settlement ... ok
+test v16_funding_counters_record_long_pays_short_once_on_refresh ... ok
+test v16_funding_counters_record_short_pays_long_on_negative_funding ... ok
+test v16_funding_counters_settle_before_trade_close_clears_leg ... ok
+test v16_funding_counters_settle_before_same_side_resize ... ok
+test v16_grant_source_positive_pnl_attributes_claims_and_aggregates_in_lockstep ... ok
+test v16_gain_reversal_does_not_burn_gain_when_only_winners_were_settled_at_the_peak ... ok
+test v16_insurance_lien_consume_rejects_fractional_bound_amount ... ok
+test v16_kf_epoch_clears_exact_index_reversal_without_duplicate_discharge ... ok
+test v16_issue289_forfeited_bankruptcy_claim_recredits_paired_insurance_at_terminal ... ok
+test v16_legless_asset_after_crank_release_resets ... ok
+test v16_legless_asset_after_recovery_forfeits_without_residue_retires ... ok
+test v16_legless_asset_after_recovery_forfeits_retires_after_resolution ... ok
+test v16_legless_asset_after_recovery_pair_close_retires ... ok
+test v16_legless_asset_after_two_sided_trade_out_resets_and_trades_again ... ok
+test v16_legless_asset_after_unequal_residues_resets_on_last_rebalance ... ok
+test v16_legless_asset_after_bankrupt_liquidation_of_last_leg_resets ... ok
+test v16_gain_reversal_with_a_bankrupt_peak_loser_never_pays_the_settler ... ok
+test v16_legless_asset_after_recovery_forfeits_with_residue_retires ... ok
+test v16_legless_asset_with_one_barrier_side_keeps_live_oi_until_barrier_clears ... ok
+test v16_legless_side_absent_when_legs_exceed_oi ... ok
+test v16_legless_side_dropped_when_last_short_closes_after_resolution ... ok
+test v16_legless_side_kept_with_loss_barrier ... ok
+test v16_legless_side_from_live_trade_out_dropped_by_other_sides_close ... ok
+test v16_legless_side_of_released_obligation_dropped ... ok
+test v16_legless_side_residue_above_last_leg_raw_basis_dropped ... ok
+test v16_legless_side_residue_from_partial_liquidations_dropped ... ok
+test v16_legless_side_dropped_when_last_long_closes_after_resolution ... ok
+test v16_liquidation_engine_selects_healthy_partial_before_margin_floor ... ok
+test v16_legless_side_residue_kept_until_last_long_leaves ... ok
+test v16_live_mark_reversal_unwinds_counterparty_lien_before_claim_burn ... FAILED
+test v16_liquidation_of_unattributed_deficit_never_charges_the_surviving_domain ... ok
+test v16_mutable_view_canonicalizes_persisted_source_domain_order ... ok
+test v16_matched_trade_reversing_a_position_takes_the_flip_route ... ok
+test v16_mutable_view_compacts_persisted_domain_indexed_source_claim_before_deposit ... ok
+test v16_live_mark_reversal_unwinds_insurance_lien_before_claim_burn ... FAILED
+test v16_oracle_anchor_reset_of_asset0_keeps_the_market_wide_rule ... ok
+test v16_oracle_anchor_reset_of_empty_nonzero_asset_succeeds_while_asset0_is_positioned ... ok
+test v16_oracle_anchor_reset_of_empty_nonzero_asset_succeeds_with_open_pnl_on_asset0 ... ok
+test v16_netting_never_rounds_a_fractional_source_claim_past_its_slot ... ok
+test v16_oracle_anchor_reset_of_nonzero_asset_still_needs_that_asset_empty ... ok
+test v16_oracle_anchor_reset_of_nonzero_asset_respects_global_locks ... ok
+test v16_loss_paid_from_a_booked_gain_backs_the_counterparty_gain ... ok
+test v16_owner_can_still_exit_while_the_crank_is_stuck_in_a_moving_market ... ok
+test v16_partial_mark_reversal_burns_only_matched_source_claim ... ok
+test v16_partial_mark_reversal_burns_only_matched_source_claim_insurance_backed ... ok
+test v16_permissionless_recovery_crank_is_value_neutral_and_idempotent ... ok
+test v16_permissionless_refresh_expires_one_lapsed_live_source_domain_per_step ... ok
+test v16_post_quantity_adl_recovery_forfeit_retires_only_effective_oi ... ok
+test v16_post_quantity_adl_bankrupt_effective_full_close_stays_live ... ok
+test v16_post_snapshot_backing_expiry_credits_resolved_payout_ledger ... ok
+test v16_principal_loss_crystallizes_residual_budget_monotonically ... ok
+test v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale ... ok
+test v16_public_account_backing_fee_rejects_if_post_fee_im_would_fail ... ok
+test v16_gain_reversal_is_independent_of_who_was_settled_at_the_peak ... ok
+test v16_public_backing_principal_deposit_and_withdraw_move_vault_and_source_state ... ok
+test v16_public_account_backing_fee_routes_provider_and_insurance_splits_atomically ... ok
+test v16_public_empty_asset_oracle_anchor_reset_is_value_neutral ... ok
+test v16_public_domain_insurance_spent_setter_rejects_unbacked_clear ... ok
+test v16_public_backing_principal_withdraw_rejects_if_claims_would_be_underbacked ... ok
+test v16_public_domain_insurance_spent_setter_preserves_budget_total ... ok
+test v16_public_empty_asset_oracle_anchor_reset_rejects_any_group_position_state ... ok
+test v16_public_force_asset_recovery_freezes_mark_and_is_idempotent ... ok
+test v16_public_fund_validator_accepts_nontrivial_exact_solvency_profile ... ok
+test v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance ... ok
+test v16_public_raw_oracle_target_batch_updates_distinct_assets_with_one_epoch ... ok
+test v16_public_raw_oracle_target_update_is_value_neutral_and_lifecycle_gated ... ok
+test v16_public_scoped_trade_preserves_unrelated_loss_stale_summary ... ok
+test v16_quantity_adl_blocks_fresh_basis_reissue_across_split_trades ... ok
+test v16_quantity_adl_price_and_funding_accrual_remain_zero_sum ... ok
+test v16_raw_oracle_target_only_change_invalidates_a_cached_health_cert ... ok
+test v16_reactivate_rejects_remaining_insurance_budget_without_mutation ... ok
+test v16_recovery_forfeit_commits_terminal_recovery_when_absorbing_side_is_empty ... ok
+test v16_recovery_forfeit_migrates_legacy_normal_adl_residue_before_detach ... ok
+test v16_recovery_forfeit_retains_loss_weight_until_opposite_positions_settle ... ok
+test v16_recovery_forfeit_credits_unsettled_funding_loss_to_payer_source_domain ... ok
+test v16_rejected_reactivation_keeps_terminal_insurance_retirement_live ... ok
+test v16_recovery_pair_close_clamps_stale_work_to_dual_adl_effective_oi ... ok
+test v16_released_pnl_conversion_consumes_the_backed_source_claim_exactly_once ... ok
+test v16_released_pnl_conversion_still_rejects_a_foreign_account ... ok
+test v16_recovery_pair_close_clamps_to_the_pair_not_the_side_oi ... ok
+test v16_residual_reward_credit_uses_real_principal_not_notional ... ok
+test v16_recovery_pair_close_refuses_stale_work_beyond_effective_oi ... ok
+test v16_residual_reward_credit_is_capped_by_available_crystallized_loss ... ok
+test v16_resolved_auto_crank_closes_capital_only_account ... ok
+test v16_resolved_backing_surplus_keeps_exact_junior_need ... ok
+test v16_resolved_backing_surplus_rejects_live_halted_and_unready_pools ... ok
+test v16_resolved_backing_surplus_reserve_matches_whole_bucket_expiry ... ok
+test v16_resolved_backing_surplus_reserves_domain_source_claims ... ok
+test v16_resolved_clock_advance_is_monotonic_and_value_neutral ... ok
+test v16_resolved_close_caps_adl_reduced_basis_before_reset_detach ... ok
+test v16_resolved_close_detaches_one_solvent_leg_per_call ... ok
+test v16_resolved_close_migrates_legacy_normal_adl_residue_before_detach ... ok
+test v16_resolved_close_normalizes_prospective_lapsed_source_before_settlement ... ok
+test v16_legless_side_residue_grown_by_repeated_reduces_dropped ... ok
+test v16_resolved_close_prospective_expiry_scan_skips_inactive_leg_slots ... ok
+test v16_resolved_impaired_source_accepts_prospective_terminal_loss ... ok
+test v16_resolved_junior_backing_need_is_minimal_exhaustively ... ok
+test v16_resolved_payout_topup_finishes_receipt_without_overpaying ... ok
+test v16_restart_empty_asset_preserves_domain_budget_for_nonzero_asset ... ok
+test v16_restart_keeps_domain_budget_through_terminal_retirement ... ok
+test v16_resolved_foreign_expiry_impairs_account_lien_before_release ... ok
+test v16_restart_rejects_active_asset ... ok
+test v16_resolved_zero_conversion_coclaimants_on_empty_bucket_both_close ... ok
+test v16_restart_normalizes_only_inert_terminal_history ... ok
+test v16_restart_rejects_remaining_insurance_budget_without_mutation ... ok
+test v16_retire_and_reactivate_empty_asset_after_source_credit_epoch_bump ... ok
+test v16_retire_clears_spent_only_domain_budget_in_one_transition ... ok
+test v16_retire_normalizes_only_inert_social_loss_audit_state ... ok
+test v16_retire_normalizes_unreferenced_lapsed_backing ... ok
+test v16_retire_rejects_live_provider_receivable_without_mutation ... ok
+test v16_reused_market_slot_rejects_old_market_id_leg ... ok
+test v16_risk_increasing_trade_creates_source_credit_lien_for_im ... ok
+test v16_same_side_resize_requires_b_settlement_before_shrinking_loss_weight ... ok
+test v16_single_trade_matches_batch_of_one_state ... ok
+test v16_source_backed_conversion_ignores_unrelated_historical_bankruptcy ... ok
+test v16_sparse_source_domains_reject_unoccupied_tagged_slot ... ok
+test v16_stale_opposite_cohort_does_not_block_bounded_owner_reduction ... ok
+test v16_subatom_trade_charges_fee_on_ceil_fee_notional ... ok
+test v16_sub_minimum_drain_only_adl_leg_refreshes_and_exits ... ok
+test v16_taker_only_batch_mixed_spread_charges_taker_on_every_leg ... ok
+test v16_taker_only_charges_long_side_when_taker_is_long_account ... ok
+test v16_taker_only_charges_short_side_when_taker_is_short_account ... ok
+test v16_taker_only_n1_maker_fallback_when_taker_capital_zero_pnl_nonnegative ... ok
+test v16_taker_only_n1_maker_fallback_when_taker_pnl_negative ... ok
+test v16_terminal_retirement_includes_claim_free_protocol_surplus ... ok
+test v16_taker_only_n1_no_fallback_when_fee_is_genuinely_zero ... ok
+test v16_terminal_retirement_refuses_to_burn_a_pending_insurance_recredit ... ok
+test v16_terminal_retirement_refuses_unwithdrawn_protocol_fee_reserve ... ok
+test v16_terminal_slab_close_refuses_unwithdrawn_protocol_fee_reserve ... ok
+test v16_cross_asset_funding_loss_does_not_burn_a_partially_backed_gain ... ok
+test v16_terminal_slab_progress_expires_one_domain_before_retiring_residual ... ok
+test v16_terminal_slab_progress_restores_insurance_before_retiring_surplus ... ok
+test v16_terminal_slab_chunk_cursor_finds_last_asset_recredit_before_retirement ... ok
+test v16_terminal_unbudgeted_insurance_retirement_is_claim_free_and_exact ... ok
+test v16_terminal_slab_cursor_stops_at_unexpired_backing_across_slots ... ok
+test v16_trade_created_parked_source_claim_survives_later_deposit ... ok
+test v16_trade_does_not_charge_prior_multi_asset_deficit_or_force_market_recovery ... ok
+test v16_trade_keeps_two_sided_risk_reduction_open_during_side_recovery ... ok
+test v16_trade_final_leg_residual_routes_through_close_without_forcing_market_recovery ... ok
+test v16_trade_rejects_fresh_risk_when_either_side_is_recovering ... ok
+test v16_under_margin_owner_can_transfer_risk_to_margin_healthy_counterparty ... ok
+test v16_view_deposit_and_withdraw_are_the_tested_paths ... ok
+test v16_view_dynamic_market_slots_can_be_activated_without_runtime_vec_engine ... ok
+test v16_view_fee_sync_settles_flat_loss_before_fee ... ok
+test v16_view_rejects_overwithdraw ... ok
+test v16_withdraw_insurance_surplus_exact_boundary_succeeds ... ok
+test v16_withdraw_insurance_surplus_rejects_amount_exceeding_surplus ... ok
+test v16_withdraw_insurance_surplus_rejects_amount_exceeding_vault ... ok
+test v16_withdraw_insurance_surplus_zero_amount_is_a_noop ... ok
+test v16_zero_move_funding_accrual_preserves_canonical_price_anchor ... ok
+test w4_insurance_credit_backed_claim_is_refused ... ok
+test w4_negative_controls_refuse_without_mutation_or_value ... ok
+test w4_price_reversal_after_repay_leaves_insurance_whole ... ok
+test w4_repay_postconditions_each_clause_is_load_bearing ... ok
+test w4_repay_from_released_pnl_with_open_exposure_moves_value_only_into_insurance ... ok
+test w4_repay_works_for_a_caller_that_did_not_refresh_first ... ok
+test v16_whole_account_kf_settlement_is_leg_and_account_order_independent ... ok
+test s16ac_resolved_close_walk_is_live_conserving_and_pinned ... FAILED
+
+failures:
+
+---- f5_fully_netted_loss_into_lapsed_loss_domain_does_not_revert stdout ----
+F-5 stock before [(100, 100, 100, 1000000000000), (100, 100, 0, 1000000000000)] residual 0 -> 0, result Ok(()), trader pnl 50
+
+thread 'f5_fully_netted_loss_into_lapsed_loss_domain_does_not_revert' (228109549) panicked at tests/v16_spec_tests.rs:15022:5:
+assertion `left == right` failed: the unbookable support stays in Residual exactly as on 35ddd692 (no value created or lost)
+  left: 0
+ right: 50
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- s10_provider_share_after_consumption_and_refill_is_never_moved stdout ----
+
+thread 's10_provider_share_after_consumption_and_refill_is_never_moved' (228109571) panicked at tests/v16_spec_tests.rs:15487:5:
+assertion `left == right` failed
+  left: 5000000000000000
+ right: 2376000000000000
+
+---- s16_resolved_close_walk_pins_late_debt_payouts_and_liveness stdout ----
+
+thread 's16_resolved_close_walk_pins_late_debt_payouts_and_liveness' (228109572) panicked at tests/v16_spec_tests.rs:15966:9:
+assertion `left == right` failed: seed 1470
+  left: ([800, 200, 400, 0], 200)
+ right: ([800, 200, 509, 80], 11)
+
+---- s16ac_excess_late_loss_funds_junior_residual_once_creditors_are_final stdout ----
+
+thread 's16ac_excess_late_loss_funds_junior_residual_once_creditors_are_final' (228109574) panicked at tests/v16_spec_tests.rs:16260:9:
+assertion `left == right` failed: seed 2041
+  left: ([400, 360, 1000, 1029], 11)
+ right: ([400, 360, 1000, 1020], 20)
+
+---- source_reclass_same_leg_reversal_insurance_backed stdout ----
+insurance=true lien=false stock [(5000, 0, 0, 0), (0, 0, 0, 1000000000000)]
+
+thread 'source_reclass_same_leg_reversal_insurance_backed' (228109581) panicked at tests/v16_spec_tests.rs:14912:5:
+assertion `left == right` failed: the loss domain must hold the long's whole reversal loss as backing: [(5000, 0, 0, 0), (0, 0, 0, 1000000000000)]
+  left: 0
+ right: 5000
+
+---- v16_live_mark_reversal_unwinds_counterparty_lien_before_claim_burn stdout ----
+
+thread 'v16_live_mark_reversal_unwinds_counterparty_lien_before_claim_burn' (228109695) panicked at tests/v16_spec_tests.rs:7003:5:
+assertion `left == right` failed: the fused source-claim burn must contribute its own risk-epoch step
+  left: 8
+ right: 6
+
+---- v16_live_mark_reversal_unwinds_insurance_lien_before_claim_burn stdout ----
+
+thread 'v16_live_mark_reversal_unwinds_insurance_lien_before_claim_burn' (228109696) panicked at tests/v16_spec_tests.rs:6937:9:
+assertion `left == right` failed: only realizable unliened support consumes insurance
+  left: 0
+ right: 2376000000000000
+
+---- s16ac_resolved_close_walk_is_live_conserving_and_pinned stdout ----
+S16AC steps 80: built 5633 stuck [] leaky [] left 24552
+
+thread 's16ac_resolved_close_walk_is_live_conserving_and_pinned' (228109575) panicked at tests/v16_spec_tests.rs:16277:9:
+assertion `left == right` failed: steps 80
+  left: 24552
+ right: 22357
+
+
+failures:
+    f5_fully_netted_loss_into_lapsed_loss_domain_does_not_revert
+    s10_provider_share_after_consumption_and_refill_is_never_moved
+    s16_resolved_close_walk_pins_late_debt_payouts_and_liveness
+    s16ac_excess_late_loss_funds_junior_residual_once_creditors_are_final
+    s16ac_resolved_close_walk_is_live_conserving_and_pinned
+    source_reclass_same_leg_reversal_insurance_backed
+    v16_live_mark_reversal_unwinds_counterparty_lien_before_claim_burn
+    v16_live_mark_reversal_unwinds_insurance_lien_before_claim_burn
+
+test result: FAILED. 267 passed; 8 failed; 2 ignored; 0 measured; 0 filtered out; finished in 25.37s
+
+error: test failed, to rerun pass `--test v16_spec_tests`
+error: 1 target failed:
+    `--test v16_spec_tests`

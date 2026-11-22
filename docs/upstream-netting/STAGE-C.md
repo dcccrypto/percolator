@@ -77,13 +77,34 @@ v16_kf_loss_domain_attribution 11/11, v16_kf_loss_same_domain_face 12/12, and hi
 feat/v22 as "v2.2 known red: loss-domain booking of a late loss (upstream #175 / 1683b11d class)". With this branch it
 passes (`--ignored`: 1 passed). The ignore is left in place (owner's call).
 
-### 2d. feat/v22 base and fuzz-gated tests
+### 2d. feat/v22 base (67a4c5b9), same 7 failing files
 
-(runs pending)
+Fresh target dir, same command (`stageC2-base-v22.txt`): r_regression 6/0, v16_spec_tests 249/0, v22_r1_* 42/0
+(1 ignored). So all 16 failures are new relative to feat/v22. The 5 v16_spec_tests that already failed on 2cb08797
+(f5, s16, s16ac x2, live-mark-reversal epoch) come from the Stage A/B1 netting line, not from this run's ports.
+
+### 2e. `--features fuzz` (v16_spec_tests, v16_lien_claim_rate, v16_kf_loss_liened_face), `stageC2-fuzz.txt`
+
+On a9e8fb9e: v16_kf_loss_liened_face 7/7, v16_lien_claim_rate 14/14 (includes the fuzz-gated `rate_kernel`
+module), v16_spec_tests 267 passed / 8 failed / 2 ignored. Toly's fuzz-gated c3988149 tests
+(`v16_resolved_backing_surplus_reserves_domain_source_claims`, `v16_resolved_junior_backing_need_is_minimal_exhaustively`)
+pass. The 8 failures are the 6 of 2b plus two insurance-backed variants:
+
+- `v16_live_mark_reversal_unwinds_insurance_lien_before_claim_burn` (Toly's test). Its insurance branch still had the
+  pre-7d2e243d expectation ("only realizable unliened support consumes insurance", 2,376): d's port of 7d2e243d
+  (8d6c99b0) took only that commit's new tests, not its restatement of this helper. Fixed in this run by porting
+  upstream's insurance branch as written (spends no insurance; only the principal loss is booked). Debug fuzz run
+  after the fix: every upstream assertion passes. It still stops at the fork-only risk-epoch pin
+  (`tests/v16_spec_tests.rs` "the fused source-claim burn must contribute its own risk-epoch step"): 5 vs 6
+  (the counterparty variant reads 8 vs 6). That pin is the fork's 4c4dfb20 guard, left for the owner.
+- `source_reclass_same_leg_reversal_insurance_backed` (fork-only): expects the loss domain to hold the long's whole
+  5,000 as backing, gets 0. Passes on feat/v22, fails on 2cb08797, so it comes from the netting line. Toly's
+  7d2e243d rule for an insurance-backed twin is that netting spends no insurance and only the principal loss is
+  booked, so this pin conflicts with his rule.
 
 ## 3. Not done here
 
-- No test was rewritten. The 9 R1 failures and the 2 new non-R1 failures pin numbers that Toly's #250 / 1683b11d
+- No fork test was rewritten. One of Toly's tests was completed (2e). The 9 R1 failures and the 2 new non-R1 failures pin numbers that Toly's #250 / 1683b11d
   rules replace. Restating them (r_regression 91 -> 100, s10 2,376 -> 5,000, the live-mark-reversal epoch 6 -> 8)
   or keeping R1's guarantees is the owner's decision, as in Stage B1 section 5.
 - The merge gate needs the full suite green (check 3), so this branch cannot pass it as is. No merge.
