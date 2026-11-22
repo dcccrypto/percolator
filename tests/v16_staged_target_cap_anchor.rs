@@ -89,6 +89,7 @@ fn exposed_asset_far_from_its_anchor() -> (MarketGroupV16HeaderAccount, Vec<Mark
                     exec_price: P0,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
     }
