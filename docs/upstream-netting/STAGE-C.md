@@ -47,7 +47,7 @@ Got values on this head (expected = test):
 | settle_order::r1_bankrupt_victim_is_order_independent_and_not_over_credited | both settle orders equal | equal | (-398,508, 329,999) vs (-377,346, 329,999) |
 | settle_order::r1_liened_victim_is_order_independent_and_pinned | pinned result | (73,993, -124,395) | (110,990, -110,990), now the same in both orders |
 
-### 2b. Full engine suite (default features, 104 test binaries): 1,412 passed / 16 failed / 13 ignored
+### 2b. Full engine suite (default features, 104 test targets incl. lib unit tests and doc-tests): 1,412 passed / 16 failed / 13 ignored
 
 Failing: the 9 R1 tests above, plus 7 more:
 
@@ -69,7 +69,7 @@ so those four results were not valid. They are replaced by the bisect above.
 
 Toly's own files, all passing: v16_kf_loss_liened_face 7/7, v16_lien_claim_rate 10/10,
 v16_kf_loss_domain_attribution 11/11, v16_kf_loss_same_domain_face 12/12, and his new v16_spec_tests cases
-(`v16_resolved_backing_surplus_*` x3, `issue206_*` x2) ok. The `fuzz`-gated ones are in 2d.
+(`v16_resolved_backing_surplus_*` x3, `issue206_*` x2) ok. The `fuzz`-gated ones are in 2e.
 
 ### 2c. Ignored control now passes
 
@@ -94,19 +94,22 @@ pass. The 8 failures are the 6 of 2b plus two insurance-backed variants:
   pre-7d2e243d expectation ("only realizable unliened support consumes insurance", 2,376): d's port of 7d2e243d
   (8d6c99b0) took only that commit's new tests, not its restatement of this helper. Fixed in this run by porting
   upstream's insurance branch as written (spends no insurance; only the principal loss is booked). Debug fuzz run
-  after the fix: every upstream assertion passes. It still stops at the fork-only risk-epoch pin
+  after the fix (`stageC2-fuzz-after-fix.txt`): every upstream assertion passes. It still stops at the fork-only risk-epoch pin
   (`tests/v16_spec_tests.rs` "the fused source-claim burn must contribute its own risk-epoch step"): 5 vs 6
   (the counterparty variant reads 8 vs 6). That pin is the fork's 4c4dfb20 guard, left for the owner.
 - `source_reclass_same_leg_reversal_insurance_backed` (fork-only): expects the loss domain to hold the long's whole
-  5,000 as backing, gets 0. Passes on feat/v22, fails on 2cb08797, so it comes from the netting line. Toly's
+  5,000 as backing, gets 0. Passes on feat/v22, fails on 2cb08797 (debug fuzz runs, `stageC2-fuzz-v22.txt`,
+  `stageC2-fuzz-2cb08797.txt`; the insurance live-mark-reversal variant shows the same split), so it comes from the netting line. Toly's
   7d2e243d rule for an insurance-backed twin is that netting spends no insurance and only the principal loss is
   booked, so this pin conflicts with his rule.
 
 ## 3. Not done here
 
-- No fork test was rewritten. One of Toly's tests was completed (2e). The 9 R1 failures and the 2 new non-R1 failures pin numbers that Toly's #250 / 1683b11d
-  rules replace. Restating them (r_regression 91 -> 100, s10 2,376 -> 5,000, the live-mark-reversal epoch 6 -> 8)
-  or keeping R1's guarantees is the owner's decision, as in Stage B1 section 5.
+- No fork test was rewritten. One of Toly's tests was completed (2e). The 9 R1 failures and the fork-only pins pin numbers that Toly's rules replace.
+  Restating them or keeping R1's guarantees is the owner's decision, as in Stage B1 section 5. The pins:
+  r_regression 91 -> 100 (#250); s10 consumed 2,376 -> 5,000 (1683b11d); `source_reclass_same_leg_reversal_insurance_backed`
+  (fuzz) 5,000 -> 0 (7d2e243d); the live-mark-reversal risk-epoch pin is one shared `6` but reads 8 (counterparty) and
+  5 (insurance), so it needs a value per variant; plus the 4 netting-line failures f5, s16, s16ac x2 (2b).
 - The merge gate needs the full suite green (check 3), so this branch cannot pass it as is. No merge.
 - Follow-up outside this repo (review S1): percolator-prog's own copy of the credit-rate formula
   (`src/v16_program.rs`, about line 44407) still divides by the full claim bound. The engine now checks the stored rate
