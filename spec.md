@@ -1141,6 +1141,8 @@ F_short_num += A_short * fund_num_total
 
 Persistent K/F overflow fails conservatively. Finally set `slot_last = now_slot`, `P_last = oracle_price`, and `fund_px_last = oracle_price`.
 
+Price-cap anchor (INV-045, upstream 71076137): the path accrual moves the effective price toward its target by at most `fund_px_last * max_price_move_bps_per_slot / MAX_MARGIN_BPS` per slot (plus the carried remainder), where `fund_px_last` is the mark when the current target took effect. A target takes effect either when the path accrual is given a target different from the stored one, or when `set_asset_raw_oracle_targets_not_atomic` stages a changed target; both restart the anchor at the current effective price. Re-staging the target already in force keeps the anchor. Kani: `proof_v16_changed_raw_target_restarts_the_cap_anchor`. Tests: `tests/v16_staged_target_cap_anchor.rs`.
+
 ### 5.4 ADL / bankrupt liquidation socialization
 
 `enqueue_adl(ctx, liq_side, q_close_q, D)`:
