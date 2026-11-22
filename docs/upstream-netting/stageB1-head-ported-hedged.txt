@@ -1,0 +1,313 @@
+warning: variable does not need to be mutable
+     --> src/v16.rs:21873:13
+      |
+21873 |         let mut ledger = account.header.close_progress.try_to_runtime()?;
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `MAX`, `overflowing_add`, `overflowing_sub`, and `saturating_add` are never used
+   --> src/wide_math.rs:245:15
+    |
+242 | impl U256 {
+    | --------- associated items in this implementation
+...
+245 |     pub const MAX: Self = Self([u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
+    |               ^^^
+...
+358 |     pub fn overflowing_add(self, rhs: U256) -> (U256, bool) {
+    |            ^^^^^^^^^^^^^^^
+...
+364 |     pub fn overflowing_sub(self, rhs: U256) -> (U256, bool) {
+    |            ^^^^^^^^^^^^^^^
+...
+372 |     pub fn saturating_add(self, rhs: U256) -> U256 {
+    |            ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: multiple associated items are never used
+   --> src/wide_math.rs:776:15
+    |
+775 | impl I256 {
+    | --------- associated items in this implementation
+776 |     pub const ZERO: Self = Self([0, 0, 0, 0]);
+    |               ^^^^
+777 |     pub const ONE: Self = Self([1, 0, 0, 0]);
+    |               ^^^
+778 |     pub const MINUS_ONE: Self = Self([u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
+    |               ^^^^^^^^^
+779 |     pub const MAX: Self = Self([u64::MAX, u64::MAX, u64::MAX, u64::MAX >> 1]);
+    |               ^^^
+...
+788 |     pub fn from_u128(v: u128) -> Self {
+    |            ^^^^^^^^^
+...
+792 |     pub fn try_into_i128(&self) -> Option<i128> {
+    |            ^^^^^^^^^^^^^
+...
+811 |     pub fn is_positive(&self) -> bool {
+    |            ^^^^^^^^^^^
+...
+815 |     pub fn signum(&self) -> i8 {
+    |            ^^^^^^
+...
+844 |     pub fn checked_mul_i256(self, rhs: I256) -> Option<I256> {
+    |            ^^^^^^^^^^^^^^^^
+...
+950 |     pub fn saturating_add(self, rhs: I256) -> I256 {
+    |            ^^^^^^^^^^^^^^
+...
+980 |     pub fn from_raw_u256(v: U256) -> Self {
+    |            ^^^^^^^^^^^^^
+...
+985 |     pub fn from_u256_or_overflow(v: U256) -> Option<Self> {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `floor_div_signed_conservative` is never used
+    --> src/wide_math.rs:1366:8
+     |
+1366 | pub fn floor_div_signed_conservative(n: I256, d: U256) -> I256 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ceil_div_positive_checked` is never used
+    --> src/wide_math.rs:1456:8
+     |
+1456 | pub fn ceil_div_positive_checked(n: U256, d: U256) -> U256 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mul_div_ceil_u256` is never used
+    --> src/wide_math.rs:1488:8
+     |
+1488 | pub fn mul_div_ceil_u256(a: U256, b: U256, d: U256) -> U256 {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: function `saturating_mul_u256_u64` is never used
+    --> src/wide_math.rs:1516:8
+     |
+1516 | pub fn saturating_mul_u256_u64(a: U256, b: u64) -> U256 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `fee_debt_u128_checked` is never used
+    --> src/wide_math.rs:1524:8
+     |
+1524 | pub fn fee_debt_u128_checked(fee_credits: i128) -> u128 {
+     |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `wide_signed_mul_div_floor` is never used
+    --> src/wide_math.rs:1541:8
+     |
+1541 | pub fn wide_signed_mul_div_floor(abs_basis: U256, k_diff: I256, denominator: U256) -> I256 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mul_div_floor_u128` is never used
+    --> src/wide_math.rs:1603:8
+     |
+1603 | pub fn mul_div_floor_u128(a: u128, b: u128, d: u128) -> u128 {
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `mul_div_ceil_u128` is never used
+    --> src/wide_math.rs:1610:8
+     |
+1610 | pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: struct `OverI128Magnitude` is never constructed
+    --> src/wide_math.rs:1727:12
+     |
+1727 | pub struct OverI128Magnitude;
+     |            ^^^^^^^^^^^^^^^^^
+
+warning: function `wide_mul_div_ceil_u128_or_over_i128max` is never used
+    --> src/wide_math.rs:1731:8
+     |
+1731 | pub fn wide_mul_div_ceil_u128_or_over_i128max(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `saturating_mul_u128_u64` is never used
+    --> src/wide_math.rs:1748:8
+     |
+1748 | pub fn saturating_mul_u128_u64(a: u128, b: u64) -> u128 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `percolator` (lib) generated 14 warnings (run `cargo fix --lib -p percolator` to apply 1 suggestion)
+   Compiling percolator v0.1.1 (/Users/khubair/agent-work/wt/J-20261120-ENG-PORT-TOLYNETTINGd)
+    Finished `release` profile [optimized] target(s) in 9m 36s
+     Running tests/hedged_refresh_fee_loss.rs (/tmp/jnetting-target/release/deps/hedged_refresh_fee_loss-3e16f2b722c8e190)
+
+running 9 tests
+test hedged_fee_loss_fee_config_needs_mm_floor_two_and_im_floor_three ... ok
+test hedged_fee_loss_account_first_loss_table_100_bps ... FAILED
+test hedged_fee_loss_at_the_loss_cap_the_fee_is_not_collected ... FAILED
+test hedged_fee_loss_fee_config_floor_one_is_rejected ... ok
+test hedged_fee_loss_zero_fee_has_zero_loss_in_both_orders ... FAILED
+test hedged_fee_loss_peak_loss_percent_of_equity ... FAILED
+test hedged_fee_loss_account_first_loss_table_50_bps ... FAILED
+test hedged_fee_loss_fee_config_fee_ceiling_follows_maintenance_margin ... ok
+test hedged_fee_loss_counterparty_first_costs_nothing_at_any_step ... ok
+
+failures:
+
+---- hedged_fee_loss_account_first_loss_table_100_bps stdout ----
+
+thread 'hedged_fee_loss_account_first_loss_table_100_bps' (219436640) panicked at tests/hedged_refresh_fee_loss.rs:333:9:
+assertion `left == right` failed: px 888
+  left: 21
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- hedged_fee_loss_at_the_loss_cap_the_fee_is_not_collected stdout ----
+
+thread 'hedged_fee_loss_at_the_loss_cap_the_fee_is_not_collected' (219436642) panicked at tests/hedged_refresh_fee_loss.rs:369:5:
+assertion failed: !r.liquidated
+
+---- hedged_fee_loss_zero_fee_has_zero_loss_in_both_orders stdout ----
+
+thread 'hedged_fee_loss_zero_fee_has_zero_loss_in_both_orders' (219436648) panicked at tests/hedged_refresh_fee_loss.rs:380:9:
+px 888: fix B (was liquidated at fee 0 too, #346)
+
+---- hedged_fee_loss_peak_loss_percent_of_equity stdout ----
+
+thread 'hedged_fee_loss_peak_loss_percent_of_equity' (219436647) panicked at tests/hedged_refresh_fee_loss.rs:359:9:
+assertion `left == right` failed: fee 50
+  left: 420
+ right: 0
+
+---- hedged_fee_loss_account_first_loss_table_50_bps stdout ----
+
+thread 'hedged_fee_loss_account_first_loss_table_50_bps' (219436641) panicked at tests/hedged_refresh_fee_loss.rs:322:9:
+assertion `left == right` failed: px 888
+  left: 9
+ right: 0
+
+
+failures:
+    hedged_fee_loss_account_first_loss_table_100_bps
+    hedged_fee_loss_account_first_loss_table_50_bps
+    hedged_fee_loss_at_the_loss_cap_the_fee_is_not_collected
+    hedged_fee_loss_peak_loss_percent_of_equity
+    hedged_fee_loss_zero_fee_has_zero_loss_in_both_orders
+
+test result: FAILED. 4 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--test hedged_refresh_fee_loss`
+     Running tests/hedged_refresh_order_liquidation.rs (/tmp/jnetting-target/release/deps/hedged_refresh_order_liquidation-bbb6ec59a704bb19)
+
+running 18 tests
+test hedged_refresh_both_orders_hold_the_same_total_value ... ok
+test hedged_refresh_counterparty_refresh_only_does_not_move_equity_of_a ... ok
+test hedged_refresh_account_first_order_no_longer_liquidates_solvent_hedge ... FAILED
+test hedged_refresh_early_equity_is_capital_minus_loss_and_backed_equity_is_capital ... ok
+test hedged_refresh_fix_b_auto_crank_does_not_liquidate_the_hedge ... FAILED
+test hedged_refresh_fix_b_bankrupt_counterparty_settles_then_hedge_is_liquidatable ... FAILED
+test hedged_refresh_fix_b_in_flight_gain_is_not_certified_equity ... FAILED
+test hedged_refresh_margin_size_does_not_close_the_window_at_the_loss_cap ... FAILED
+test hedged_refresh_repeated_liquidation_after_early_crank_ends_and_conserves ... FAILED
+test hedged_refresh_asset_one_target_is_refused_too ... FAILED
+test hedged_refresh_no_price_move_no_window ... ok
+test hedged_refresh_repeated_refresh_after_backing_changes_nothing ... ok
+test hedged_refresh_rounding_boundary_equity_exactly_at_maintenance_is_not_liquidatable ... FAILED
+test hedged_refresh_counterparty_first_order_never_liquidates_in_the_window ... ok
+test hedged_refresh_solvent_hedge_must_not_be_liquidated_before_counterparty_refresh ... FAILED
+test hedged_refresh_window_shifts_with_margin_but_never_closes ... FAILED
+test hedged_refresh_thinnest_margin_window_is_800_to_888 ... FAILED
+test hedged_refresh_smallest_window_point_must_not_liquidate_before_counterparty_refresh ... FAILED
+
+failures:
+
+---- hedged_refresh_account_first_order_no_longer_liquidates_solvent_hedge stdout ----
+
+thread 'hedged_refresh_account_first_order_no_longer_liquidates_solvent_hedge' (219436652) panicked at tests/hedged_refresh_order_liquidation.rs:344:9:
+px 888
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- hedged_refresh_fix_b_auto_crank_does_not_liquidate_the_hedge stdout ----
+
+thread 'hedged_refresh_fix_b_auto_crank_does_not_liquidate_the_hedge' (219436658) panicked at tests/hedged_refresh_order_liquidation.rs:491:21:
+px 888: AutoCrankResultV16 { selected: Liquidate { asset_index: 0 }, outcome: Progressed(AccountCurrent) }
+
+---- hedged_refresh_fix_b_bankrupt_counterparty_settles_then_hedge_is_liquidatable stdout ----
+
+thread 'hedged_refresh_fix_b_bankrupt_counterparty_settles_then_hedge_is_liquidatable' (219436659) panicked at tests/hedged_refresh_order_liquidation.rs:527:5:
+assertion `left == right` failed: 7_500 in flight covers 6_375
+  left: 6375
+ right: 0
+
+---- hedged_refresh_fix_b_in_flight_gain_is_not_certified_equity stdout ----
+
+thread 'hedged_refresh_fix_b_in_flight_gain_is_not_certified_equity' (219436660) panicked at tests/hedged_refresh_order_liquidation.rs:466:5:
+assertion `left == right` failed
+  left: 3500
+ right: 0
+
+---- hedged_refresh_margin_size_does_not_close_the_window_at_the_loss_cap stdout ----
+
+thread 'hedged_refresh_margin_size_does_not_close_the_window_at_the_loss_cap' (219436661) panicked at tests/hedged_refresh_order_liquidation.rs:318:9:
+assertion failed: !o.liquidatable_early && !o.liquidatable_backed
+
+---- hedged_refresh_repeated_liquidation_after_early_crank_ends_and_conserves stdout ----
+
+thread 'hedged_refresh_repeated_liquidation_after_early_crank_ends_and_conserves' (219436663) panicked at tests/hedged_refresh_order_liquidation.rs:388:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- hedged_refresh_asset_one_target_is_refused_too stdout ----
+
+thread 'hedged_refresh_asset_one_target_is_refused_too' (219436653) panicked at tests/hedged_refresh_order_liquidation.rs:405:5:
+assertion `left == right` failed
+  left: Ok(LiquidationOutcomeV16 { closed_q: 82352942, insurance_used: 0, residual_booked: 0, explicit_loss: 0, fee_charged: 0 })
+ right: Err(NonProgress)
+
+---- hedged_refresh_rounding_boundary_equity_exactly_at_maintenance_is_not_liquidatable stdout ----
+
+thread 'hedged_refresh_rounding_boundary_equity_exactly_at_maintenance_is_not_liquidatable' (219436665) panicked at tests/hedged_refresh_order_liquidation.rs:308:5:
+assertion failed: !under.liquidatable_early && !under.liquidatable_backed
+
+---- hedged_refresh_solvent_hedge_must_not_be_liquidated_before_counterparty_refresh stdout ----
+
+thread 'hedged_refresh_solvent_hedge_must_not_be_liquidated_before_counterparty_refresh' (219436682) panicked at tests/hedged_refresh_order_liquidation.rs:438:5:
+assertion `left == right` failed
+  left: Ok(LiquidationOutcomeV16 { closed_q: 82352942, insurance_used: 0, residual_booked: 0, explicit_loss: 0, fee_charged: 0 })
+ right: Err(NonProgress)
+
+---- hedged_refresh_window_shifts_with_margin_but_never_closes stdout ----
+
+thread 'hedged_refresh_window_shifts_with_margin_but_never_closes' (219436684) panicked at tests/hedged_refresh_order_liquidation.rs:292:13:
+cap 20000 px 800
+
+---- hedged_refresh_thinnest_margin_window_is_800_to_888 stdout ----
+
+thread 'hedged_refresh_thinnest_margin_window_is_800_to_888' (219436683) panicked at tests/hedged_refresh_order_liquidation.rs:273:9:
+px 800: Outcome { equity_early: 0, equity_backed: 20000, maintenance: 8000, liquidatable_early: true, liquidatable_backed: false }
+
+---- hedged_refresh_smallest_window_point_must_not_liquidate_before_counterparty_refresh stdout ----
+
+thread 'hedged_refresh_smallest_window_point_must_not_liquidate_before_counterparty_refresh' (219436681) panicked at tests/hedged_refresh_order_liquidation.rs:449:5:
+assertion `left == right` failed: equity 8800 vs MM 8_880
+  left: 80
+ right: 0
+
+
+failures:
+    hedged_refresh_account_first_order_no_longer_liquidates_solvent_hedge
+    hedged_refresh_asset_one_target_is_refused_too
+    hedged_refresh_fix_b_auto_crank_does_not_liquidate_the_hedge
+    hedged_refresh_fix_b_bankrupt_counterparty_settles_then_hedge_is_liquidatable
+    hedged_refresh_fix_b_in_flight_gain_is_not_certified_equity
+    hedged_refresh_margin_size_does_not_close_the_window_at_the_loss_cap
+    hedged_refresh_repeated_liquidation_after_early_crank_ends_and_conserves
+    hedged_refresh_rounding_boundary_equity_exactly_at_maintenance_is_not_liquidatable
+    hedged_refresh_smallest_window_point_must_not_liquidate_before_counterparty_refresh
+    hedged_refresh_solvent_hedge_must_not_be_liquidated_before_counterparty_refresh
+    hedged_refresh_thinnest_margin_window_is_800_to_888
+    hedged_refresh_window_shifts_with_margin_but_never_closes
+
+test result: FAILED. 6 passed; 12 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `--test hedged_refresh_order_liquidation`
+error: 2 targets failed:
+    `--test hedged_refresh_fee_loss`
+    `--test hedged_refresh_order_liquidation`

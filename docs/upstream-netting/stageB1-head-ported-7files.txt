@@ -1,0 +1,321 @@
+   Compiling percolator v0.1.1 (/Users/khubair/agent-work/wt/J-20261120-ENG-PORT-TOLYNETTINGd)
+warning: variable does not need to be mutable
+     --> src/v16.rs:21873:13
+      |
+21873 |         let mut ledger = account.header.close_progress.try_to_runtime()?;
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `MAX`, `overflowing_add`, `overflowing_sub`, and `saturating_add` are never used
+   --> src/wide_math.rs:245:15
+    |
+242 | impl U256 {
+    | --------- associated items in this implementation
+...
+245 |     pub const MAX: Self = Self([u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
+    |               ^^^
+...
+358 |     pub fn overflowing_add(self, rhs: U256) -> (U256, bool) {
+    |            ^^^^^^^^^^^^^^^
+...
+364 |     pub fn overflowing_sub(self, rhs: U256) -> (U256, bool) {
+    |            ^^^^^^^^^^^^^^^
+...
+372 |     pub fn saturating_add(self, rhs: U256) -> U256 {
+    |            ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: multiple associated items are never used
+   --> src/wide_math.rs:776:15
+    |
+775 | impl I256 {
+    | --------- associated items in this implementation
+776 |     pub const ZERO: Self = Self([0, 0, 0, 0]);
+    |               ^^^^
+777 |     pub const ONE: Self = Self([1, 0, 0, 0]);
+    |               ^^^
+778 |     pub const MINUS_ONE: Self = Self([u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
+    |               ^^^^^^^^^
+779 |     pub const MAX: Self = Self([u64::MAX, u64::MAX, u64::MAX, u64::MAX >> 1]);
+    |               ^^^
+...
+788 |     pub fn from_u128(v: u128) -> Self {
+    |            ^^^^^^^^^
+...
+792 |     pub fn try_into_i128(&self) -> Option<i128> {
+    |            ^^^^^^^^^^^^^
+...
+811 |     pub fn is_positive(&self) -> bool {
+    |            ^^^^^^^^^^^
+...
+815 |     pub fn signum(&self) -> i8 {
+    |            ^^^^^^
+...
+844 |     pub fn checked_mul_i256(self, rhs: I256) -> Option<I256> {
+    |            ^^^^^^^^^^^^^^^^
+...
+950 |     pub fn saturating_add(self, rhs: I256) -> I256 {
+    |            ^^^^^^^^^^^^^^
+...
+980 |     pub fn from_raw_u256(v: U256) -> Self {
+    |            ^^^^^^^^^^^^^
+...
+985 |     pub fn from_u256_or_overflow(v: U256) -> Option<Self> {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `floor_div_signed_conservative` is never used
+    --> src/wide_math.rs:1366:8
+     |
+1366 | pub fn floor_div_signed_conservative(n: I256, d: U256) -> I256 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ceil_div_positive_checked` is never used
+    --> src/wide_math.rs:1456:8
+     |
+1456 | pub fn ceil_div_positive_checked(n: U256, d: U256) -> U256 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mul_div_ceil_u256` is never used
+    --> src/wide_math.rs:1488:8
+     |
+1488 | pub fn mul_div_ceil_u256(a: U256, b: U256, d: U256) -> U256 {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: function `saturating_mul_u256_u64` is never used
+    --> src/wide_math.rs:1516:8
+     |
+1516 | pub fn saturating_mul_u256_u64(a: U256, b: u64) -> U256 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `fee_debt_u128_checked` is never used
+    --> src/wide_math.rs:1524:8
+     |
+1524 | pub fn fee_debt_u128_checked(fee_credits: i128) -> u128 {
+     |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `wide_signed_mul_div_floor` is never used
+    --> src/wide_math.rs:1541:8
+     |
+1541 | pub fn wide_signed_mul_div_floor(abs_basis: U256, k_diff: I256, denominator: U256) -> I256 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mul_div_floor_u128` is never used
+    --> src/wide_math.rs:1603:8
+     |
+1603 | pub fn mul_div_floor_u128(a: u128, b: u128, d: u128) -> u128 {
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `mul_div_ceil_u128` is never used
+    --> src/wide_math.rs:1610:8
+     |
+1610 | pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {
+     |        ^^^^^^^^^^^^^^^^^
+
+warning: struct `OverI128Magnitude` is never constructed
+    --> src/wide_math.rs:1727:12
+     |
+1727 | pub struct OverI128Magnitude;
+     |            ^^^^^^^^^^^^^^^^^
+
+warning: function `wide_mul_div_ceil_u128_or_over_i128max` is never used
+    --> src/wide_math.rs:1731:8
+     |
+1731 | pub fn wide_mul_div_ceil_u128_or_over_i128max(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `saturating_mul_u128_u64` is never used
+    --> src/wide_math.rs:1748:8
+     |
+1748 | pub fn saturating_mul_u128_u64(a: u128, b: u64) -> u128 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `percolator` (lib) generated 14 warnings (run `cargo fix --lib -p percolator` to apply 1 suggestion)
+warning: unused variable: `cap`
+   --> tests/gh292_att_d.rs:229:10
+    |
+229 |     let (cap, conv) = winner_cash_out(&mut w, 2);
+    |          ^^^ help: if this is intentional, prefix it with an underscore: `_cap`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `cap`
+   --> tests/gh292_att_d.rs:247:14
+    |
+247 |         let (cap, conv) = winner_cash_out(&mut w, 2);
+    |              ^^^ help: if this is intentional, prefix it with an underscore: `_cap`
+
+warning: constant `DOMAIN_A0_SHORT` is never used
+   --> tests/gh292_att_d.rs:161:7
+    |
+161 | const DOMAIN_A0_SHORT: usize = 1;
+    |       ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `DOMAIN_A1_SHORT` is never used
+   --> tests/gh292_att_d.rs:162:7
+    |
+162 | const DOMAIN_A1_SHORT: usize = 3;
+    |       ^^^^^^^^^^^^^^^
+
+warning: `percolator` (test "gh292_att_d") generated 4 warnings (run `cargo fix --test "gh292_att_d" -p percolator` to apply 2 suggestions)
+warning: constant `DOMAIN_A0_SHORT` is never used
+   --> tests/gh292_att_bprime.rs:161:7
+    |
+161 | const DOMAIN_A0_SHORT: usize = 1;
+    |       ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `percolator` (test "gh292_att_bprime") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 28m 41s
+     Running tests/gh292_att_bprime.rs (/tmp/jnetting-target/release/deps/gh292_att_bprime-7e18eaa0982ba354)
+
+running 11 tests
+test att_conservation_and_drain_dip_vs_control ... ok
+test att_attributable_loss_escapes_insurance_via_trade_close ... ok
+test att_d6_shape_steers_payer ... ok
+test att_trade_close_flat_deficit_resolved_by_refresh_only ... ok
+test att_same_domain_split_counterparties_prorata ... ok
+test att_writeoff_rearms_global_claim_term_latch ... ok
+test att_writeoff_hlock_pinned_by_honest_open_winner ... ok
+test att_same_domain_first_converter_vs_prorata ... ok
+test att_probe_dip_vs_control ... ok
+test att_order_independence_and_double_writeoff_unattributable ... ok
+test att_cross_domain_socialization_of_write_off ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/gh292_att_d.rs (/tmp/jnetting-target/release/deps/gh292_att_d-f9f0ba7de977ca8e)
+
+running 7 tests
+test att_d6_shape_steers_payer ... ok
+test att_d1_conservation_after_writeoff ... ok
+test att_d2_insurance_never_used_money ... ok
+test att_d3_dormant_winner_keeps_hlock ... ok
+test att_d4_cowinner_order ... ok
+test att_d5_unrelated_winner_keeps_group_hlock ... ok
+test att_d7_reuse_after_writeoff_counters_stay_consistent ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/gh292_locked_liquidation_recovery.rs (/tmp/jnetting-target/release/deps/gh292_locked_liquidation_recovery-05767ef96b6a2b2b)
+
+running 14 tests
+test e299_closing_the_other_leg_first_charges_nothing ... ok
+test e299_liquidator_cannot_steer_a0_loss_onto_a1_insurance ... ok
+test e299_two_domain_deficit_is_unattributable_and_is_written_off_not_recovered ... ok
+test gh292_locked_close_with_open_risk_remaining_charges_nothing ... ok
+test gh292_locked_flat_close_resolves_the_deficit_in_the_live_market ... ok
+test gh292_only_the_charged_domains_holder_bears_the_booking ... ok
+test gh292_single_asset_bankruptcy_still_resolves_in_place ... ok
+test gh292_small_residual_after_insurance_does_not_escalate ... ok
+test gh292_stage_insurance_only_cover_books_nothing ... ok
+test gh292_uncoverable_deficit_is_charged_partially_and_written_off_never_recovery ... ok
+test gh292_stage_insurance_then_b_booking_in_order ... ok
+test e299_close_order_does_not_change_who_pays ... ok
+test gh292_sim_locked_flat_close_invariants ... ok
+test gh292_sim_sweep_covers_every_waterfall_outcome ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.97s
+
+     Running tests/liquidations_edge.rs (/tmp/jnetting-target/release/deps/liquidations_edge-f97a01527fdffb49)
+
+running 25 tests
+test liq_edge_bankrupt_full_close_insurance_covers_exactly ... ok
+test liq_edge_clean_unilateral_partial_does_not_charge_the_winner ... ok
+test liq_edge_cross_margin_partial_on_either_leg_restores_account_health ... ok
+test liq_edge_cross_margin_bankrupt_two_legs_resolves_without_recovery ... ok
+test liq_edge_fee_floor_allows_partial_when_raw_fee_clears_it ... ok
+test liq_edge_fee_floor_forces_full_close_when_partial_is_below_floor ... ok
+test liq_edge_equity_exactly_at_maintenance_is_not_liquidated ... ok
+test liq_edge_fee_is_capped ... ok
+test liq_edge_fee_never_exceeds_capital_on_full_close ... ok
+test liq_edge_flat_account_is_refused ... ok
+test liq_edge_full_insurance_cover_hlock_waits_only_for_winner_claim ... ok
+test liq_edge_insurance_of_other_domain_is_not_spent ... ok
+test liq_edge_healthy_account_is_refused_and_untouched ... ok
+test liq_edge_matched_entry_on_bankrupt_close_equals_plain ... ok
+test liq_edge_matched_partial_reduces_both_legs_equally ... ok
+test liq_edge_partial_close_accounts_for_target_lag_penalty ... ok
+test liq_edge_partial_close_is_minimal_and_restores_health_long ... ok
+test liq_edge_repeated_partial_closes_on_a_falling_price ... ok
+test liq_edge_partial_close_is_minimal_and_restores_health_short ... ok
+test liq_edge_residual_after_partial_insurance ... ok
+test liq_edge_residual_with_no_insurance_books_to_winners ... ok
+test liq_edge_second_call_after_partial_is_refused ... ok
+test liq_edge_short_bankrupt_full_close_uses_winners_domain ... ok
+test liq_edge_wrong_asset_index_is_refused ... ok
+test liq_edge_zero_fee_partial_close ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/multi_asset_portfolio_cross_edge.rs (/tmp/jnetting-target/release/deps/multi_asset_portfolio_cross_edge-b548abccda2097be)
+
+running 24 tests
+test multi_asset_close_order_of_legs_gives_the_same_final_value ... ok
+test multi_asset_bankrupt_two_leg_account_ends_flat_with_no_negative_pnl_left ... ok
+test multi_asset_closing_one_asset_leaves_the_other_leg_and_conserves_value ... ok
+test multi_asset_all_sixteen_assets_open_close_middle_and_reopen ... ok
+test multi_asset_conservation_through_loss_liquidation_and_close ... ok
+test multi_asset_all_sixteen_assets_move_and_value_is_conserved ... ok
+test multi_asset_closing_the_losing_leg_does_not_need_initial_margin_on_the_other ... ok
+test multi_asset_liquidation_is_repeatable_until_healthy_or_flat_and_then_stops ... ok
+test multi_asset_liquidation_of_one_asset_keeps_the_other_leg_bitmap_and_counts ... ok
+test multi_asset_liquidation_request_for_an_asset_the_account_does_not_hold_is_refused ... ok
+test multi_asset_equity_exactly_at_shared_maintenance_is_not_liquidatable_on_either_asset ... ok
+test multi_asset_bankrupt_close_order_does_not_change_who_pays ... ok
+test multi_asset_loss_on_asset_one_never_spends_asset_zero_insurance ... ok
+test multi_asset_loss_on_one_asset_alone_tips_a_two_leg_account ... ok
+test multi_asset_loss_on_two_assets_is_not_charged_to_either_domain_insurance ... ok
+test multi_asset_maintenance_requirement_is_the_sum_of_per_leg_requirements ... ok
+test multi_asset_one_atom_under_shared_maintenance_is_liquidatable_through_the_flat_asset ... ok
+test multi_asset_one_position_atom_legs_on_every_asset_open_and_close ... ok
+test multi_asset_repeated_refresh_changes_nothing ... ok
+test multi_asset_profit_on_one_leg_covers_loss_on_the_other_for_maintenance ... ok
+test multi_asset_round_trip_price_on_both_assets_returns_to_start_value ... ok
+test multi_asset_zero_size_trade_on_second_asset_is_refused_and_first_leg_untouched ... ok
+test multi_asset_single_domain_loss_spends_exactly_the_deficit_from_that_domain_insurance ... ok
+test multi_asset_partial_close_in_many_small_fills_equals_one_fill ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/v16_kf_loss_domain_attribution.rs (/tmp/jnetting-target/release/deps/v16_kf_loss_domain_attribution-f00a5aedbf2657f8)
+
+running 11 tests
+test live_loss_beyond_free_capital_books_its_consumed_support_for_the_loss_domain ... ok
+test same_refresh_legs_that_consume_the_whole_deposit_leave_both_gains_backed ... ok
+test same_refresh_gain_and_loss_legs_back_each_loss_domain_in_any_leg_order ... ok
+test resolved_same_leg_reversal_against_loser_paid_twin_face_backs_the_regain ... ok
+test resolved_loss_against_own_face_in_the_loss_domain_repays_the_provider ... ok
+test resolved_cross_asset_loss_larger_or_smaller_than_the_face ... ok
+test live_cross_asset_loss_against_prior_face_backs_the_loss_domain ... ok
+test resolved_cross_asset_loss_against_prior_face_repays_the_loss_domain_provider ... ok
+test resolved_cross_asset_funding_loss_against_prior_face_repays_the_loss_domain_provider ... ok
+test resolved_loss_against_liened_face_repays_the_loss_domain_provider ... ok
+test funded_markets_wind_down_fairly_wherever_the_last_losses_crystallize ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.00s
+
+     Running tests/v16_kf_loss_same_domain_face.rs (/tmp/jnetting-target/release/deps/v16_kf_loss_same_domain_face-ae54fae0de0077b3)
+
+running 12 tests
+test cancelling_the_own_face_ends_where_converting_it_first_does ... ok
+test control_converting_the_face_before_the_loss_settles_exactly ... ok
+test control_lapsed_loss_domain_backing_is_not_netted_at_its_stale_rate ... ok
+test control_own_face_below_rate_one_is_kept_and_the_loss_paid_from_capital ... ok
+test control_liened_own_face_is_unwound_in_place ... ok
+test funding_loss_cancels_the_accounts_own_face_in_the_loss_domain ... ok
+test kf_loss_cancels_the_accounts_own_face_through_the_permissionless_crank ... ok
+test kf_loss_cancels_the_accounts_own_face_in_the_loss_domain ... ok
+test kf_loss_larger_than_the_own_face_pays_only_the_rest_from_capital ... ok
+test control_face_in_another_domain_moves_its_backing_to_the_loss_domain ... ok
+test kf_loss_smaller_than_the_own_face_keeps_the_rest_of_the_claim ... ok
+test fully_cranked_markets_keep_every_domain_exactly_backed ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.25s
+
