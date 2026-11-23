@@ -16094,27 +16094,37 @@ fn s16_resolved_walk(seed: u64) -> Option<([u128; 4], bool, u128)> {
 
 #[test]
 fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
-    // (seed, paid, vault left). On 3ce4cbd1 these seeds paid less and left more in the
-    // vault: 1470 -> [800,200,499,80] 21; 2322 -> [800,800,200,780] 20;
-    // 3167 -> [880,480,1000,1000] 40; 4698 -> [880,200,800,1000] 120;
-    // 5120 -> [909,200,880,200] 11. Before upstream's K/F netting chain (#387) they read
-    // 1470 -> [800,200,509,80] 11; 2322 -> [800,800,209,780] 11; 3167 -> [880,500,1000,1000] 20;
-    // 4698 -> [880,200,800,1090] 30; 5120 -> [919,200,880,200] 1. Under #387, 4 of the 5
-    // seeds leave MORE in the vault than 3ce4cbd1 did (1470: 200 vs 21, 2322: 120 vs 20,
-    // 4698: 1,200 vs 120 with actor 0 paid 0, 5120: 20 vs 11): a regression against what this
-    // test was written to hold, pinned as measured. This walk keeps the state of failed calls
-    // (see `s16ac_walk` for the rollback-faithful one).
+    // (seed, paid, vault left). Payouts are pinned on the rollback-faithful replay of the same
+    // scenario (`s16ac_walk`, same generator and draw order; a failed call restores the market
+    // and every account, as the SVM does). `s16_resolved_walk` keeps the writes of failed
+    // `_not_atomic` calls, a state no transaction can commit, so its payouts are not money any
+    // account can lose on chain. Under #387 that walk pinned seed 4698 at [0, 200, 800, 800]
+    // with 1,200 left: account 0's Live refreshes fail with LockActive (its loss-domain bucket
+    // is Fresh past its expiry and cannot take the booking until an expiry crank) after the
+    // loss is already written to its PnL, and the walk keeps that write, so the capital later
+    // taken for it is booked nowhere. Replayed with rollback, account 0 is paid 880 (1,000
+    // less its 120 loss) and 1 atom is left. Seeds 1470, 2322 and 5120 likewise strand
+    // nothing once failed calls roll back. Seed 3167 paid [880, 520, 1000, 1000] with 0 left
+    // before upstream 78d180f2 part 2 and pays 519 with 1 left after it: one atom of whole-atom
+    // rounding (see `s16ac_early_winner_keeps_backing_that_arrives_after_its_close`).
+    // On 3ce4cbd1 the old walk read 1470 -> [800,200,499,80]
+    // 21; 2322 -> [800,800,200,780] 20; 3167 -> [880,480,1000,1000] 40; 4698 ->
+    // [880,200,800,1000] 120; 5120 -> [909,200,880,200] 11 (also with failed writes kept).
     let pinned: [(u64, [u128; 4], u128); 5] = [
-        (1470, [800, 200, 400, 0], 200),
-        (2322, [800, 800, 220, 660], 120),
+        (1470, [800, 200, 520, 80], 0),
+        (2322, [800, 800, 220, 780], 0),
         (3167, [880, 519, 1000, 1000], 1),
-        (4698, [0, 200, 800, 800], 1200),
-        (5120, [920, 200, 860, 200], 20),
+        (4698, [880, 200, 800, 1119], 1),
+        (5120, [920, 200, 880, 200], 0),
     ];
-    for (seed, paid, vault) in pinned {
-        let (got, all_closed, v) = s16_resolved_walk(seed).expect("scenario builds");
+    for (seed, paid, left) in pinned {
+        let o = s16ac_walk(seed, 80).expect("scenario builds");
+        assert!(o.closed.iter().all(|c| *c), "seed {seed}: every account closes");
+        assert_eq!(o.paid.iter().sum::<u128>() + o.vault, o.deposits + o.insurance, "seed {seed}");
+        assert_eq!((o.paid, o.vault - o.insurance), (paid, left), "seed {seed}");
+        // the walk that keeps failed calls' writes still builds the same scenario and closes it
+        let (_, all_closed, _) = s16_resolved_walk(seed).expect("scenario builds");
         assert!(all_closed, "seed {seed}: every account closes");
-        assert_eq!((got, v), (paid, vault), "seed {seed}");
     }
     // Liveness: the walk leaves some accounts unclosed only because it stops after 80
     // random steps; 3ce4cbd1 has exactly 7 (648, 1649, 2061, 2556, 5124, 5620, 5942), and
