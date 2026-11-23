@@ -1597,8 +1597,104 @@ fn v16_fee_sync_on_nonflat_account_settles_hidden_k_loss_before_fee() {
     assert_eq!(long.header.capital.get(), 0);
     assert_eq!(long.header.pnl.get(), 0);
     assert_eq!(market.header.insurance.get(), 50);
+    assert!(
+        !long.header.health_cert.try_to_runtime().unwrap().valid,
+        "a sync whose settlement moved PnL leaves the certificate void"
+    );
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_fee_sync_keeps_a_current_certificate_when_its_settlement_changes_nothing() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 14);
+    let mut short_header = account_fixture(1, 15);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+        // Two slots at the same price and without funding: no epoch moves.
+        market
+            .accrue_asset_to_not_atomic(0, 2, 100, 0, true)
+            .unwrap();
+    }
+    let epochs = (
+        header.oracle_epoch.get(),
+        header.funding_epoch.get(),
+        header.risk_epoch.get(),
+        header.asset_set_epoch.get(),
+    );
+    let cert_epochs = |cert: HealthCertV16| {
+        (
+            cert.cert_oracle_epoch,
+            cert.cert_funding_epoch,
+            cert.cert_risk_epoch,
+            cert.cert_asset_set_epoch,
+        )
+    };
+    let before = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(before.valid);
+    assert_eq!(cert_epochs(before), epochs, "the certificate is current");
+    let capital_before = long_header.capital.get();
+
+    let charged = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let charged = market
+            .sync_account_fee_to_slot_not_atomic(&mut long, 2, 7)
+            .unwrap();
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        charged
+    };
+    assert!(charged > 0, "the fixture must charge a fee");
+    assert_eq!(long_header.capital.get(), capital_before - charged);
+    let kept = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(
+        kept.valid,
+        "a fee sync that settled nothing keeps a current certificate"
+    );
+    assert_eq!(cert_epochs(kept), epochs);
+    assert_eq!(
+        kept.certified_equity,
+        before.certified_equity - charged as i128
+    );
+
+    // A full refresh of the same state computes the same certificate.
+    let (mut refresh_header, mut refresh_markets) = (header.clone(), markets.clone());
+    let mut refresh_long_header = long_header.clone();
+    let refreshed = {
+        let mut market = MarketGroupV16ViewMut::new(&mut refresh_header, &mut refresh_markets);
+        let mut long = PortfolioV16ViewMut::new(&mut refresh_long_header);
+        market.full_account_refresh_not_atomic(&mut long).unwrap()
+    };
+    assert_eq!(refreshed.certified_equity, kept.certified_equity);
+    assert_eq!(refreshed.certified_initial_req, kept.certified_initial_req);
+    assert_eq!(
+        refreshed.certified_maintenance_req,
+        kept.certified_maintenance_req
+    );
+    assert_eq!(refreshed.certified_liq_deficit, kept.certified_liq_deficit);
+    assert_eq!(
+        refreshed.certified_worst_case_loss,
+        kept.certified_worst_case_loss
+    );
 }
 
 #[test]
