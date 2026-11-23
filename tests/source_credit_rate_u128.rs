@@ -64,6 +64,11 @@ fn credit_rate_matches_u256_on_edges() {
             check(available, bound);
         }
     }
+    // available == 0 reaches the helper from source_credit_protective_rate (no early return there)
+    for bound in values {
+        check(0, bound);
+        assert_eq!(fast(0, bound), Ok(0));
+    }
 }
 
 #[test]
