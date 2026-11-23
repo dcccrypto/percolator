@@ -428,6 +428,11 @@ fn low_price_floor_carry_remainder_is_not_stored_so_a_caller_chosen_value_buys_o
 }
 
 // ---------- a moving target pins the market below 34 atoms ----------
+//
+// The `..._pins_*` tests below pass remainder 0 on every call: they show the pin for a caller
+// that drops the carry on each target change, which is how the program builds its path today.
+// The engine itself keeps the carry on a same-direction change; the two `..._must_*_progress`
+// tests carry it and move.
 
 /// a feed that changes every slot, always asking for 1 atom lower
 fn drift_down(w: &mut World, slots: u64) {

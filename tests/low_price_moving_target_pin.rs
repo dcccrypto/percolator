@@ -5,7 +5,7 @@ use percolator::{
     canonical_accrual_price_step_v16, AccrualStepV16, AssetStateV16, EngineAssetSlotV16Account,
     Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
-    V16Config, POS_SCALE,
+    V16Config, V16Error, POS_SCALE,
 };
 
 const P0: u64 = 50;
@@ -150,7 +150,22 @@ fn a_reversed_target_still_restarts_the_carry() {
         true,
     );
     assert!(
-        refused.is_err(),
+        matches!(refused, Err(V16Error::InvalidConfig)),
         "carry reused across a reversal: {refused:?}"
     );
+    // the same reversal starting from 0 is accepted, so the refusal above is the carry rule
+    let (p0, r0) = canonical_accrual_price_step_v16(P0, 90, P0, CAP_BPS, true, 0).unwrap();
+    m.accrue_asset_path_to_not_atomic(
+        0,
+        a.slot_last + 1,
+        90,
+        &[AccrualStepV16 {
+            effective_price: p0,
+            funding_rate_e9: 0,
+            price_move_remainder_before_bps_num: 0,
+            price_move_remainder_after_bps_num: r0,
+        }],
+        true,
+    )
+    .unwrap();
 }
