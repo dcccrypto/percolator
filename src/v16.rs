@@ -18491,6 +18491,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.band_prepare_accrual(asset_index, asset, &config, segment_end_slot)?;
         asset = reanchored;
         let target_changed = asset.raw_oracle_target_price != raw_oracle_target_price;
+        // A new target on the same side of the mark keeps the sub-atom carry; only a reversal
+        // (or a first target) restarts it. Resetting on every change pins a low mark whose
+        // `anchor * cap` is below one atom while the oracle keeps reporting new prices.
+        let old_target = asset.raw_oracle_target_price;
+        let same_direction = old_target != 0
+            && ((old_target > asset.effective_price
+                && raw_oracle_target_price > asset.effective_price)
+                || (old_target < asset.effective_price
+                    && raw_oracle_target_price < asset.effective_price));
+        let carry_must_restart = target_changed && !same_direction;
         let price_cap_anchor = if target_changed {
             asset.effective_price
         } else {
@@ -18517,7 +18527,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if step.effective_price == 0
                 || step.effective_price > MAX_ORACLE_PRICE
                 || step.funding_rate_e9.unsigned_abs() > config.max_abs_funding_e9_per_slot as u128
-                || (index == 0 && target_changed && step.price_move_remainder_before_bps_num != 0)
+                || (index == 0
+                    && carry_must_restart
+                    && step.price_move_remainder_before_bps_num != 0)
                 || step.price_move_remainder_before_bps_num != expected_remainder
             {
                 return Err(V16Error::InvalidConfig);
