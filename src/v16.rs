@@ -8896,7 +8896,7 @@ impl AssetStateV16Account {
     }
 
     /// The fallible steps of `try_to_runtime`, in the same order, without building the
-    /// 55-field runtime value (~350 CU on SBF): for callers that need one or two raw fields.
+    /// 54-field runtime value (~350 CU on SBF): for callers that need one or two raw fields.
     /// `validate_wire_only().err() == try_to_runtime().err()` for every account value
     /// (tests/asset_state_wire_only.rs); keep the two in step when a fallible field is added.
     #[inline]

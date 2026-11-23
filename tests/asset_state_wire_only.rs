@@ -78,11 +78,11 @@ fn wire_only_matches_full_decode_on_targeted_corruptions() {
                     _ => {}
                 }
                 check(&a);
-                let mut a = base;
-                *i128_fields(&mut a)[i] = V16PodI128::new(i128::MIN + 1);
-                *i128_fields(&mut a)[j] = V16PodI128::new(i128::MAX);
-                check(&a);
             }
+            let mut a = base;
+            *i128_fields(&mut a)[i] = V16PodI128::new(i128::MIN + 1);
+            *i128_fields(&mut a)[j] = V16PodI128::new(i128::MAX);
+            check(&a);
         }
     }
 }
