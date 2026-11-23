@@ -4100,6 +4100,55 @@ impl V16Core {
         }
     }
 
+    /// PRODUCTION KERNEL (accrual, the oracle bound of one segment): an equity-active
+    /// accrual segment of `segment_dt` slots may move the effective price from
+    /// `old_price` to `new_price` only if `|new_price - old_price| * MAX_MARGIN_BPS <=
+    /// max_price_move_bps_per_slot * segment_dt * old_price`; a larger move requires
+    /// Recovery, whatever price the oracle reports. Pure; the single-segment accrual
+    /// (`accrue_asset_to_not_atomic`) calls exactly this.
+    #[inline(always)]
+    pub(crate) fn kernel_accrual_price_move_within_cap(
+        old_price: u64,
+        new_price: u64,
+        max_price_move_bps_per_slot: u64,
+        segment_dt: u64,
+    ) -> V16Result<()> {
+        let price_diff = new_price.abs_diff(old_price) as u128;
+        let lhs = price_diff
+            .checked_mul(MAX_MARGIN_BPS as u128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let rhs = (max_price_move_bps_per_slot as u128)
+            .checked_mul(segment_dt as u128)
+            .and_then(|v| v.checked_mul(old_price as u128))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if lhs > rhs {
+            return Err(V16Error::RecoveryRequired);
+        }
+        Ok(())
+    }
+
+    /// PRODUCTION KERNEL (accrual, the funding of one segment): the per-unit funding
+    /// transfer `funding_rate_e9 * segment_dt * effective_price`, in units of
+    /// `1 / FUNDING_DEN` price units, or 0 when funding is not active in the segment.
+    /// Pure; the single-segment accrual calls it with the segment's length and the path
+    /// accrual with 1 per step (where `rate * 1` cannot overflow, so the result and the
+    /// error are those of `rate * price`).
+    #[inline(always)]
+    pub(crate) fn kernel_accrual_funding_num(
+        funding_rate_e9: i128,
+        segment_dt: u64,
+        effective_price: u64,
+        funding_active: bool,
+    ) -> V16Result<i128> {
+        if !funding_active {
+            return Ok(0);
+        }
+        funding_rate_e9
+            .checked_mul(segment_dt as i128)
+            .and_then(|v| v.checked_mul(effective_price as i128))
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
     #[inline]
     fn liquidation_progress_from_scores(before: RiskScoreV16, after: RiskScoreV16) -> bool {
         after.strictly_reduces_from(before)
@@ -18687,17 +18736,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if segment_dt == 0 {
                 return Err(V16Error::NonProgress);
             }
-            let price_diff = effective_price.abs_diff(old.effective_price) as u128;
-            let lhs = price_diff
-                .checked_mul(MAX_MARGIN_BPS as u128)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            let rhs = (config.max_price_move_bps_per_slot as u128)
-                .checked_mul(segment_dt as u128)
-                .and_then(|v| v.checked_mul(old.effective_price as u128))
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            if lhs > rhs {
-                return Err(V16Error::RecoveryRequired);
-            }
+            // PRODUCTION KERNEL: the price-move cap of the segment.
+            V16Core::kernel_accrual_price_move_within_cap(
+                old.effective_price,
+                effective_price,
+                config.max_price_move_bps_per_slot,
+                segment_dt,
+            )?;
             if !protective_progress_committed {
                 return Err(V16Error::NonProgress);
             }
@@ -18714,14 +18759,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // over-realized by ADL_ONE/a_side (see issue #114).
         // fix/v21-funding-precision: keep the funding numerator unfloored; the per-side F
         // deltas are rounded once, in `kernel_funding_index_deltas`.
-        let funding_num = if activity.funding_active {
-            funding_rate_e9
-                .checked_mul(segment_dt as i128)
-                .and_then(|v| v.checked_mul(effective_price as i128))
-                .ok_or(V16Error::ArithmeticOverflow)?
-        } else {
-            0
-        };
+        // PRODUCTION KERNEL: the segment's funding amount.
+        let funding_num = V16Core::kernel_accrual_funding_num(
+            funding_rate_e9,
+            segment_dt,
+            effective_price,
+            activity.funding_active,
+        )?;
         let (k_delta_long, k_delta_short, _, _) = V16Core::kernel_adl_scaled_accrual_index_deltas(
             price_delta,
             0,
@@ -19080,13 +19124,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
             let price_delta = step.effective_price as i128 - asset.effective_price as i128;
             // fix/v21-funding-precision: unfloored numerator (see `kernel_funding_index_deltas`).
-            let funding_num = if activity.funding_active {
-                step.funding_rate_e9
-                    .checked_mul(step.effective_price as i128)
-                    .ok_or(V16Error::ArithmeticOverflow)?
-            } else {
-                0
-            };
+            // PRODUCTION KERNEL: the step's funding amount (one slot).
+            let funding_num = V16Core::kernel_accrual_funding_num(
+                step.funding_rate_e9,
+                1,
+                step.effective_price,
+                activity.funding_active,
+            )?;
             let (k_delta_long, k_delta_short, _, _) =
                 V16Core::kernel_adl_scaled_accrual_index_deltas(
                     price_delta,
