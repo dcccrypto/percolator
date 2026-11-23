@@ -10,13 +10,13 @@
 //! The mirror direction (side OI exceeds its legs) is aeyakovenko/percolator#238 and is
 //! deliberately untouched: `controls_*` pin that the clamp never fires there.
 
-use percolator::ADL_ONE;
 use percolator::{
     AssetLifecycleV16, AssetStateV16, EngineAssetSlotV16Account, Market,
     MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
     V16Config, V16Error,
 };
+use percolator::ADL_ONE;
 
 const PRICE: u64 = 1_000_000;
 /// Long side scaled to ~1/3 by a prior one-sided ADL; with `LEG_BASIS` the ceil lands exactly
@@ -27,7 +27,9 @@ const OI_EFF_LONG: u128 = 1_333_333;
 
 fn account(seed: u8) -> PortfolioAccountV16Account {
     let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
-        [1; 32], [seed; 32], [3; 32],
+        [1; 32],
+        [seed; 32],
+        [3; 32],
     ));
     let mut a = PortfolioAccountV16Account::default();
     a.init_empty_in_place(header).unwrap();
@@ -46,7 +48,8 @@ impl World {
         self.markets[0].engine.asset.try_to_runtime().unwrap()
     }
     fn set_asset(&mut self, asset: AssetStateV16) {
-        self.markets[0].engine.asset = percolator::AssetStateV16Account::from_runtime(&asset);
+        self.markets[0].engine.asset =
+            percolator::AssetStateV16Account::from_runtime(&asset);
     }
 }
 
@@ -127,8 +130,7 @@ fn the_fixture_has_a_one_atom_ceil_over_floor_gap() {
     assert_ne!(exact % ADL_ONE, 0);
     assert_eq!(asset.oi_eff_long_q, OI_EFF_LONG);
     let view = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
-    view.validate_shape()
-        .expect("fixture must be a valid shape");
+    view.validate_shape().expect("fixture must be a valid shape");
 }
 
 /// The #290 state: the opposite side holds only a zero-basis obligation (its owner forfeited), so the long's leg is
@@ -149,10 +151,7 @@ fn forfeit_then_withdraw_succeed_on_a_one_atom_gap() {
     let mut w = world(OI_EFF_LONG);
     forfeit_short(&mut w);
     // retained as a zero-basis pending obligation: no real position left on the short side
-    assert_eq!(
-        w.asset().pending_obligation_count_short,
-        w.asset().stored_pos_count_short
-    );
+    assert_eq!(w.asset().pending_obligation_count_short, w.asset().stored_pos_count_short);
     let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
     let mut long = PortfolioV16ViewMut::new(&mut w.long);
 
@@ -162,10 +161,7 @@ fn forfeit_then_withdraw_succeed_on_a_one_atom_gap() {
     let outcome = m
         .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
         .expect("forfeit must absorb the rounding gap, not underflow");
-    assert!(
-        outcome.detached,
-        "the leg must actually detach: {outcome:?}"
-    );
+    assert!(outcome.detached, "the leg must actually detach: {outcome:?}");
     m.validate_shape().unwrap();
 
     m.withdraw_not_atomic(&mut long, 1)
@@ -173,10 +169,7 @@ fn forfeit_then_withdraw_succeed_on_a_one_atom_gap() {
     drop(m);
     let asset = w.asset();
     assert_eq!(asset.stored_pos_count_long, 0);
-    assert_eq!(
-        asset.oi_eff_long_q, 0,
-        "the gap was absorbed, not left behind"
-    );
+    assert_eq!(asset.oi_eff_long_q, 0, "the gap was absorbed, not left behind");
     assert_eq!(asset.loss_weight_sum_long, 0);
 }
 

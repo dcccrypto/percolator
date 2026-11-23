@@ -708,9 +708,5 @@ fn f03_d_no_public_entry_lowers_the_counter() {
         w.explicit_long(),
         tried.len()
     );
-    assert_eq!(
-        w.hlock(),
-        5,
-        "and the group byte is still latched (P2b L1: attributed to domain 1)"
-    );
+    assert_eq!(w.hlock(), 5, "and the group byte is still latched (P2b L1: attributed to domain 1)");
 }

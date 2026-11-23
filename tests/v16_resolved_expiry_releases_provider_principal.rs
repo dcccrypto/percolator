@@ -59,19 +59,14 @@ fn expiry_releases_provider_principal_and_a_late_loss_repays_only_what_is_left()
     w.step(1, 960_000, 0);
     w.refresh_all(&[X, W]);
     let s = w.source(PROVIDER_DOMAIN);
-    assert!(
-        s.provider_receivable_num != 0,
-        "scenario: a receivable exists"
-    );
+    assert!(s.provider_receivable_num != 0, "scenario: a receivable exists");
     assert_eq!(principal(&w, PROVIDER_DOMAIN), PRINCIPAL * BOUND_SCALE);
 
     w.slot += 1;
     let resolved_slot = w.slot;
-    w.op(|m, _| m.resolve_market_not_atomic(resolved_slot))
-        .unwrap();
+    w.op(|m, _| m.resolve_market_not_atomic(resolved_slot)).unwrap();
     let end_slot = resolved_slot + 2 * BACKING_LIFETIME;
-    w.op(|m, _| m.advance_resolved_slot_not_atomic(end_slot))
-        .unwrap();
+    w.op(|m, _| m.advance_resolved_slot_not_atomic(end_slot)).unwrap();
     w.op(|m, _| m.expire_source_backing_bucket_not_atomic(PROVIDER_DOMAIN, end_slot))
         .unwrap();
     // Expiry took the provider's principal with the backing that lapsed.

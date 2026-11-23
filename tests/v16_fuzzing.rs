@@ -313,17 +313,12 @@ fn v16_b_settlement_under_a_small_budget_takes_several_steps_and_a_zero_budget_r
             .unwrap();
         booked + explicit
     };
-    assert!(
-        booked > 1,
-        "the residual must be large enough to need several 1-atom steps"
-    );
+    assert!(booked > 1, "the residual must be large enough to need several 1-atom steps");
 
     let mut w = PortfolioV16ViewMut::new(&mut winner);
     // A zero budget cannot settle anything while B has moved: Recovery, not a loop.
     assert_eq!(
-        market
-            .kani_settle_account_b_chunk(&mut w, 0, 0)
-            .unwrap_err(),
+        market.kani_settle_account_b_chunk(&mut w, 0, 0).unwrap_err(),
         V16Error::RecoveryRequired
     );
     let pnl_before = w.header.pnl.get();
@@ -334,10 +329,7 @@ fn v16_b_settlement_under_a_small_budget_takes_several_steps_and_a_zero_budget_r
         let chunk = market.kani_settle_account_b_chunk(&mut w, 0, 1).unwrap();
         steps += 1;
         total_loss += chunk.loss;
-        assert!(
-            chunk.loss <= 1,
-            "a 1-atom budget caps one step at one loss atom"
-        );
+        assert!(chunk.loss <= 1, "a 1-atom budget caps one step at one loss atom");
         if chunk.remaining_after != 0 {
             saw_partial = true;
         } else {
@@ -345,10 +337,7 @@ fn v16_b_settlement_under_a_small_budget_takes_several_steps_and_a_zero_budget_r
         }
         assert!(steps < 10_000, "settlement must terminate");
     }
-    assert!(
-        steps > 1 && saw_partial,
-        "B settlement must have taken more than one step"
-    );
+    assert!(steps > 1 && saw_partial, "B settlement must have taken more than one step");
     assert!(total_loss <= booked);
     assert_eq!(pnl_before - w.header.pnl.get(), total_loss as i128);
 }

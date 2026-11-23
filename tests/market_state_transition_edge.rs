@@ -64,12 +64,10 @@ impl W {
         self.header.current_slot.get()
     }
     fn deposit(&mut self, a: &mut PortfolioAccountV16Account, amt: u128) -> Result<(), V16Error> {
-        self.view()
-            .deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt)
+        self.view().deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt)
     }
     fn withdraw(&mut self, a: &mut PortfolioAccountV16Account, amt: u128) -> Result<(), V16Error> {
-        self.view()
-            .withdraw_not_atomic(&mut PortfolioV16ViewMut::new(a), amt)
+        self.view().withdraw_not_atomic(&mut PortfolioV16ViewMut::new(a), amt)
     }
     fn trade(
         &mut self,
@@ -82,12 +80,7 @@ impl W {
             .execute_trade_with_fee_loss_stale_scoped_not_atomic(
                 &mut PortfolioV16ViewMut::new(long),
                 &mut PortfolioV16ViewMut::new(short),
-                TradeRequestV16 {
-                    asset_index: 0,
-                    size_q: size,
-                    exec_price: p,
-                    fee_bps: 0,
-                },
+                TradeRequestV16 { asset_index: 0, size_q: size, exec_price: p, fee_bps: 0 },
                 true,
             )
             .map(|_| ())
@@ -95,12 +88,8 @@ impl W {
     fn resolve(&mut self, slot: u64) -> Result<(), V16Error> {
         self.view().resolve_market_not_atomic(slot)
     }
-    fn close(
-        &mut self,
-        a: &mut PortfolioAccountV16Account,
-    ) -> Result<ResolvedCloseOutcomeV16, V16Error> {
-        self.view()
-            .close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(a), 0)
+    fn close(&mut self, a: &mut PortfolioAccountV16Account) -> Result<ResolvedCloseOutcomeV16, V16Error> {
+        self.view().close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(a), 0)
     }
     fn close_fully(&mut self, a: &mut PortfolioAccountV16Account) -> u128 {
         for _ in 0..64 {
@@ -111,12 +100,7 @@ impl W {
         panic!("close never completed");
     }
     fn lifecycle(&self) -> AssetLifecycleV16 {
-        self.markets[0]
-            .engine
-            .asset
-            .try_to_runtime()
-            .unwrap()
-            .lifecycle
+        self.markets[0].engine.asset.try_to_runtime().unwrap().lifecycle
     }
 }
 
@@ -177,10 +161,7 @@ fn mst_resolve_moves_no_value_and_keeps_open_positions() {
         (s.oi_eff_long_q, s.oi_eff_short_q)
     };
     w.resolve(w.slot() + 3).unwrap();
-    assert_eq!(
-        (w.vault(), w.c_tot(), w.header.insurance.get()),
-        (vault, c_tot, ins)
-    );
+    assert_eq!((w.vault(), w.c_tot(), w.header.insurance.get()), (vault, c_tot, ins));
     assert_eq!(a.legs, legs_a);
     assert_eq!(b.legs, legs_b);
     let s = &w.markets[0].engine.asset;
@@ -205,11 +186,7 @@ fn mst_resolved_open_pair_at_flat_price_conserves_value() {
         w.resolve(w.slot() + 1).unwrap();
         let pa = w.close_fully(&mut a);
         let pb = w.close_fully(&mut b);
-        assert_eq!(
-            pa + pb,
-            2 * dep,
-            "dep {dep}: price did not move so nothing is won or lost"
-        );
+        assert_eq!(pa + pb, 2 * dep, "dep {dep}: price did not move so nothing is won or lost");
         assert_eq!(w.vault(), 0);
         assert_eq!(w.c_tot(), 0);
     }
@@ -259,51 +236,27 @@ fn mst_resolved_refuses_live_ops_and_changes_nothing() {
 
     assert_eq!(w.deposit(&mut c, 1), Err(V16Error::LockActive), "deposit");
     assert!(w.withdraw(&mut c, 1).is_err(), "withdraw");
-    assert!(
-        w.trade(&mut a, &mut b, POS_SCALE as i128).is_err(),
-        "more size"
-    );
-    assert!(
-        w.trade(&mut b, &mut a, POS_SCALE as i128).is_err(),
-        "close trade"
-    );
+    assert!(w.trade(&mut a, &mut b, POS_SCALE as i128).is_err(), "more size");
+    assert!(w.trade(&mut b, &mut a, POS_SCALE as i128).is_err(), "close trade");
     let s_ = w.slot();
     assert!(
-        w.view()
-            .accrue_asset_to_not_atomic(0, s_ + 1, PRICE, 0, true)
-            .is_err(),
+        w.view().accrue_asset_to_not_atomic(0, s_ + 1, PRICE, 0, true).is_err(),
         "accrue"
     );
-    assert!(
-        w.view().mark_asset_drain_only_not_atomic(0).is_err(),
-        "drain only"
-    );
+    assert!(w.view().mark_asset_drain_only_not_atomic(0).is_err(), "drain only");
     let s_ = w.slot();
-    assert!(
-        w.view().retire_empty_asset_not_atomic(0, s_ + 1).is_err(),
-        "retire"
-    );
+    assert!(w.view().retire_empty_asset_not_atomic(0, s_ + 1).is_err(), "retire");
     let s_ = w.slot();
-    assert!(
-        w.view().force_asset_recovery_not_atomic(0, s_ + 1).is_err(),
-        "recovery"
-    );
+    assert!(w.view().force_asset_recovery_not_atomic(0, s_ + 1).is_err(), "recovery");
     assert!(
         w.view()
-            .liquidate_account_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut a),
-                LiquidationRequestV16 { asset_index: 0 }
-            )
+            .liquidate_account_not_atomic(&mut PortfolioV16ViewMut::new(&mut a), LiquidationRequestV16 { asset_index: 0 })
             .is_err(),
         "liquidate"
     );
 
     assert_eq!(w.header, hb, "header untouched by refused calls");
-    assert_eq!(
-        (a, b, c),
-        (ab, bb, cb),
-        "accounts untouched by refused calls"
-    );
+    assert_eq!((a, b, c), (ab, bb, cb), "accounts untouched by refused calls");
 }
 
 #[test]
@@ -334,10 +287,7 @@ fn mst_second_resolve_never_moves_resolved_slot_back() {
     w.resolve(r0).unwrap();
     let hb = w.header.clone();
     let r = w.resolve(r0 - 1);
-    assert!(
-        r.is_err(),
-        "resolve below the resolved clock must be refused"
-    );
+    assert!(r.is_err(), "resolve below the resolved clock must be refused");
     assert_eq!(w.header, hb);
 }
 
@@ -404,10 +354,7 @@ fn mst_recovery_asset_refuses_new_trades_but_flat_owner_can_withdraw() {
     w.deposit(&mut b, 1_000_000).unwrap();
     let s_ = w.slot();
     w.view().force_asset_recovery_not_atomic(0, s_).unwrap();
-    assert!(
-        w.trade(&mut a, &mut b, POS_SCALE as i128).is_err(),
-        "no new risk on a recovering asset"
-    );
+    assert!(w.trade(&mut a, &mut b, POS_SCALE as i128).is_err(), "no new risk on a recovering asset");
     assert_eq!((a.capital.get(), b.capital.get()), (1_000_000, 1_000_000));
     // a flat owner is not trapped by the asset recovery
     w.withdraw(&mut a, 1_000_000).expect("flat owner exits");

@@ -27,11 +27,7 @@ impl XorShift {
 }
 
 fn check(a: u128, b: u128, d: u128) {
-    assert_eq!(
-        floor(a, b, d),
-        floor_ref(a, b, d),
-        "floor a={a} b={b} d={d}"
-    );
+    assert_eq!(floor(a, b, d), floor_ref(a, b, d), "floor a={a} b={b} d={d}");
     assert_eq!(ceil(a, b, d), ceil_ref(a, b, d), "ceil a={a} b={b} d={d}");
     // the shortcut fires exactly when a factor equals the denominator, and then it is the answer
     let c = cancelled(a, b, d);

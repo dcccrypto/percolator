@@ -13,6 +13,7 @@
 //! Ported from the security reviewer's `x1_sec_diff.rs` (scenario generator unchanged).
 #![cfg(feature = "x1-diff")]
 
+
 use percolator::{
     EngineAssetSlotV16Account, LiquidationRequestV16, Market, MarketGroupV16HeaderAccount,
     MarketGroupV16ViewMut, PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
@@ -33,7 +34,9 @@ fn fnv(s: &str) -> u64 {
 
 fn account(seed: u8) -> PortfolioAccountV16Account {
     let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
-        [1; 32], [seed; 32], [3; 32],
+        [1; 32],
+        [seed; 32],
+        [3; 32],
     ));
     let mut a = PortfolioAccountV16Account::default();
     a.init_empty_in_place(header).unwrap();
@@ -118,20 +121,11 @@ fn scenario(k: &K, st: &mut Stats) -> String {
             }
         }
         let q = (100_000 * POS_SCALE) as i128;
-        let order: Vec<usize> = if k.order_rev {
-            (0..k.n).rev().collect()
-        } else {
-            (0..k.n).collect()
-        };
+        let order: Vec<usize> = if k.order_rev { (0..k.n).rev().collect() } else { (0..k.n).collect() };
         for &asset_index in &order {
             // target is long on this asset unless alt_sides and the asset is odd
             let tgt_long = !(k.alt_sides && asset_index % 2 == 1);
-            let req = TradeRequestV16 {
-                asset_index,
-                size_q: q,
-                exec_price: 100,
-                fee_bps: 0,
-            };
+            let req = TradeRequestV16 { asset_index, size_q: q, exec_price: 100, fee_bps: 0 };
             let r = if tgt_long {
                 g.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut tv, &mut cv, req, true)
             } else {
@@ -154,26 +148,13 @@ fn scenario(k: &K, st: &mut Stats) -> String {
             log += &format!("ref_c0={:?};", r.as_ref().map(|_| ()));
             for &asset_index in &order {
                 let tgt_long = !(k.alt_sides && asset_index % 2 == 1);
-                let req = TradeRequestV16 {
-                    asset_index,
-                    size_q: q,
-                    exec_price: 100,
-                    fee_bps: 0,
-                };
+                let req = TradeRequestV16 { asset_index, size_q: q, exec_price: 100, fee_bps: 0 };
                 let r = if tgt_long {
-                    g.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                        &mut tv, &mut bv, req, true,
-                    )
+                    g.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut tv, &mut bv, req, true)
                 } else {
-                    g.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                        &mut bv, &mut tv, req, true,
-                    )
+                    g.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut bv, &mut tv, req, true)
                 };
-                if r.is_ok() {
-                    st.by_ok += 1;
-                } else {
-                    st.by_err += 1;
-                }
+                if r.is_ok() { st.by_ok += 1; } else { st.by_err += 1; }
                 log += &format!("b{asset_index}={:?};", r.as_ref().map(|_| ()));
             }
         }
@@ -181,43 +162,23 @@ fn scenario(k: &K, st: &mut Stats) -> String {
             // flatten the target's leg on asset 1 against the counterparty: leaves a slot gap
             let tgt_long = !k.alt_sides;
             let mult = if k.bystander { 2 } else { 1 };
-            let req = TradeRequestV16 {
-                asset_index: 1,
-                size_q: q * mult,
-                exec_price: 100,
-                fee_bps: 0,
-            };
+            let req = TradeRequestV16 { asset_index: 1, size_q: q * mult, exec_price: 100, fee_bps: 0 };
             let r = if tgt_long {
                 g.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut cv, &mut tv, req, true)
             } else {
                 g.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut tv, &mut cv, req, true)
             };
-            if r.is_ok() {
-                st.closemid_ok += 1;
-            }
+            if r.is_ok() { st.closemid_ok += 1; }
             log += &format!("closemid={:?};", r.as_ref().map(|_| ()));
         }
-        let step = |g: &mut MarketGroupV16ViewMut<'_, u64>,
-                    slot: &mut u64,
-                    price: u64,
-                    fresh: usize,
-                    last: bool,
-                    log: &mut String| {
+        let step = |g: &mut MarketGroupV16ViewMut<'_, u64>, slot: &mut u64, price: u64, fresh: usize, last: bool, log: &mut String| {
             *slot += 1;
             for asset_index in 0..k.n {
-                let is_fresh = if last {
-                    asset_index >= k.n - fresh
-                } else {
-                    asset_index < fresh
-                };
+                let is_fresh = if last { asset_index >= k.n - fresh } else { asset_index < fresh };
                 if !is_fresh {
                     continue;
                 }
-                let price = if k.mirror && asset_index % 2 == 1 {
-                    200 - price
-                } else {
-                    price
-                };
+                let price = if k.mirror && asset_index % 2 == 1 { 200 - price } else { price };
                 let r = g.accrue_asset_to_not_atomic(asset_index, *slot, price, k.funding, true);
                 ACCRUE_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if r.is_err() {
@@ -230,13 +191,12 @@ fn scenario(k: &K, st: &mut Stats) -> String {
         for p in [96u64, 92] {
             step(&mut g, &mut slot, p, k.n, false, &mut log);
         }
-        let force =
-            |g: &mut MarketGroupV16ViewMut<'_, u64>, a: &mut PortfolioV16ViewMut<'_>, cap: u128| {
-                let old = a.header.capital.get();
-                a.header.capital = V16PodU128::new(cap);
-                let c_tot = g.header.c_tot.get();
-                g.header.c_tot = V16PodU128::new(c_tot - old + cap);
-            };
+        let force = |g: &mut MarketGroupV16ViewMut<'_, u64>, a: &mut PortfolioV16ViewMut<'_>, cap: u128| {
+            let old = a.header.capital.get();
+            a.header.capital = V16PodU128::new(cap);
+            let c_tot = g.header.c_tot.get();
+            g.header.c_tot = V16PodU128::new(c_tot - old + cap);
+        };
         if k.early {
             force(&mut g, &mut tv, k.capital);
         }
@@ -245,47 +205,25 @@ fn scenario(k: &K, st: &mut Stats) -> String {
         for p in [96u64, 100] {
             step(&mut g, &mut slot, p, k.n, false, &mut log);
         }
-        step(
-            &mut g,
-            &mut slot,
-            if k.seq == 6 { 96 } else { 104 },
-            k.fresh,
-            k.fresh_last,
-            &mut log,
-        );
+        step(&mut g, &mut slot, if k.seq == 6 { 96 } else { 104 }, k.fresh, k.fresh_last, &mut log);
         let r = g.full_account_refresh_not_atomic(&mut cv);
         log += &format!("ref_c={:?};", r.as_ref().map(|c| c.certified_liq_deficit));
         if !k.early {
             let cur = tv.header.capital.get();
             force(&mut g, &mut tv, k.capital.min(cur));
         }
-        let liq = |g: &mut MarketGroupV16ViewMut<'_, u64>,
-                   a: &mut PortfolioV16ViewMut<'_>,
-                   asset_index: usize,
-                   tag: &str,
-                   log: &mut String,
-                   st: &mut Stats| {
+        let liq = |g: &mut MarketGroupV16ViewMut<'_, u64>, a: &mut PortfolioV16ViewMut<'_>, asset_index: usize, tag: &str, log: &mut String, st: &mut Stats| {
             let out = g.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index });
             st.liq_calls += 1;
             match &out {
                 Ok(o) => {
                     st.liq_ok += 1;
-                    if o.fee_charged > 0 {
-                        st.fee_pos += 1;
-                    }
-                    if o.insurance_used > 0 {
-                        st.ins_pos += 1;
-                    }
-                    if o.residual_booked > 0 {
-                        st.booked_pos += 1;
-                    }
-                    if o.explicit_loss > 0 {
-                        st.explicit_pos += 1;
-                    }
+                    if o.fee_charged > 0 { st.fee_pos += 1; }
+                    if o.insurance_used > 0 { st.ins_pos += 1; }
+                    if o.residual_booked > 0 { st.booked_pos += 1; }
+                    if o.explicit_loss > 0 { st.explicit_pos += 1; }
                 }
-                Err(e) => {
-                    *st.errs.entry(format!("{e:?}")).or_default() += 1;
-                }
+                Err(e) => { *st.errs.entry(format!("{e:?}")).or_default() += 1; }
             }
             *log += &format!("liq[{tag}:{asset_index}]={out:?};");
         };
@@ -299,14 +237,7 @@ fn scenario(k: &K, st: &mut Stats) -> String {
             2 => {
                 for round in 0..2 {
                     for a in 0..k.n {
-                        liq(
-                            &mut g,
-                            &mut tv,
-                            a,
-                            if round == 0 { "r0" } else { "r1" },
-                            &mut log,
-                            &mut *st,
-                        );
+                        liq(&mut g, &mut tv, a, if round == 0 { "r0" } else { "r1" }, &mut log, &mut *st);
                     }
                 }
             }
@@ -342,18 +273,9 @@ fn scenario(k: &K, st: &mut Stats) -> String {
             }
         }
     }
-    if std::env::var("X1SEC_VERBOSE").is_ok() {
-        println!("X1SECLOG {log}");
-    }
+    if std::env::var("X1SEC_VERBOSE").is_ok() { println!("X1SECLOG {log}"); }
     let dump = format!("{log}|{header:?}|{markets:?}|{tgt:?}|{cp:?}|{by:?}");
-    format!(
-        "{} log={}",
-        fnv(&dump),
-        log.split(';')
-            .filter(|s| s.starts_with("liq"))
-            .collect::<Vec<_>>()
-            .join(";")
-    )
+    format!("{} log={}", fnv(&dump), log.split(';').filter(|s| s.starts_with("liq")).collect::<Vec<_>>().join(";"))
 }
 
 const MIN_CALLS: u64 = 3000;
@@ -366,10 +288,7 @@ const MIN_EXPLICIT: usize = 0;
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         self.0 >> 33
     }
     fn pick<T: Copy>(&mut self, xs: &[T]) -> T {
@@ -379,10 +298,7 @@ impl Lcg {
 
 #[test]
 fn x1_sec_matrix() {
-    let count: usize = std::env::var("X1SEC_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(6000);
+    let count: usize = std::env::var("X1SEC_N").ok().and_then(|v| v.parse().ok()).unwrap_or(6000);
     let mut rng = Lcg(0x5eed_5ec0_1234_5678);
     let mut st = Stats::default();
     let mut digest: u64 = 0xcbf29ce484222325;
@@ -395,14 +311,8 @@ fn x1_sec_matrix() {
             bystander: rng.pick(&[false, true]),
             insurance: rng.pick(&[0u128, 0, 5_000, 300_000, 100_000_000]),
             capital: {
-                let cmul = rng.pick(&[
-                    0u128, 100_000, 400_000, 700_000, 900_000, 1_100_000, 1_300_000, 2_000_000,
-                ]);
-                if cmul == 0 {
-                    1_000
-                } else {
-                    cmul * n as u128
-                }
+                let cmul = rng.pick(&[0u128, 100_000, 400_000, 700_000, 900_000, 1_100_000, 1_300_000, 2_000_000]);
+                if cmul == 0 { 1_000 } else { cmul * n as u128 }
             },
             early: rng.pick(&[false, true]),
             fresh: rng.pick(&[n, n, 1, n / 2 + 1]),
@@ -430,28 +340,10 @@ fn x1_sec_matrix() {
     println!("X1DIFF monitored_calls={calls} clamp_fired={clamp_fired} mismatches={mismatch} accrue_total={acc_total} accrue_err={acc_err}");
     assert_eq!(mismatch, 0);
     if count >= 6000 {
-        assert!(
-            calls >= MIN_CALLS,
-            "vacuous: only {calls} monitored fee-charge calls"
-        );
-        assert!(
-            clamp_fired >= MIN_CLAMP,
-            "vacuous: the clamp found an excess in only {clamp_fired} calls"
-        );
-        assert!(
-            st.fee_pos >= MIN_FEE
-                && st.ins_pos >= MIN_INS
-                && st.booked_pos >= MIN_BOOKED
-                && st.explicit_pos >= MIN_EXPLICIT,
-            "vacuous: fee {} ins {} booked {} explicit {}",
-            st.fee_pos,
-            st.ins_pos,
-            st.booked_pos,
-            st.explicit_pos
-        );
-        assert!(
-            acc_err * 10 <= acc_total,
-            "accrual errors {acc_err} of {acc_total} exceed 10%"
-        );
+        assert!(calls >= MIN_CALLS, "vacuous: only {calls} monitored fee-charge calls");
+        assert!(clamp_fired >= MIN_CLAMP, "vacuous: the clamp found an excess in only {clamp_fired} calls");
+        assert!(st.fee_pos >= MIN_FEE && st.ins_pos >= MIN_INS && st.booked_pos >= MIN_BOOKED && st.explicit_pos >= MIN_EXPLICIT,
+            "vacuous: fee {} ins {} booked {} explicit {}", st.fee_pos, st.ins_pos, st.booked_pos, st.explicit_pos);
+        assert!(acc_err * 10 <= acc_total, "accrual errors {acc_err} of {acc_total} exceed 10%");
     }
 }

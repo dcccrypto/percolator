@@ -12,7 +12,10 @@ const PRICE: u64 = 1_000;
 
 type Hdr = MarketGroupV16HeaderAccount;
 
-fn empty_group(max_slots: u32, capacity: u32) -> (Hdr, Vec<Market<u64>>) {
+fn empty_group(
+    max_slots: u32,
+    capacity: u32,
+) -> (Hdr, Vec<Market<u64>>) {
     let cfg = V16Config::public_user_fund_with_market_slots(max_slots as u16, max_slots, 0, 10);
     let header = Hdr::new_dynamic([1; 32], cfg, capacity, 0).unwrap();
     let markets = (0..capacity as u64)
@@ -23,7 +26,9 @@ fn empty_group(max_slots: u32, capacity: u32) -> (Hdr, Vec<Market<u64>>) {
 
 fn account(seed: u8) -> PortfolioAccountV16Account {
     let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
-        [1; 32], [seed; 32], [3; 32],
+        [1; 32],
+        [seed; 32],
+        [3; 32],
     ));
     let mut a = PortfolioAccountV16Account::default();
     a.init_empty_in_place(header).unwrap();
@@ -258,11 +263,7 @@ fn activate_rejects_time_going_backwards() {
 fn activate_cooldown_boundary_is_exact() {
     // cooldown is 1 slot: same slot is locked, next slot is fine.
     let (mut h, mut m) = empty_group(3, 3);
-    let cooldown = h
-        .config
-        .try_to_runtime_shape()
-        .unwrap()
-        .asset_activation_cooldown_slots;
+    let cooldown = h.config.try_to_runtime_shape().unwrap().asset_activation_cooldown_slots;
     assert!(cooldown >= 1);
     h.activate_empty_asset_slot_not_atomic(0, &mut m[0].engine, PRICE, 5)
         .unwrap();
@@ -342,9 +343,7 @@ fn activation_in_any_order_is_allowed_and_conserves_value() {
     }
     assert_eq!(money(&h), before);
     assert!(m.iter().all(|x| lifecycle(x) == AssetLifecycleV16::Active));
-    MarketGroupV16ViewMut::new(&mut h, &mut m)
-        .validate_shape()
-        .unwrap();
+    MarketGroupV16ViewMut::new(&mut h, &mut m).validate_shape().unwrap();
 }
 
 #[test]
@@ -399,18 +398,9 @@ fn retire_is_idempotent_and_keeps_first_retired_slot() {
     v.retire_empty_asset_not_atomic(0, 5).unwrap();
     let epoch = v.header.asset_set_epoch.get();
     v.retire_empty_asset_not_atomic(0, 9).unwrap();
+    assert_eq!(v.header.asset_set_epoch.get(), epoch, "second retire must not bump epoch");
     assert_eq!(
-        v.header.asset_set_epoch.get(),
-        epoch,
-        "second retire must not bump epoch"
-    );
-    assert_eq!(
-        v.markets[0]
-            .engine
-            .asset
-            .try_to_runtime()
-            .unwrap()
-            .retired_slot,
+        v.markets[0].engine.asset.try_to_runtime().unwrap().retired_slot,
         5
     );
 }
@@ -422,14 +412,8 @@ fn retire_rejects_stale_time_and_out_of_range_index() {
         .unwrap();
     let mut v = MarketGroupV16ViewMut::new(&mut h, &mut m);
     assert_eq!(v.retire_empty_asset_not_atomic(0, 7), Err(V16Error::Stale));
-    assert_eq!(
-        v.retire_empty_asset_not_atomic(2, 9),
-        Err(V16Error::InvalidLeg)
-    );
-    assert_eq!(
-        v.retire_empty_asset_not_atomic(usize::MAX, 9),
-        Err(V16Error::InvalidLeg)
-    );
+    assert_eq!(v.retire_empty_asset_not_atomic(2, 9), Err(V16Error::InvalidLeg));
+    assert_eq!(v.retire_empty_asset_not_atomic(usize::MAX, 9), Err(V16Error::InvalidLeg));
     // retire at exactly current_slot is fine
     v.retire_empty_asset_not_atomic(0, 8).unwrap();
 }
@@ -438,10 +422,7 @@ fn retire_rejects_stale_time_and_out_of_range_index() {
 fn retire_never_activated_slot_is_rejected() {
     let (mut h, mut m) = empty_group(1, 1);
     let mut v = MarketGroupV16ViewMut::new(&mut h, &mut m);
-    assert_eq!(
-        v.retire_empty_asset_not_atomic(0, 1),
-        Err(V16Error::LockActive)
-    );
+    assert_eq!(v.retire_empty_asset_not_atomic(0, 1), Err(V16Error::LockActive));
 }
 
 #[test]
@@ -481,9 +462,7 @@ fn retire_reuse_cycles_never_reuse_a_market_id() {
             .unwrap();
         slot += 1;
     }
-    MarketGroupV16ViewMut::new(&mut h, &mut m)
-        .validate_shape()
-        .unwrap();
+    MarketGroupV16ViewMut::new(&mut h, &mut m).validate_shape().unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -519,15 +498,10 @@ fn canonicalize_retired_slot_is_idempotent_and_value_neutral() {
     v.retire_empty_asset_not_atomic(0, 4).unwrap();
     let money_before = money(v.header);
     let old = v.markets[0].engine.asset.try_to_runtime().unwrap();
-    v.canonicalize_retired_empty_asset_slot_not_atomic(0)
-        .unwrap();
+    v.canonicalize_retired_empty_asset_slot_not_atomic(0).unwrap();
     let once = v.markets[0].engine;
-    v.canonicalize_retired_empty_asset_slot_not_atomic(0)
-        .unwrap();
-    assert_eq!(
-        v.markets[0].engine, once,
-        "second canonicalize must be a no-op"
-    );
+    v.canonicalize_retired_empty_asset_slot_not_atomic(0).unwrap();
+    assert_eq!(v.markets[0].engine, once, "second canonicalize must be a no-op");
     let a = v.markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(a.lifecycle, AssetLifecycleV16::Retired);
     assert_eq!(a.market_id, old.market_id);
@@ -544,12 +518,9 @@ fn canonicalize_rejects_slot_with_unspent_budget_and_changes_nothing() {
     MarketGroupV16ViewMut::new(&mut h, &mut m)
         .retire_empty_asset_not_atomic(0, 4)
         .unwrap();
-    for (long, short, spent_l, spent_s) in [
-        (1u128, 0u128, 0u128, 0u128),
-        (0, 1, 0, 0),
-        (0, 0, 1, 0),
-        (0, 0, 0, 1),
-    ] {
+    for (long, short, spent_l, spent_s) in
+        [(1u128, 0u128, 0u128, 0u128), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)]
+    {
         let mut slot = m[0].engine;
         slot.insurance_domain_budget_long = V16PodU128::new(long);
         slot.insurance_domain_budget_short = V16PodU128::new(short);
@@ -575,8 +546,7 @@ fn canonicalized_slot_can_be_reactivated_after_cooldown() {
     {
         let mut v = MarketGroupV16ViewMut::new(&mut h, &mut m);
         v.retire_empty_asset_not_atomic(0, 4).unwrap();
-        v.canonicalize_retired_empty_asset_slot_not_atomic(0)
-            .unwrap();
+        v.canonicalize_retired_empty_asset_slot_not_atomic(0).unwrap();
     }
     assert_eq!(
         h.activate_empty_asset_slot_not_atomic(0, &mut m[0].engine, PRICE, 4),
@@ -620,16 +590,12 @@ fn register_deregister_round_trip_and_repeat_counts() {
     let v2 = PortfolioV16ViewMut::new(&mut a2);
     let mut v = MarketGroupV16ViewMut::new(&mut h, &mut m);
     let before = money(v.header);
-    v.register_empty_materialized_portfolio_not_atomic(&v1.as_view())
-        .unwrap();
-    v.register_empty_materialized_portfolio_not_atomic(&v2.as_view())
-        .unwrap();
+    v.register_empty_materialized_portfolio_not_atomic(&v1.as_view()).unwrap();
+    v.register_empty_materialized_portfolio_not_atomic(&v2.as_view()).unwrap();
     assert_eq!(v.header.materialized_portfolio_count.get(), 2);
-    v.deregister_empty_materialized_portfolio_not_atomic(&v1.as_view())
-        .unwrap();
+    v.deregister_empty_materialized_portfolio_not_atomic(&v1.as_view()).unwrap();
     assert_eq!(v.header.materialized_portfolio_count.get(), 1);
-    v.deregister_empty_materialized_portfolio_not_atomic(&v2.as_view())
-        .unwrap();
+    v.deregister_empty_materialized_portfolio_not_atomic(&v2.as_view()).unwrap();
     assert_eq!(v.header.materialized_portfolio_count.get(), 0);
     // one more is an underflow, and the count stays at zero
     assert_eq!(
@@ -647,8 +613,7 @@ fn deregister_rejects_account_holding_capital_and_conserves_value() {
     {
         let mut v = MarketGroupV16ViewMut::new(&mut h, &mut m);
         let mut av = PortfolioV16ViewMut::new(&mut acct);
-        v.register_empty_materialized_portfolio_not_atomic(&av.as_view())
-            .unwrap();
+        v.register_empty_materialized_portfolio_not_atomic(&av.as_view()).unwrap();
         v.deposit_not_atomic(&mut av, 1).unwrap();
     }
     let before = money(&h);

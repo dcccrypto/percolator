@@ -58,27 +58,15 @@ impl W {
         cfg.liquidation_fee_cap = 1_000_000;
         cfg.min_nonzero_mm_req = 1;
         cfg.min_nonzero_im_req = 2;
-        let mut header =
-            MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, n as u32, 0).unwrap();
-        let mut markets: Vec<Market<u64>> = (0..n as u64)
-            .map(|i| Market::new(i, EngineAssetSlotV16Account::default()))
-            .collect();
+        let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, n as u32, 0).unwrap();
+        let mut markets: Vec<Market<u64>> =
+            (0..n as u64).map(|i| Market::new(i, EngineAssetSlotV16Account::default())).collect();
         for i in 0..n {
             header
-                .activate_empty_asset_slot_not_atomic(
-                    i as u32,
-                    &mut markets[i].engine,
-                    P0,
-                    1 + 2 * i as u64,
-                )
+                .activate_empty_asset_slot_not_atomic(i as u32, &mut markets[i].engine, P0, 1 + 2 * i as u64)
                 .unwrap();
         }
-        W {
-            header,
-            markets,
-            slot: 2 * n as u64 - 1,
-            n,
-        }
+        W { header, markets, slot: 2 * n as u64 - 1, n }
     }
     fn view(&mut self) -> MarketGroupV16ViewMut<'_, u64> {
         MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets)
@@ -87,28 +75,15 @@ impl W {
         self.markets[i].engine.asset.effective_price.get()
     }
     fn deposit(&mut self, a: &mut PortfolioAccountV16Account, amt: u128) {
-        self.view()
-            .deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt)
-            .unwrap();
+        self.view().deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt).unwrap();
     }
-    fn trade(
-        &mut self,
-        i: usize,
-        long: &mut PortfolioAccountV16Account,
-        short: &mut PortfolioAccountV16Account,
-        size: i128,
-    ) {
+    fn trade(&mut self, i: usize, long: &mut PortfolioAccountV16Account, short: &mut PortfolioAccountV16Account, size: i128) {
         let p = self.price(i);
         self.view()
             .execute_trade_with_fee_loss_stale_scoped_not_atomic(
                 &mut PortfolioV16ViewMut::new(long),
                 &mut PortfolioV16ViewMut::new(short),
-                TradeRequestV16 {
-                    asset_index: i,
-                    size_q: size,
-                    exec_price: p,
-                    fee_bps: 0,
-                },
+                TradeRequestV16 { asset_index: i, size_q: size, exec_price: p, fee_bps: 0 },
                 true,
             )
             .expect("trade");
@@ -117,14 +92,9 @@ impl W {
         self.slot += 1;
         let slot = self.slot;
         for j in 0..self.n {
-            let new = changes
-                .iter()
-                .find(|c| c.0 == j)
-                .map(|c| c.1)
-                .unwrap_or(self.price(j));
+            let new = changes.iter().find(|c| c.0 == j).map(|c| c.1).unwrap_or(self.price(j));
             let mut m = self.view();
-            m.accrue_asset_to_not_atomic(j, slot, new, 0, true)
-                .expect("accrue");
+            m.accrue_asset_to_not_atomic(j, slot, new, 0, true).expect("accrue");
             m.markets[j].engine.asset.raw_oracle_target_price = V16PodU64::new(new);
         }
     }
@@ -135,14 +105,7 @@ impl W {
             for i in 0..2 {
                 let p = self.price(i);
                 let s = (p * 100 / 10_000).max(1);
-                step.push((
-                    i,
-                    if target > p {
-                        (p + s).min(target)
-                    } else {
-                        p.saturating_sub(s).max(target)
-                    },
-                ));
+                step.push((i, if target > p { (p + s).min(target) } else { p.saturating_sub(s).max(target) }));
             }
             self.tick(&step);
         }
@@ -150,9 +113,7 @@ impl W {
     fn refresh(&mut self, a: &mut PortfolioAccountV16Account) -> percolator::HealthCertV16 {
         let slot = self.slot;
         for _ in 0..64 {
-            let r = self
-                .view()
-                .full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(a));
+            let r = self.view().full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(a));
             match r {
                 Err(V16Error::BStale) => {
                     for i in 0..self.n {
@@ -174,32 +135,20 @@ impl W {
         }
         panic!("refresh did not converge");
     }
-    fn liquidate(
-        &mut self,
-        a: &mut PortfolioAccountV16Account,
-        i: usize,
-    ) -> Result<LiquidationOutcomeV16, V16Error> {
-        self.view().liquidate_account_not_atomic(
-            &mut PortfolioV16ViewMut::new(a),
-            LiquidationRequestV16 { asset_index: i },
-        )
+    fn liquidate(&mut self, a: &mut PortfolioAccountV16Account, i: usize) -> Result<LiquidationOutcomeV16, V16Error> {
+        self.view()
+            .liquidate_account_not_atomic(&mut PortfolioV16ViewMut::new(a), LiquidationRequestV16 { asset_index: i })
     }
     fn total_value(&self, accts: &[&PortfolioAccountV16Account]) -> i128 {
         accts.iter().map(|a| value(a)).sum::<i128>() + self.header.insurance.get() as i128
     }
     fn sound(&mut self, accts: &mut [&mut PortfolioAccountV16Account]) {
-        let (v, c, i) = (
-            self.header.vault.get(),
-            self.header.c_tot.get(),
-            self.header.insurance.get(),
-        );
+        let (v, c, i) = (self.header.vault.get(), self.header.c_tot.get(), self.header.insurance.get());
         assert!(v >= c + i, "conservation broken: V {v} < C_tot {c} + I {i}");
         let g = self.view();
         g.validate_shape().unwrap();
         for a in accts.iter_mut() {
-            PortfolioV16ViewMut::new(a)
-                .validate_with_market(&g.as_view())
-                .unwrap();
+            PortfolioV16ViewMut::new(a).validate_with_market(&g.as_view()).unwrap();
         }
     }
 }
@@ -217,11 +166,7 @@ fn value(a: &PortfolioAccountV16Account) -> i128 {
 
 /// Hedged `a` (long asset 0, short asset 1) with `cap`, rich counterparty `b` on the other side
 /// of both legs; then both prices fall to `px`. Nobody is refreshed yet.
-fn hedged(
-    cap: u128,
-    px: u64,
-    fee_bps: u64,
-) -> (W, PortfolioAccountV16Account, PortfolioAccountV16Account) {
+fn hedged(cap: u128, px: u64, fee_bps: u64) -> (W, PortfolioAccountV16Account, PortfolioAccountV16Account) {
     let mut w = W::with(fee_bps);
     let (mut a, mut b) = (account(1), account(2));
     w.deposit(&mut a, cap);
@@ -259,19 +204,7 @@ fn probe(cap: u128, px: u64) -> Outcome {
 
 /// Order A: `a` is refreshed (and liquidated if the engine says so) before `b`.
 /// Order B: `b` refreshes first, then `a`. Returns `a`'s value, position on asset 0, result.
-fn run_order(
-    cap: u128,
-    px: u64,
-    fee_bps: u64,
-    b_first: bool,
-) -> (
-    i128,
-    i128,
-    bool,
-    W,
-    PortfolioAccountV16Account,
-    PortfolioAccountV16Account,
-) {
+fn run_order(cap: u128, px: u64, fee_bps: u64, b_first: bool) -> (i128, i128, bool, W, PortfolioAccountV16Account, PortfolioAccountV16Account) {
     let (mut w, mut a, mut b) = hedged(cap, px, fee_bps);
     if b_first {
         w.refresh(&mut b);
@@ -336,22 +269,13 @@ fn hedged_refresh_thinnest_margin_window_is_800_to_888() {
     assert_eq!((bottom, top), (800, 888));
     for px in bottom..=top {
         let o = probe(THIN, px);
-        assert!(
-            (o.equity_early as u128) < o.maintenance,
-            "px {px}: backed equity still below MM"
-        );
-        assert!(
-            !o.liquidatable_early && !o.liquidatable_backed,
-            "px {px}: {o:?}"
-        );
+        assert!((o.equity_early as u128) < o.maintenance, "px {px}: backed equity still below MM");
+        assert!(!o.liquidatable_early && !o.liquidatable_backed, "px {px}: {o:?}");
     }
     // above the window both are healthy (below it, see the note on window_bottom)
     for px in [top + 1, 889, 900, 1_000] {
         let o = probe(THIN, px);
-        assert!(
-            !o.liquidatable_early && !o.liquidatable_backed,
-            "px {px}: {o:?}"
-        );
+        assert!(!o.liquidatable_early && !o.liquidatable_backed, "px {px}: {o:?}");
     }
 }
 
@@ -364,14 +288,8 @@ fn hedged_refresh_window_shifts_with_margin_but_never_closes() {
         assert!(bottom <= top, "cap {cap}");
         for px in [bottom, (bottom + top) / 2, top] {
             let o = probe(cap, px);
-            assert!(
-                (o.equity_early as u128) < o.maintenance,
-                "cap {cap} px {px}"
-            );
-            assert!(
-                !o.liquidatable_early && !o.liquidatable_backed,
-                "cap {cap} px {px}"
-            );
+            assert!((o.equity_early as u128) < o.maintenance, "cap {cap} px {px}");
+            assert!(!o.liquidatable_early && !o.liquidatable_backed, "cap {cap} px {px}");
         }
         let o = probe(cap, top + 1);
         assert!(!o.liquidatable_early, "cap {cap} px {}", top + 1);
@@ -436,11 +354,7 @@ fn hedged_refresh_both_orders_hold_the_same_total_value() {
     for px in [889u64, 888, 850, 800] {
         let (_, _, _, w1, a1, b1) = run_order(THIN, px, 0, false);
         let (_, _, _, w2, a2, b2) = run_order(THIN, px, 0, true);
-        assert_eq!(
-            w1.total_value(&[&a1, &b1]),
-            w2.total_value(&[&a2, &b2]),
-            "px {px}"
-        );
+        assert_eq!(w1.total_value(&[&a1, &b1]), w2.total_value(&[&a2, &b2]), "px {px}");
         assert_eq!(w1.header.vault.get(), w2.header.vault.get());
     }
 }
@@ -532,11 +446,7 @@ fn hedged_refresh_solvent_hedge_must_not_be_liquidated_before_counterparty_refre
 fn hedged_refresh_smallest_window_point_must_not_liquidate_before_counterparty_refresh() {
     let (mut w, mut a, mut b) = hedged(THIN, 888, 0);
     let cert = w.refresh(&mut a);
-    assert_eq!(
-        cert.certified_liq_deficit, 0,
-        "equity {} vs MM 8_880",
-        cert.certified_equity
-    );
+    assert_eq!(cert.certified_liq_deficit, 0, "equity {} vs MM 8_880", cert.certified_equity);
     assert_eq!(w.liquidate(&mut a, 0), Err(V16Error::NonProgress));
     w.sound(&mut [&mut a, &mut b]);
 }
@@ -551,11 +461,7 @@ fn hedged_refresh_smallest_window_point_must_not_liquidate_before_counterparty_r
 fn hedged_refresh_fix_b_in_flight_gain_is_not_certified_equity() {
     let (mut w, mut a, mut b) = hedged(THIN, 850, 0);
     let cert = w.refresh(&mut a);
-    assert_eq!(
-        cert.certified_equity,
-        THIN as i128 - 15_000,
-        "backed-only equity unchanged"
-    );
+    assert_eq!(cert.certified_equity, THIN as i128 - 15_000, "backed-only equity unchanged");
     assert!((cert.certified_equity as u128) < cert.certified_maintenance_req);
     assert_eq!(cert.certified_liq_deficit, 0);
     w.refresh(&mut b);
@@ -573,27 +479,16 @@ fn hedged_refresh_fix_b_auto_crank_does_not_liquidate_the_hedge() {
         let (mut w, mut a, mut b) = hedged(THIN, px, 0);
         let slot = w.slot;
         let obs: Vec<AutoCrankObservationV16> = (0..2)
-            .map(|i| AutoCrankObservationV16 {
-                asset_index: i,
-                effective_price: w.price(i),
-                funding_rate_e9: 0,
-            })
+            .map(|i| AutoCrankObservationV16 { asset_index: i, effective_price: w.price(i), funding_rate_e9: 0 })
             .collect();
         for _ in 0..16 {
             let r = w.view().permissionless_auto_crank_not_atomic(
                 &mut PortfolioV16ViewMut::new(&mut a),
-                AutoCrankWorkV16 {
-                    now_slot: slot,
-                    observations: &obs,
-                    resolved_close_fee_rate_per_slot: 0,
-                },
+                AutoCrankWorkV16 { now_slot: slot, observations: &obs, resolved_close_fee_rate_per_slot: 0 },
             );
             match r {
                 Ok(r) => {
-                    assert!(
-                        !matches!(r.selected, AutoCrankPlanV16::Liquidate { .. }),
-                        "px {px}: {r:?}"
-                    );
+                    assert!(!matches!(r.selected, AutoCrankPlanV16::Liquidate { .. }), "px {px}: {r:?}");
                     if r.selected == AutoCrankPlanV16::NoAction {
                         break;
                     }
@@ -629,26 +524,14 @@ fn hedged_refresh_fix_b_bankrupt_counterparty_settles_then_hedge_is_liquidatable
     let early = w.refresh(&mut a);
     assert_eq!(early.certified_equity, 0);
     assert_eq!(early.certified_maintenance_req, 6_375);
-    assert_eq!(
-        early.certified_liq_deficit, 0,
-        "7_500 in flight covers 6_375"
-    );
+    assert_eq!(early.certified_liq_deficit, 0, "7_500 in flight covers 6_375");
     assert_eq!(w.liquidate(&mut a, 0), Err(V16Error::NonProgress));
     // c settles: it owes 7_500 but has 5_000.
     w.refresh(&mut b);
     let _ = w.refresh(&mut c);
     let after = w.refresh(&mut a);
-    assert!(
-        after.certified_equity <= 5_000,
-        "at most c's capital backs a: {after:?}"
-    );
-    assert!(
-        after.certified_liq_deficit > 0,
-        "shortfall is haircut again: {after:?}"
-    );
-    assert!(
-        w.liquidate(&mut a, 0).is_ok(),
-        "liquidation is reachable after the loser settled"
-    );
+    assert!(after.certified_equity <= 5_000, "at most c's capital backs a: {after:?}");
+    assert!(after.certified_liq_deficit > 0, "shortfall is haircut again: {after:?}");
+    assert!(w.liquidate(&mut a, 0).is_ok(), "liquidation is reachable after the loser settled");
     w.sound(&mut [&mut a, &mut b, &mut c]);
 }

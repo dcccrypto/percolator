@@ -121,12 +121,7 @@ fn trade(
         .map(|_| ())
 }
 
-fn deposit(
-    header: &mut Header,
-    markets: &mut Markets,
-    a: &mut PortfolioAccountV16Account,
-    amt: u128,
-) {
+fn deposit(header: &mut Header, markets: &mut Markets, a: &mut PortfolioAccountV16Account, amt: u128) {
     let mut market = MarketGroupV16ViewMut::new(header, markets);
     let mut v = PortfolioV16ViewMut::new(a);
     market.deposit_not_atomic(&mut v, amt).unwrap();
@@ -144,12 +139,7 @@ fn accrue(header: &mut Header, markets: &mut Markets, slot: u64, price: u64) {
 /// b-stale (the keeper does exactly this).
 fn refresh(header: &mut Header, markets: &mut Markets, a: &mut PortfolioAccountV16Account) {
     let now_slot = header.current_slot.get();
-    let price = markets[0]
-        .engine
-        .asset
-        .try_to_runtime()
-        .unwrap()
-        .effective_price;
+    let price = markets[0].engine.asset.try_to_runtime().unwrap().effective_price;
     for _ in 0..64 {
         let mut market = MarketGroupV16ViewMut::new(header, markets);
         let mut v = PortfolioV16ViewMut::new(a);
@@ -218,14 +208,8 @@ fn l1_wire_encoding_is_legacy_compatible_and_sticky() {
     assert!(validate_bankruptcy_hlock_wire(0, 2).is_ok());
     assert!(validate_bankruptcy_hlock_wire(1, 2).is_ok());
     assert!(validate_bankruptcy_hlock_wire(0b111, 2).is_ok());
-    assert_eq!(
-        validate_bankruptcy_hlock_wire(0b010, 2),
-        Err(V16Error::InvalidConfig)
-    );
-    assert_eq!(
-        validate_bankruptcy_hlock_wire(0b1001, 2),
-        Err(V16Error::InvalidConfig)
-    );
+    assert_eq!(validate_bankruptcy_hlock_wire(0b010, 2), Err(V16Error::InvalidConfig));
+    assert_eq!(validate_bankruptcy_hlock_wire(0b1001, 2), Err(V16Error::InvalidConfig));
     assert!(validate_bankruptcy_hlock_wire(0b1001, 4).is_ok());
     assert!(validate_bankruptcy_hlock_wire(0xff, 28).is_ok());
 }
@@ -253,33 +237,16 @@ fn two_episode_world_activated(market_slots: u32, activated: u32) -> World {
     deposit(&mut header, &mut markets, &mut x, 100_000_000);
     deposit(&mut header, &mut markets, &mut y, 100_000_000);
     // Episode 1: y long / x short, price dips, both close flat. x keeps a domain-0 claim.
-    trade(
-        &mut header,
-        &mut markets,
-        &mut y,
-        &mut x,
-        signed_q(LOT),
-        PRICE,
-    )
-    .unwrap();
+    trade(&mut header, &mut markets, &mut y, &mut x, signed_q(LOT), PRICE).unwrap();
     accrue(&mut header, &mut markets, 2, DIP);
-    trade(
-        &mut header,
-        &mut markets,
-        &mut x,
-        &mut y,
-        signed_q(LOT),
-        DIP,
-    )
-    .unwrap();
+    trade(&mut header, &mut markets, &mut x, &mut y, signed_q(LOT), DIP).unwrap();
     assert!(x.pnl.get() > 0, "x is a flat winner");
     assert!(!x.legs[0].try_to_runtime().unwrap().active);
     accrue(&mut header, &mut markets, 3, PRICE);
 
     // Episode 2: the f03 bankruptcy world, started at slot 3.
-    let mut longs: Vec<PortfolioAccountV16Account> = (0..5)
-        .map(|i| account_fixture(market_slots, 100 + i as u8))
-        .collect();
+    let mut longs: Vec<PortfolioAccountV16Account> =
+        (0..5).map(|i| account_fixture(market_slots, 100 + i as u8)).collect();
     let mut short_big = account_fixture(market_slots, 200);
     let mut short_thin = account_fixture(market_slots, 201);
     deposit(&mut header, &mut markets, &mut short_big, 400_000_000);
@@ -288,15 +255,7 @@ fn two_episode_world_activated(market_slots: u32, activated: u32) -> World {
         deposit(&mut header, &mut markets, l, 100_000_000);
     }
     for l in longs.iter_mut().take(4) {
-        trade(
-            &mut header,
-            &mut markets,
-            l,
-            &mut short_big,
-            signed_q(LOT),
-            PRICE,
-        )
-        .unwrap();
+        trade(&mut header, &mut markets, l, &mut short_big, signed_q(LOT), PRICE).unwrap();
     }
     trade(
         &mut header,
@@ -331,31 +290,15 @@ fn two_episode_world_activated(market_slots: u32, activated: u32) -> World {
 }
 
 fn dump_claims(tag: &str, w: &World) {
-    println!(
-        "[{tag}] d0={} d1={} ppt={} hlock={:#x}",
-        domain_claims(&w.markets, 0),
-        domain_claims(&w.markets, 1),
-        w.header.pnl_pos_tot.get(),
-        w.header.bankruptcy_hlock_active
-    );
-    let mut all: Vec<(&str, &PortfolioAccountV16Account)> =
-        vec![("x", &w.x), ("short_big", &w.short_big)];
-    for l in &w.longs {
-        all.push(("long", l));
-    }
+    println!("[{tag}] d0={} d1={} ppt={} hlock={:#x}", domain_claims(&w.markets, 0), domain_claims(&w.markets, 1), w.header.pnl_pos_tot.get(), w.header.bankruptcy_hlock_active);
+    let mut all: Vec<(&str, &PortfolioAccountV16Account)> = vec![("x", &w.x), ("short_big", &w.short_big)];
+    for l in &w.longs { all.push(("long", l)); }
     for (n, a) in all {
         let mut doms = String::new();
         for sd in a.source_domains.iter() {
-            if sd.source_claim_bound_num.get() != 0 {
-                doms += &format!(" d{}={}", sd.domain.get(), sd.source_claim_bound_num.get());
-            }
+            if sd.source_claim_bound_num.get() != 0 { doms += &format!(" d{}={}", sd.domain.get(), sd.source_claim_bound_num.get()); }
         }
-        println!(
-            "   {n}: cap={} pnl={}{}",
-            a.capital.get(),
-            a.pnl.get(),
-            doms
-        );
+        println!("   {n}: cap={} pnl={}{}", a.capital.get(), a.pnl.get(), doms);
     }
 }
 
@@ -365,14 +308,8 @@ fn l1_hlock_clears_when_the_bankrupt_domain_claims_retire_while_unrelated_claims
     // A bankrupt SHORT in a Live single-asset group: attributed to claim-source domain 1
     // (asset 0, Short), the domain the long winners source from.
     assert_eq!(w.header.bankruptcy_hlock_active, 0b101);
-    assert!(
-        domain_claims(&w.markets, 1) != 0,
-        "long winners hold domain-1 claims"
-    );
-    assert!(
-        domain_claims(&w.markets, 0) != 0,
-        "x holds an unrelated domain-0 claim"
-    );
+    assert!(domain_claims(&w.markets, 1) != 0, "long winners hold domain-1 claims");
+    assert!(domain_claims(&w.markets, 0) != 0, "x holds an unrelated domain-0 claim");
 
     // PROOF DIRECTION: while any domain-1 claim remains, nothing clears it.
     assert!(!try_clear(&mut w.header, &mut w.markets));
@@ -392,11 +329,7 @@ fn l1_hlock_clears_when_the_bankrupt_domain_claims_retire_while_unrelated_claims
     refresh(&mut w.header, &mut w.markets, &mut w.short_big);
 
     dump_claims("after reversal", &w);
-    assert_eq!(
-        domain_claims(&w.markets, 1),
-        0,
-        "every domain-1 claim is gone"
-    );
+    assert_eq!(domain_claims(&w.markets, 1), 0, "every domain-1 claim is gone");
     assert!(
         w.header.pnl_pos_tot.get() > 0,
         "unrelated winners still hold profit: the pre-P2b predicate (pnl_pos_tot == 0) would \
@@ -440,10 +373,7 @@ fn l1_scoped_clear_still_requires_every_other_health_term() {
     // A pending domain-loss barrier (an open bankruptcy close with residual) holds it.
     // (The refreshes above already cleared it through the ordinary refresh path; each case
     // below re-latches the attributed byte on a copy and flips exactly one other term.)
-    assert_eq!(
-        w.header.bankruptcy_hlock_active, 0,
-        "refresh cleared it automatically"
-    );
+    assert_eq!(w.header.bankruptcy_hlock_active, 0, "refresh cleared it automatically");
     let mut barrier = (w.header, w.markets.clone());
     barrier.0.bankruptcy_hlock_active = 0b101;
     barrier.1[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(1);
@@ -457,10 +387,7 @@ fn l1_scoped_clear_still_requires_every_other_health_term() {
             1 => h.0.stale_certificate_count = V16PodU64::new(1),
             _ => h.0.b_stale_account_count = V16PodU64::new(1),
         }
-        assert!(
-            !try_clear(&mut h.0, &mut h.1),
-            "health term {field} must hold the hlock"
-        );
+        assert!(!try_clear(&mut h.0, &mut h.1), "health term {field} must hold the hlock");
     }
     // Resolved/Recovery mode falls back to the global predicate.
     let mut resolved = (w.header, w.markets.clone());
@@ -471,9 +398,7 @@ fn l1_scoped_clear_still_requires_every_other_health_term() {
         // Raw predicate only: the clear itself does not decode the rest of a Resolved header.
         let _ = market.try_clear_bankruptcy_hlock_not_atomic();
     }
-    assert!(bankruptcy_hlock_is_active(
-        resolved.0.bankruptcy_hlock_active
-    ));
+    assert!(bankruptcy_hlock_is_active(resolved.0.bankruptcy_hlock_active));
 
     // Control: the same copy with every term clean clears.
     let mut clean = (w.header, w.markets.clone());
@@ -508,14 +433,7 @@ fn l1_multi_asset_group_records_unattributed_and_keeps_the_global_predicate() {
 
 // ===================================================================== E7 ===
 
-fn adl_world() -> (
-    Header,
-    Markets,
-    PortfolioAccountV16Account,
-    PortfolioAccountV16Account,
-    PortfolioAccountV16Account,
-    PortfolioAccountV16Account,
-) {
+fn adl_world() -> (Header, Markets, PortfolioAccountV16Account, PortfolioAccountV16Account, PortfolioAccountV16Account, PortfolioAccountV16Account) {
     // Two longs against two shorts; one long exits UNILATERALLY (tag 44 RebalanceReduce),
     // which ADLs the short side: A_short = 3/4.
     let (mut header, mut markets) = market_fixture_slots(1, 100);
@@ -526,24 +444,8 @@ fn adl_world() -> (
     for a in [&mut l1, &mut l2, &mut s1, &mut s2] {
         deposit(&mut header, &mut markets, a, 10_000);
     }
-    trade(
-        &mut header,
-        &mut markets,
-        &mut l1,
-        &mut s1,
-        signed_q(2 * POS_SCALE),
-        100,
-    )
-    .unwrap();
-    trade(
-        &mut header,
-        &mut markets,
-        &mut l2,
-        &mut s2,
-        signed_q(2 * POS_SCALE),
-        100,
-    )
-    .unwrap();
+    trade(&mut header, &mut markets, &mut l1, &mut s1, signed_q(2 * POS_SCALE), 100).unwrap();
+    trade(&mut header, &mut markets, &mut l2, &mut s2, signed_q(2 * POS_SCALE), 100).unwrap();
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut v = PortfolioV16ViewMut::new(&mut l1);
@@ -572,38 +474,17 @@ fn e7_adl_reduce_only_open_returns_adl_reduce_only_not_lock_active() {
     deposit(&mut header, &mut markets, &mut fresh_short, 10_000);
     // Opening (attach) on either side: AdlReduceOnly.
     assert_eq!(
-        trade(
-            &mut header,
-            &mut markets,
-            &mut fresh_long,
-            &mut fresh_short,
-            signed_q(POS_SCALE),
-            100
-        ),
+        trade(&mut header, &mut markets, &mut fresh_long, &mut fresh_short, signed_q(POS_SCALE), 100),
         Err(V16Error::AdlReduceOnly)
     );
     // Enlarging an existing leg: AdlReduceOnly.
     assert_eq!(
-        trade(
-            &mut header,
-            &mut markets,
-            &mut l2,
-            &mut fresh_short,
-            signed_q(POS_SCALE),
-            100
-        ),
+        trade(&mut header, &mut markets, &mut l2, &mut fresh_short, signed_q(POS_SCALE), 100),
         Err(V16Error::AdlReduceOnly)
     );
     // Reducing matched risk is still allowed (close-only, not frozen).
-    trade(
-        &mut header,
-        &mut markets,
-        &mut s1,
-        &mut l1,
-        signed_q(POS_SCALE / 2),
-        100,
-    )
-    .expect("a matched reduce stays live under ADL");
+    trade(&mut header, &mut markets, &mut s1, &mut l1, signed_q(POS_SCALE / 2), 100)
+        .expect("a matched reduce stays live under ADL");
 }
 
 #[test]
@@ -613,25 +494,10 @@ fn e7_loss_stale_open_returns_loss_stale_not_lock_active() {
     let mut s = account_fixture(1, 31);
     deposit(&mut header, &mut markets, &mut l, 1_000);
     deposit(&mut header, &mut markets, &mut s, 1_000);
-    trade(
-        &mut header,
-        &mut markets,
-        &mut l,
-        &mut s,
-        signed_q(POS_SCALE),
-        100,
-    )
-    .unwrap();
+    trade(&mut header, &mut markets, &mut l, &mut s, signed_q(POS_SCALE), 100).unwrap();
     accrue(&mut header, &mut markets, 3, 101);
     assert_eq!(
-        trade(
-            &mut header,
-            &mut markets,
-            &mut l,
-            &mut s,
-            signed_q(POS_SCALE),
-            101
-        ),
+        trade(&mut header, &mut markets, &mut l, &mut s, signed_q(POS_SCALE), 101),
         Err(V16Error::LossStale)
     );
 }
@@ -648,14 +514,7 @@ fn e7_lifecycle_lock_keeps_lock_active() {
         market.mark_asset_drain_only_not_atomic(0).unwrap();
     }
     assert_eq!(
-        trade(
-            &mut header,
-            &mut markets,
-            &mut l,
-            &mut s,
-            signed_q(POS_SCALE),
-            100
-        ),
+        trade(&mut header, &mut markets, &mut l, &mut s, signed_q(POS_SCALE), 100),
         Err(V16Error::LockActive),
         "an asset-lifecycle lock is not ADL and keeps code 21"
     );
@@ -697,22 +556,9 @@ fn l2_wind_down_refuses_a_market_not_in_adl() {
     let mut s = account_fixture(1, 41);
     deposit(&mut header, &mut markets, &mut l, 1_000);
     deposit(&mut header, &mut markets, &mut s, 1_000);
-    trade(
-        &mut header,
-        &mut markets,
-        &mut l,
-        &mut s,
-        signed_q(POS_SCALE),
-        100,
-    )
-    .unwrap();
+    trade(&mut header, &mut markets, &mut l, &mut s, signed_q(POS_SCALE), 100).unwrap();
     assert_eq!(
-        wind_down(
-            &mut header,
-            &mut markets,
-            &mut l,
-            AdlWindDownBoundV16::EpisodeExpired
-        ),
+        wind_down(&mut header, &mut markets, &mut l, AdlWindDownBoundV16::EpisodeExpired),
         Err(V16Error::NonProgress),
         "no ADL, no forced close: holders keep their positions"
     );
@@ -729,9 +575,7 @@ fn l2_dust_bound_is_checked_by_the_engine() {
             &mut header,
             &mut markets,
             &mut l2,
-            AdlWindDownBoundV16::DustNotional {
-                max_notional_atoms: 299
-            }
+            AdlWindDownBoundV16::DustNotional { max_notional_atoms: 299 }
         ),
         Err(V16Error::NonProgress),
         "above the dust threshold the engine refuses"
@@ -763,42 +607,24 @@ fn l2_wind_down_exits_adl_conserves_value_and_reopens_only_after_reset() {
     let value0 = total_value(&header, &[&l1, &l2, &s1, &s2]);
 
     // Close the LONG side (2 legs: l1 has 1 lot left, l2 has 2 lots). Shorts decay via A.
-    let (closed1, cleared1) = wind_down(
-        &mut header,
-        &mut markets,
-        &mut l1,
-        AdlWindDownBoundV16::EpisodeExpired,
-    )
-    .unwrap();
+    let (closed1, cleared1) =
+        wind_down(&mut header, &mut markets, &mut l1, AdlWindDownBoundV16::EpisodeExpired)
+            .unwrap();
     assert_eq!(closed1, POS_SCALE);
     assert!(!cleared1);
     assert!(!l1.legs[0].try_to_runtime().unwrap().active);
 
     // Mid wind-down nobody can open into either side.
     assert_eq!(
-        trade(
-            &mut header,
-            &mut markets,
-            &mut fresh_long,
-            &mut fresh_short,
-            signed_q(POS_SCALE),
-            100
-        ),
+        trade(&mut header, &mut markets, &mut fresh_long, &mut fresh_short, signed_q(POS_SCALE), 100),
         Err(V16Error::AdlReduceOnly)
     );
 
-    let (closed2, cleared2) = wind_down(
-        &mut header,
-        &mut markets,
-        &mut l2,
-        AdlWindDownBoundV16::EpisodeExpired,
-    )
-    .unwrap();
+    let (closed2, cleared2) =
+        wind_down(&mut header, &mut markets, &mut l2, AdlWindDownBoundV16::EpisodeExpired)
+            .unwrap();
     assert_eq!(closed2, 2 * POS_SCALE);
-    assert!(
-        cleared2,
-        "the last leg of a side zeroes both sides and resets A"
-    );
+    assert!(cleared2, "the last leg of a side zeroes both sides and resets A");
     let a = markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!((a.a_long, a.a_short), (ADL_ONE, ADL_ONE));
     assert_eq!((a.oi_eff_long_q, a.oi_eff_short_q), (0, 0));
@@ -806,14 +632,7 @@ fn l2_wind_down_exits_adl_conserves_value_and_reopens_only_after_reset() {
     // Reset survivors are stale; opens are still refused until the reset finalizes.
     assert_eq!(a.mode_short, SideModeV16::ResetPending);
     assert_eq!(
-        trade(
-            &mut header,
-            &mut markets,
-            &mut fresh_long,
-            &mut fresh_short,
-            signed_q(POS_SCALE),
-            100
-        ),
+        trade(&mut header, &mut markets, &mut fresh_long, &mut fresh_short, signed_q(POS_SCALE), 100),
         Err(V16Error::AdlReduceOnly),
         "no early open into a side that is still resetting"
     );
@@ -827,10 +646,7 @@ fn l2_wind_down_exits_adl_conserves_value_and_reopens_only_after_reset() {
         }
     }
     let a = markets[0].engine.asset.try_to_runtime().unwrap();
-    assert_eq!(
-        (a.mode_long, a.mode_short),
-        (SideModeV16::Normal, SideModeV16::Normal)
-    );
+    assert_eq!((a.mode_long, a.mode_short), (SideModeV16::Normal, SideModeV16::Normal));
     assert!(!s1.legs[0].try_to_runtime().unwrap().active);
     assert!(!s2.legs[0].try_to_runtime().unwrap().active);
 
@@ -843,15 +659,8 @@ fn l2_wind_down_exits_adl_conserves_value_and_reopens_only_after_reset() {
     }
 
     // The market is open again.
-    trade(
-        &mut header,
-        &mut markets,
-        &mut fresh_long,
-        &mut fresh_short,
-        signed_q(POS_SCALE),
-        100,
-    )
-    .expect("after the reset both sides reopen");
+    trade(&mut header, &mut markets, &mut fresh_long, &mut fresh_short, signed_q(POS_SCALE), 100)
+        .expect("after the reset both sides reopen");
 }
 
 #[test]
@@ -867,24 +676,8 @@ fn l2_wind_down_refuses_an_account_with_a_liquidation_deficit() {
     for a in [&mut l1, &mut l2, &mut s2] {
         deposit(&mut header, &mut markets, a, 100_000_000);
     }
-    trade(
-        &mut header,
-        &mut markets,
-        &mut l1,
-        &mut thin,
-        signed_q(LOT),
-        PRICE,
-    )
-    .unwrap();
-    trade(
-        &mut header,
-        &mut markets,
-        &mut l2,
-        &mut s2,
-        signed_q(2 * LOT),
-        PRICE,
-    )
-    .unwrap();
+    trade(&mut header, &mut markets, &mut l1, &mut thin, signed_q(LOT), PRICE).unwrap();
+    trade(&mut header, &mut markets, &mut l2, &mut s2, signed_q(2 * LOT), PRICE).unwrap();
     // ADL the short side: l2 exits one lot unilaterally.
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -903,22 +696,12 @@ fn l2_wind_down_refuses_an_account_with_a_liquidation_deficit() {
     accrue(&mut header, &mut markets, 2, PRICE + 900_000);
     accrue(&mut header, &mut markets, 3, MARK);
     assert_eq!(
-        wind_down(
-            &mut header,
-            &mut markets,
-            &mut thin,
-            AdlWindDownBoundV16::EpisodeExpired
-        ),
+        wind_down(&mut header, &mut markets, &mut thin, AdlWindDownBoundV16::EpisodeExpired),
         Err(V16Error::LockActive)
     );
     // A healthy account in the same market can still be wound down.
-    wind_down(
-        &mut header,
-        &mut markets,
-        &mut s2,
-        AdlWindDownBoundV16::EpisodeExpired,
-    )
-    .expect("a healthy holder is wound down");
+    wind_down(&mut header, &mut markets, &mut s2, AdlWindDownBoundV16::EpisodeExpired)
+        .expect("a healthy holder is wound down");
 }
 
 // ============================================ L2: 10-04 STONK / Jimothy shapes ===
@@ -931,12 +714,8 @@ fn l2_wind_down_refuses_an_account_with_a_liquidation_deficit() {
 
 fn adl_shape_replay(n_long: usize, n_short: usize, a_long_target: f64, a_short_target: f64) {
     let (mut header, mut markets) = market_fixture_slots(1, PRICE);
-    let mut longs: Vec<_> = (0..n_long)
-        .map(|i| account_fixture(1, 80 + i as u8))
-        .collect();
-    let mut shorts: Vec<_> = (0..n_short)
-        .map(|i| account_fixture(1, 90 + i as u8))
-        .collect();
+    let mut longs: Vec<_> = (0..n_long).map(|i| account_fixture(1, 80 + i as u8)).collect();
+    let mut shorts: Vec<_> = (0..n_short).map(|i| account_fixture(1, 90 + i as u8)).collect();
     let mut t = account_fixture(1, 98);
     let mut u = account_fixture(1, 99);
     for a in longs.iter_mut().chain(shorts.iter_mut()) {
@@ -951,21 +730,10 @@ fn adl_shape_replay(n_long: usize, n_short: usize, a_long_target: f64, a_short_t
     }
     let real = (n_long * n_short) as u128 * LOT;
     let helper = 10 * real;
-    trade(
-        &mut header,
-        &mut markets,
-        &mut t,
-        &mut u,
-        signed_q(helper),
-        PRICE,
-    )
-    .unwrap();
+    trade(&mut header, &mut markets, &mut t, &mut u, signed_q(helper), PRICE).unwrap();
     let oi0 = real + helper;
     let q_t = ((oi0 as f64) * (1.0 - a_short_target)) as u128;
-    let rr = |a: &mut PortfolioAccountV16Account,
-              q: u128,
-              header: &mut Header,
-              markets: &mut Markets| {
+    let rr = |a: &mut PortfolioAccountV16Account, q: u128, header: &mut Header, markets: &mut Markets| {
         let mut market = MarketGroupV16ViewMut::new(header, markets);
         let mut v = PortfolioV16ViewMut::new(a);
         market
@@ -979,12 +747,7 @@ fn adl_shape_replay(n_long: usize, n_short: usize, a_long_target: f64, a_short_t
             .unwrap();
     };
     rr(&mut t, q_t, &mut header, &mut markets);
-    let oi1 = markets[0]
-        .engine
-        .asset
-        .try_to_runtime()
-        .unwrap()
-        .oi_eff_long_q;
+    let oi1 = markets[0].engine.asset.try_to_runtime().unwrap().oi_eff_long_q;
     let q_u = ((oi1 as f64) * (1.0 - a_long_target)) as u128;
     rr(&mut u, q_u, &mut header, &mut markets);
     let a = markets[0].engine.asset.try_to_runtime().unwrap();
@@ -994,8 +757,7 @@ fn adl_shape_replay(n_long: usize, n_short: usize, a_long_target: f64, a_short_t
     assert!((al - a_long_target).abs() < 0.01 && (as_ - a_short_target).abs() < 0.01);
 
     // Everyone settled; snapshot the ledger.
-    let mut all: Vec<&mut PortfolioAccountV16Account> =
-        longs.iter_mut().chain(shorts.iter_mut()).collect();
+    let mut all: Vec<&mut PortfolioAccountV16Account> = longs.iter_mut().chain(shorts.iter_mut()).collect();
     all.push(&mut t);
     all.push(&mut u);
     for a in all.iter_mut() {
@@ -1008,20 +770,14 @@ fn adl_shape_replay(n_long: usize, n_short: usize, a_long_target: f64, a_short_t
     };
 
     // Wind down the side with fewer legs.
-    let long_side_legs = all
-        .iter()
-        .filter(|a| {
-            let l = a.legs[0].try_to_runtime().unwrap();
-            l.active && l.side == percolator::SideV16::Long
-        })
-        .count();
-    let short_side_legs = all
-        .iter()
-        .filter(|a| {
-            let l = a.legs[0].try_to_runtime().unwrap();
-            l.active && l.side == percolator::SideV16::Short
-        })
-        .count();
+    let long_side_legs = all.iter().filter(|a| {
+        let l = a.legs[0].try_to_runtime().unwrap();
+        l.active && l.side == percolator::SideV16::Long
+    }).count();
+    let short_side_legs = all.iter().filter(|a| {
+        let l = a.legs[0].try_to_runtime().unwrap();
+        l.active && l.side == percolator::SideV16::Short
+    }).count();
     let wind_side = if long_side_legs <= short_side_legs {
         percolator::SideV16::Long
     } else {
@@ -1032,21 +788,13 @@ fn adl_shape_replay(n_long: usize, n_short: usize, a_long_target: f64, a_short_t
     for a in all.iter_mut() {
         let l = a.legs[0].try_to_runtime().unwrap();
         if l.active && l.side == wind_side && !cleared {
-            let (_, c) = wind_down(
-                &mut header,
-                &mut markets,
-                a,
-                AdlWindDownBoundV16::EpisodeExpired,
-            )
-            .expect("wind-down step");
+            let (_, c) = wind_down(&mut header, &mut markets, a, AdlWindDownBoundV16::EpisodeExpired)
+                .expect("wind-down step");
             steps += 1;
             cleared = c;
         }
     }
-    assert!(
-        cleared,
-        "bounded: one step per leg of the smaller side ({steps} steps)"
-    );
+    assert!(cleared, "bounded: one step per leg of the smaller side ({steps} steps)");
     for a in all.iter_mut() {
         refresh(&mut header, &mut markets, a);
     }
@@ -1059,24 +807,14 @@ fn adl_shape_replay(n_long: usize, n_short: usize, a_long_target: f64, a_short_t
     }
     let a = markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!((a.a_long, a.a_short), (ADL_ONE, ADL_ONE));
-    assert_eq!(
-        (a.mode_long, a.mode_short),
-        (SideModeV16::Normal, SideModeV16::Normal)
-    );
+    assert_eq!((a.mode_long, a.mode_short), (SideModeV16::Normal, SideModeV16::Normal));
     assert_eq!(header.vault.get(), vault0);
     let refs: Vec<&PortfolioAccountV16Account> = all.iter().map(|a| &**a).collect();
     assert_eq!(total_value(&header, &refs), value0, "conservation");
     // Reopens.
     let (x, y) = all.split_at_mut(1);
-    trade(
-        &mut header,
-        &mut markets,
-        x[0],
-        y[0],
-        signed_q(POS_SCALE),
-        PRICE,
-    )
-    .expect("reopened after the wind-down");
+    trade(&mut header, &mut markets, x[0], y[0], signed_q(POS_SCALE), PRICE)
+        .expect("reopened after the wind-down");
 }
 
 #[test]
@@ -1102,11 +840,7 @@ fn l2_replay_shape_jimothy_10_04() {
 
 use proptest::prelude::*;
 
-fn all_refresh(
-    header: &mut Header,
-    markets: &mut Markets,
-    accts: &mut [PortfolioAccountV16Account],
-) {
+fn all_refresh(header: &mut Header, markets: &mut Markets, accts: &mut [PortfolioAccountV16Account]) {
     for a in accts.iter_mut() {
         refresh(header, markets, a);
     }
@@ -1263,25 +997,15 @@ fn m1_wind_down_refuses_while_the_mark_lags_the_oracle_target() {
     // Oracle target moved, effective price has not caught up yet: refused.
     markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(101);
     assert_eq!(
-        wind_down(
-            &mut header,
-            &mut markets,
-            &mut l2,
-            AdlWindDownBoundV16::EpisodeExpired
-        ),
+        wind_down(&mut header, &mut markets, &mut l2, AdlWindDownBoundV16::EpisodeExpired),
         Err(V16Error::LockActive),
         "no forced close at a lagging mark"
     );
     assert!(l2.legs[0].try_to_runtime().unwrap().active);
     // NEGATIVE CONTROL: target == effective, the same call closes.
     markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(100);
-    wind_down(
-        &mut header,
-        &mut markets,
-        &mut l2,
-        AdlWindDownBoundV16::EpisodeExpired,
-    )
-    .expect("fresh mark: wind-down proceeds");
+    wind_down(&mut header, &mut markets, &mut l2, AdlWindDownBoundV16::EpisodeExpired)
+        .expect("fresh mark: wind-down proceeds");
 }
 
 #[test]
@@ -1294,25 +1018,15 @@ fn l3_mh_wind_down_refuses_while_a_domain_loss_barrier_is_pending() {
             markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
         }
         assert_eq!(
-            wind_down(
-                &mut header,
-                &mut markets,
-                &mut l2,
-                AdlWindDownBoundV16::EpisodeExpired
-            ),
+            wind_down(&mut header, &mut markets, &mut l2, AdlWindDownBoundV16::EpisodeExpired),
             Err(V16Error::LockActive),
             "a forced close must not run over an in-flight bankruptcy close (short={side_short})"
         );
     }
     // NEGATIVE CONTROL: no barrier, same world, closes.
     let (mut header, mut markets, _l1, mut l2, _s1, _s2) = adl_world();
-    wind_down(
-        &mut header,
-        &mut markets,
-        &mut l2,
-        AdlWindDownBoundV16::EpisodeExpired,
-    )
-    .expect("no barrier: wind-down proceeds");
+    wind_down(&mut header, &mut markets, &mut l2, AdlWindDownBoundV16::EpisodeExpired)
+        .expect("no barrier: wind-down proceeds");
 }
 
 #[test]
@@ -1323,7 +1037,8 @@ fn l3_mg_flat_account_without_a_close_ledger_stays_unattributed() {
     let (mut header, mut markets) = market_fixture_slots(1, 100);
     let mut a = account_fixture(1, 66);
     a.pnl = percolator::V16PodI128::new(-50);
-    header.negative_pnl_account_count = V16PodU64::new(header.negative_pnl_account_count.get() + 1);
+    header.negative_pnl_account_count =
+        V16PodU64::new(header.negative_pnl_account_count.get() + 1);
     assert!(!a.legs[0].try_to_runtime().unwrap().active);
     assert!(!a.close_progress.try_to_runtime().unwrap().active);
     {
@@ -1342,57 +1057,31 @@ fn l3_mg_flat_account_without_a_close_ledger_stays_unattributed() {
     let mut s = account_fixture(1, 68);
     deposit(&mut header, &mut markets, &mut l, 10_000);
     deposit(&mut header, &mut markets, &mut s, 10_000);
-    trade(
-        &mut header,
-        &mut markets,
-        &mut l,
-        &mut s,
-        signed_q(POS_SCALE),
-        100,
-    )
-    .unwrap();
+    trade(&mut header, &mut markets, &mut l, &mut s, signed_q(POS_SCALE), 100).unwrap();
     s.capital = percolator::V16PodU128::new(0);
     header.c_tot = percolator::V16PodU128::new(header.c_tot.get() - 10_000);
     header.vault = percolator::V16PodU128::new(header.vault.get() - 10_000);
     s.pnl = percolator::V16PodI128::new(-50);
-    header.negative_pnl_account_count = V16PodU64::new(header.negative_pnl_account_count.get() + 1);
+    header.negative_pnl_account_count =
+        V16PodU64::new(header.negative_pnl_account_count.get() + 1);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut v = PortfolioV16ViewMut::new(&mut s);
         let _ = market.full_account_refresh_not_atomic(&mut v);
     }
-    assert_eq!(
-        header.bankruptcy_hlock_active, 0b101,
-        "short leg: attributed to domain 1"
-    );
+    assert_eq!(header.bankruptcy_hlock_active, 0b101, "short leg: attributed to domain 1");
 }
 
 // ===================== #126: a side flip is risk-increasing (stale / target-lag) ======
 
 /// Open `open_q` (long `l`, short `s`) at a healthy mark, then make the asset loss-stale.
-fn stale_world(
-    open_q: u128,
-    seed: u8,
-) -> (
-    Header,
-    Markets,
-    PortfolioAccountV16Account,
-    PortfolioAccountV16Account,
-) {
+fn stale_world(open_q: u128, seed: u8) -> (Header, Markets, PortfolioAccountV16Account, PortfolioAccountV16Account) {
     let (mut header, mut markets) = market_fixture_slots(1, 100);
     let mut l = account_fixture(1, seed);
     let mut s = account_fixture(1, seed + 1);
     deposit(&mut header, &mut markets, &mut l, 1_000);
     deposit(&mut header, &mut markets, &mut s, 1_000);
-    trade(
-        &mut header,
-        &mut markets,
-        &mut l,
-        &mut s,
-        signed_q(open_q),
-        100,
-    )
-    .unwrap();
+    trade(&mut header, &mut markets, &mut l, &mut s, signed_q(open_q), 100).unwrap();
     accrue(&mut header, &mut markets, 3, 101);
     (header, markets, l, s)
 }
@@ -1402,14 +1091,7 @@ fn issue126_equal_size_side_flip_is_rejected_while_loss_stale() {
     let (mut header, mut markets, mut l, mut s) = stale_world(POS_SCALE, 40);
     // l: +1 -> -1, s: -1 -> +1. Same absolute size, opposite side.
     assert_eq!(
-        trade(
-            &mut header,
-            &mut markets,
-            &mut l,
-            &mut s,
-            -signed_q(2 * POS_SCALE),
-            101
-        ),
+        trade(&mut header, &mut markets, &mut l, &mut s, -signed_q(2 * POS_SCALE), 101),
         Err(V16Error::LossStale),
         "an equal-size flip opens fresh opposite exposure and must hit the stale gate"
     );
@@ -1420,14 +1102,7 @@ fn issue126_smaller_abs_side_flip_is_rejected_while_loss_stale() {
     let (mut header, mut markets, mut l, mut s) = stale_world(2 * POS_SCALE, 42);
     // l: +2 -> -1, s: -2 -> +1. Absolute size shrinks but the side flips.
     assert_eq!(
-        trade(
-            &mut header,
-            &mut markets,
-            &mut l,
-            &mut s,
-            -signed_q(3 * POS_SCALE),
-            101
-        ),
+        trade(&mut header, &mut markets, &mut l, &mut s, -signed_q(3 * POS_SCALE), 101),
         Err(V16Error::LossStale)
     );
 }
@@ -1439,38 +1114,16 @@ fn issue126_side_flip_is_rejected_while_target_lags_effective() {
     let mut s = account_fixture(1, 45);
     deposit(&mut header, &mut markets, &mut l, 1_000);
     deposit(&mut header, &mut markets, &mut s, 1_000);
-    trade(
-        &mut header,
-        &mut markets,
-        &mut l,
-        &mut s,
-        signed_q(2 * POS_SCALE),
-        100,
-    )
-    .unwrap();
+    trade(&mut header, &mut markets, &mut l, &mut s, signed_q(2 * POS_SCALE), 100).unwrap();
     // Oracle target moved, effective price has not caught up: risk-increasing trades refused.
     markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(101);
     assert_eq!(
-        trade(
-            &mut header,
-            &mut markets,
-            &mut l,
-            &mut s,
-            -signed_q(3 * POS_SCALE),
-            100
-        ),
+        trade(&mut header, &mut markets, &mut l, &mut s, -signed_q(3 * POS_SCALE), 100),
         Err(V16Error::LockActive),
         "a smaller-abs flip must hit the target-lag gate"
     );
     assert_eq!(
-        trade(
-            &mut header,
-            &mut markets,
-            &mut l,
-            &mut s,
-            -signed_q(4 * POS_SCALE),
-            100
-        ),
+        trade(&mut header, &mut markets, &mut l, &mut s, -signed_q(4 * POS_SCALE), 100),
         Err(V16Error::LockActive),
         "an equal-size flip must hit the target-lag gate"
     );
@@ -1480,22 +1133,8 @@ fn issue126_side_flip_is_rejected_while_target_lags_effective() {
 fn issue126_same_side_reduction_and_close_stay_allowed_while_loss_stale() {
     // NEGATIVE CONTROLS: pure reductions and a close-to-flat are not risk-increasing.
     let (mut header, mut markets, mut l, mut s) = stale_world(2 * POS_SCALE, 46);
-    trade(
-        &mut header,
-        &mut markets,
-        &mut s,
-        &mut l,
-        signed_q(POS_SCALE),
-        101,
-    )
-    .expect("same-side reduction is not risk-increasing");
-    trade(
-        &mut header,
-        &mut markets,
-        &mut s,
-        &mut l,
-        signed_q(POS_SCALE),
-        101,
-    )
-    .expect("a close to flat is not risk-increasing");
+    trade(&mut header, &mut markets, &mut s, &mut l, signed_q(POS_SCALE), 101)
+        .expect("same-side reduction is not risk-increasing");
+    trade(&mut header, &mut markets, &mut s, &mut l, signed_q(POS_SCALE), 101)
+        .expect("a close to flat is not risk-increasing");
 }

@@ -5,13 +5,12 @@
 //! failing the settle, the next instruction's settle retries it, and a move skipped inside a
 //! closing batch is retried by the asset's next accrual once no position is stored.
 #![allow(dead_code, unused_imports, unused_mut)]
-use percolator::POS_SCALE;
 use percolator::{
-    EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
-    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PortfolioAccountV16Account,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
-    V16Config, V16PodU64,
+    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
+    PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
+    TradeRequestV16, V16Config, V16PodU64,
 };
+use percolator::POS_SCALE;
 
 const PRICE: u64 = 1_000_000;
 
@@ -19,8 +18,7 @@ fn account(seed: u32) -> PortfolioAccountV16Account {
     let mut key = [0u8; 32];
     key[..4].copy_from_slice(&seed.to_le_bytes());
     key[31] = 0x5A;
-    let header =
-        ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], key, [3; 32]));
+    let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], key, [3; 32]));
     let mut a = PortfolioAccountV16Account::default();
     a.init_empty_in_place(header).unwrap();
     a
@@ -42,24 +40,11 @@ impl W3 {
         cfg.max_accrual_dt_slots = 2;
         cfg.min_funding_lifetime_slots = 10_000_000;
         let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 3, 0).unwrap();
-        let mut markets: Vec<Market<u64>> = (0..3u64)
-            .map(|i| Market::new(i, EngineAssetSlotV16Account::default()))
-            .collect();
+        let mut markets: Vec<Market<u64>> = (0..3u64).map(|i| Market::new(i, EngineAssetSlotV16Account::default())).collect();
         for i in 0..3 {
-            header
-                .activate_empty_asset_slot_not_atomic(
-                    i as u32,
-                    &mut markets[i].engine,
-                    PRICE,
-                    1 + 2 * i as u64,
-                )
-                .unwrap();
+            header.activate_empty_asset_slot_not_atomic(i as u32, &mut markets[i].engine, PRICE, 1 + 2 * i as u64).unwrap();
         }
-        W3 {
-            header,
-            markets,
-            slot: 8,
-        }
+        W3 { header, markets, slot: 8 }
     }
     /// default view: NO S10 budget (what a trade, batch or liquidation instruction has)
     fn view(&mut self) -> MarketGroupV16ViewMut<'_, u64> {
@@ -69,31 +54,16 @@ impl W3 {
     fn view_crank(&mut self) -> MarketGroupV16ViewMut<'_, u64> {
         MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets)
     }
-    fn price(&self, i: usize) -> u64 {
-        self.markets[i].engine.asset.effective_price.get()
-    }
+    fn price(&self, i: usize) -> u64 { self.markets[i].engine.asset.effective_price.get() }
     fn deposit(&mut self, a: &mut PortfolioAccountV16Account, amt: u128) {
         let mut m = self.view();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt)
-            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt).unwrap();
     }
-    fn trade(
-        m: &mut MarketGroupV16ViewMut<'_, u64>,
-        i: usize,
-        price: u64,
-        long: &mut PortfolioAccountV16Account,
-        short: &mut PortfolioAccountV16Account,
-        size: u128,
-    ) {
+    fn trade(m: &mut MarketGroupV16ViewMut<'_, u64>, i: usize, price: u64, long: &mut PortfolioAccountV16Account, short: &mut PortfolioAccountV16Account, size: u128) {
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
             &mut PortfolioV16ViewMut::new(long),
             &mut PortfolioV16ViewMut::new(short),
-            TradeRequestV16 {
-                asset_index: i,
-                size_q: i128::try_from(size).unwrap(),
-                exec_price: price,
-                fee_bps: 0,
-            },
+            TradeRequestV16 { asset_index: i, size_q: i128::try_from(size).unwrap(), exec_price: price, fee_bps: 0 },
             true,
         )
         .expect("trade");
@@ -106,38 +76,21 @@ impl W3 {
             let new = (old + old * bps as i128 / 10_000) as u64;
             let slot = self.slot;
             let mut m = self.view();
-            m.accrue_asset_to_not_atomic(i, slot, new, 0, true)
-                .expect("accrue");
+            m.accrue_asset_to_not_atomic(i, slot, new, 0, true).expect("accrue");
             m.markets[i].engine.asset.raw_oracle_target_price = V16PodU64::new(new);
         }
     }
     fn refresh(&mut self, a: &mut PortfolioAccountV16Account) {
         let mut m = self.view_crank();
         let mut budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
-        m.full_account_refresh_with_s10_budget_not_atomic(
-            &mut PortfolioV16ViewMut::new(a),
-            &mut budget,
-        )
-        .expect("refresh");
+        m.full_account_refresh_with_s10_budget_not_atomic(&mut PortfolioV16ViewMut::new(a), &mut budget).expect("refresh");
     }
     /// short-domain (maker's loss domain) fresh backing of asset i, in atoms
     fn short_fresh(&self, i: usize) -> u128 {
-        self.markets[i]
-            .engine
-            .backing_short
-            .try_to_runtime()
-            .unwrap()
-            .fresh_unliened_backing_num
-            / 1_000_000_000_000
+        self.markets[i].engine.backing_short.try_to_runtime().unwrap().fresh_unliened_backing_num / 1_000_000_000_000
     }
     fn long_fresh(&self, i: usize) -> u128 {
-        self.markets[i]
-            .engine
-            .backing_long
-            .try_to_runtime()
-            .unwrap()
-            .fresh_unliened_backing_num
-            / 1_000_000_000_000
+        self.markets[i].engine.backing_long.try_to_runtime().unwrap().fresh_unliened_backing_num / 1_000_000_000_000
     }
 }
 
@@ -151,17 +104,11 @@ fn stranded() -> (W3, PortfolioAccountV16Account, PortfolioAccountV16Account) {
     w.deposit(&mut maker, 1_000_000_000_000_000);
     {
         let mut m = w.view();
-        for i in 0..3 {
-            W3::trade(&mut m, i, PRICE, &mut a, &mut maker, 400 * POS_SCALE);
-        }
+        for i in 0..3 { W3::trade(&mut m, i, PRICE, &mut a, &mut maker, 400 * POS_SCALE); }
     }
-    for _ in 0..3 {
-        w.tick(150);
-    }
+    for _ in 0..3 { w.tick(150); }
     w.refresh(&mut maker);
-    for _ in 0..8 {
-        w.tick(-150);
-    }
+    for _ in 0..8 { w.tick(-150); }
     w.refresh(&mut a);
     (w, maker, a)
 }
@@ -170,32 +117,16 @@ fn stranded() -> (W3, PortfolioAccountV16Account, PortfolioAccountV16Account) {
 fn three_eligible_assets_two_fire_in_plan_order_and_the_third_waits_for_the_next_instruction() {
     let (mut w, mut maker, mut a) = stranded();
     let before: Vec<u128> = (0..3).map(|i| w.short_fresh(i)).collect();
-    assert!(
-        before.iter().all(|x| *x > 0),
-        "every asset holds the maker's stranded loss: {before:?}"
-    );
+    assert!(before.iter().all(|x| *x > 0), "every asset holds the maker's stranded loss: {before:?}");
     // one instruction (one view): the maker's three leg entries all pass V1; the budget is 2
     w.refresh(&mut maker);
     let after: Vec<u128> = (0..3).map(|i| w.short_fresh(i)).collect();
-    assert!(
-        after[0] < before[0] && after[1] < before[1],
-        "assets 0 and 1 (lowest source domains) moved: {before:?} -> {after:?}"
-    );
-    assert_eq!(
-        after[2], before[2],
-        "asset 2 was skipped for the cap, and the settle still succeeded"
-    );
+    assert!(after[0] < before[0] && after[1] < before[1], "assets 0 and 1 (lowest source domains) moved: {before:?} -> {after:?}");
+    assert_eq!(after[2], before[2], "asset 2 was skipped for the cap, and the settle still succeeded");
     // the next instruction (a new view, budget restored): any settlement entry of asset 2 retries it
     w.refresh(&mut a);
-    assert!(
-        w.short_fresh(2) < before[2],
-        "the trader's refresh retried asset 2"
-    );
-    assert_eq!(
-        (w.short_fresh(0), w.short_fresh(1)),
-        (after[0], after[1]),
-        "nothing else moved"
-    );
+    assert!(w.short_fresh(2) < before[2], "the trader's refresh retried asset 2");
+    assert_eq!((w.short_fresh(0), w.short_fresh(1)), (after[0], after[1]), "nothing else moved");
 }
 
 #[test]
@@ -206,26 +137,15 @@ fn a_closing_batch_moves_nothing_and_each_assets_next_refresh_crank_retries_it()
     // Trades and liquidations carry no S10 budget (they are the heaviest CU paths).
     {
         let mut m = w.view();
-        let p: Vec<u64> = (0..3)
-            .map(|i| m.markets[i].engine.asset.effective_price.get())
-            .collect();
-        for i in 0..3 {
-            W3::trade(&mut m, i, p[i], &mut maker, &mut a, 400 * POS_SCALE);
-        }
+        let p: Vec<u64> = (0..3).map(|i| m.markets[i].engine.asset.effective_price.get()).collect();
+        for i in 0..3 { W3::trade(&mut m, i, p[i], &mut maker, &mut a, 400 * POS_SCALE); }
     }
     for i in 0..3 {
         let asset = w.markets[i].engine.asset.try_to_runtime().unwrap();
-        assert_eq!(
-            asset.stored_pos_count_long + asset.stored_pos_count_short,
-            0,
-            "asset {i}: closed"
-        );
+        assert_eq!(asset.stored_pos_count_long + asset.stored_pos_count_short, 0, "asset {i}: closed");
     }
     let closed: Vec<u128> = (0..3).map(|i| w.short_fresh(i)).collect();
-    assert_eq!(
-        closed, before,
-        "a closing batch moves nothing, whatever the eligibility"
-    );
+    assert_eq!(closed, before, "a closing batch moves nothing, whatever the eligibility");
     // no position is left to settle; each asset's next refresh crank (its own instruction, its own
     // budget) accrues it and retries the move
     w.slot += 1;
@@ -235,21 +155,12 @@ fn a_closing_batch_moves_nothing_and_each_assets_next_refresh_crank_retries_it()
         let mut m = w.view_crank();
         m.permissionless_crank_not_atomic(
             &mut PortfolioV16ViewMut::new(&mut maker),
-            PermissionlessCrankRequestV16 {
-                now_slot: now,
-                asset_index: i,
-                effective_price: price,
-                funding_rate_e9: 0,
-                action: PermissionlessCrankActionV16::Refresh,
-            },
+            PermissionlessCrankRequestV16 { now_slot: now, asset_index: i, effective_price: price, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh },
         )
         .expect("crank");
     }
     let after: Vec<u128> = (0..3).map(|i| w.short_fresh(i)).collect();
-    assert!(
-        after.iter().zip(&before).all(|(a, b)| a < b),
-        "every asset's refresh crank retried and moved: {before:?} -> {after:?}"
-    );
+    assert!(after.iter().zip(&before).all(|(a, b)| a < b), "every asset's refresh crank retried and moved: {before:?} -> {after:?}");
 }
 
 /// Reviewer follow-up (fold 2026-10-08): only the Refresh action may use the S10 grant. All three
@@ -261,36 +172,22 @@ fn a_non_refresh_crank_action_never_uses_the_s10_grant() {
     let (mut w, mut maker, mut a) = stranded();
     {
         let mut m = w.view();
-        let p: Vec<u64> = (0..3)
-            .map(|i| m.markets[i].engine.asset.effective_price.get())
-            .collect();
-        for i in 0..3 {
-            W3::trade(&mut m, i, p[i], &mut maker, &mut a, 400 * POS_SCALE);
-        }
+        let p: Vec<u64> = (0..3).map(|i| m.markets[i].engine.asset.effective_price.get()).collect();
+        for i in 0..3 { W3::trade(&mut m, i, p[i], &mut maker, &mut a, 400 * POS_SCALE); }
     }
     let snap = |w: &W3| -> Vec<(u128, u128, u128, u128)> {
-        (0..3)
-            .map(|i| {
-                (
-                    w.short_fresh(i),
-                    w.long_fresh(i),
-                    w.markets[i].engine.provider_principal_short.get(),
-                    w.markets[i].engine.provider_principal_long.get(),
-                )
-            })
-            .collect()
+        (0..3).map(|i| (
+            w.short_fresh(i), w.long_fresh(i),
+            w.markets[i].engine.provider_principal_short.get(), w.markets[i].engine.provider_principal_long.get(),
+        )).collect()
     };
     let before = snap(&w);
     w.slot += 1;
     let grant = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
-    let actions = |i: usize| {
-        vec![
-            PermissionlessCrankActionV16::Liquidate(percolator::LiquidationRequestV16 {
-                asset_index: i,
-            }),
-            PermissionlessCrankActionV16::SettleB { asset_index: i },
-        ]
-    };
+    let actions = |i: usize| vec![
+        PermissionlessCrankActionV16::Liquidate(percolator::LiquidationRequestV16 { asset_index: i }),
+        PermissionlessCrankActionV16::SettleB { asset_index: i },
+    ];
     for i in 0..3 {
         for action in actions(i) {
             let price = w.price(i);
@@ -299,24 +196,11 @@ fn a_non_refresh_crank_action_never_uses_the_s10_grant() {
             let mut m = w.view();
             let r = m.permissionless_crank_s10_not_atomic(
                 &mut PortfolioV16ViewMut::new(&mut maker),
-                PermissionlessCrankRequestV16 {
-                    now_slot: now,
-                    asset_index: i,
-                    effective_price: price,
-                    funding_rate_e9: 0,
-                    action,
-                },
+                PermissionlessCrankRequestV16 { now_slot: now, asset_index: i, effective_price: price, funding_rate_e9: 0, action },
                 grant,
             );
-            if r.is_err() {
-                w.header = h;
-                w.markets = mk;
-            }
-            assert_eq!(
-                snap(&w),
-                before,
-                "asset {i}: a non-Refresh action moved backing ({r:?})"
-            );
+            if r.is_err() { w.header = h; w.markets = mk; }
+            assert_eq!(snap(&w), before, "asset {i}: a non-Refresh action moved backing ({r:?})");
         }
     }
     // vacuity: the pending moves exist; a Refresh crank with the same grant makes one
@@ -325,18 +209,9 @@ fn a_non_refresh_crank_action_never_uses_the_s10_grant() {
     let mut m = w.view();
     m.permissionless_crank_s10_not_atomic(
         &mut PortfolioV16ViewMut::new(&mut maker),
-        PermissionlessCrankRequestV16 {
-            now_slot: now,
-            asset_index: 0,
-            effective_price: price,
-            funding_rate_e9: 0,
-            action: PermissionlessCrankActionV16::Refresh,
-        },
+        PermissionlessCrankRequestV16 { now_slot: now, asset_index: 0, effective_price: price, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh },
         grant,
     )
     .expect("refresh crank");
-    assert!(
-        w.short_fresh(0) < before[0].0,
-        "vacuity: the Refresh crank retried and moved asset 0"
-    );
+    assert!(w.short_fresh(0) < before[0].0, "vacuity: the Refresh crank retried and moved asset 0");
 }

@@ -18,8 +18,9 @@ use percolator::v16::{
     kani_insert_account_kf_settlement_plan_entry, kani_kernel_accumulate_batch_trade,
     kani_kernel_advance_close_ledger, kani_kernel_advance_leg_b_snap,
     kani_kernel_initial_margin_gate, kani_kernel_locked_margin_gate,
-    kani_kernel_principal_cure_close_ledger, kani_kernel_settle_close_ledger_principal,
-    kani_kernel_settle_principal, kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
+    kani_kernel_principal_cure_close_ledger,
+    kani_kernel_settle_close_ledger_principal, kani_kernel_settle_principal,
+    kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_healthy_after_close,
     kani_loss_stale_trade_scope_allowed, kani_mark_kf_stale_cohorts,
@@ -27,7 +28,8 @@ use percolator::v16::{
     kani_position_change_requires_unit_adl, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_provider_protection_floor_observe,
     kani_provider_protection_floor_shift, kani_provider_protection_num,
-    kani_refresh_detached_selected_leg, kani_select_auto_crank_plan, kani_settle_kf_stale_cohort,
+    kani_refresh_detached_selected_leg,
+    kani_select_auto_crank_plan, kani_settle_kf_stale_cohort,
     kani_settle_resolved_pnl_after_booking, kani_should_clear_prior_reset_obligation,
     kani_source_claim_domain_first_burn_partition,
     kani_source_credit_state_in_flight_support_for_claim_num,
@@ -59,8 +61,8 @@ use percolator::v16::{
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS, MAX_OI_SIDE_Q,
-    MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, MIN_A_SIDE, POS_SCALE,
-    PUBLIC_B_CHUNK_ATOMS, SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
+    MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, MIN_A_SIDE, POS_SCALE, PUBLIC_B_CHUNK_ATOMS,
+    SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
@@ -6679,14 +6681,8 @@ fn proof_v16_provider_protection_floor_shift_contract() {
     assert!(raised >= floor && (raised - floor == amount || raised == u128::MAX));
     let lowered = kani_provider_protection_floor_shift(floor, amount, false);
     assert!(lowered <= floor && (floor - lowered == amount || lowered == 0));
-    kani::cover!(
-        raised == u128::MAX && raised - floor != amount,
-        "a deposit saturates"
-    );
-    kani::cover!(
-        lowered == 0 && floor - lowered != amount,
-        "a withdrawal beyond the floor"
-    );
+    kani::cover!(raised == u128::MAX && raised - floor != amount, "a deposit saturates");
+    kani::cover!(lowered == 0 && floor - lowered != amount, "a withdrawal beyond the floor");
 }
 
 // A provider deposit and a principal withdrawal move the floor with the
@@ -20827,18 +20823,9 @@ fn proof_principal_cure_preserves_close_ledger_partition() {
         after.gross_loss_at_close_start + after.drift_consumed - progress
     );
     assert_eq!(released, cure != 0 && after.residual_remaining == 0);
-    kani::cover!(
-        released && irreversible,
-        "cure finalizes a close with progress"
-    );
-    kani::cover!(
-        released && !irreversible,
-        "cure cancels a close with no progress"
-    );
-    kani::cover!(
-        !released && cure != 0,
-        "partial cure keeps the close pending"
-    );
+    kani::cover!(released && irreversible, "cure finalizes a close with progress");
+    kani::cover!(released && !irreversible, "cure cancels a close with no progress");
+    kani::cover!(!released && cure != 0, "partial cure keeps the close pending");
     if released {
         if irreversible {
             assert!(after.active && after.finalized && !after.canceled);
@@ -20872,7 +20859,8 @@ fn proof_v16_empty_leg_field_compare_matches_byte_compare() {
     let image: [u8; core::mem::size_of::<PortfolioLegV16Account>()] = kani::any();
     let leg: PortfolioLegV16Account = bytemuck::pod_read_unaligned(&image);
     let empty = percolator::PORTFOLIO_LEG_V16_EMPTY_ACCOUNT;
-    let byte_cmp = leg.active == 0 && bytemuck::bytes_of(&leg) == bytemuck::bytes_of(&empty);
+    let byte_cmp =
+        leg.active == 0 && bytemuck::bytes_of(&leg) == bytemuck::bytes_of(&empty);
     kani::cover!(byte_cmp, "empty image");
     kani::cover!(!byte_cmp && leg.active == 0, "inactive non-empty image");
     assert_eq!(leg.is_empty_encoding(), byte_cmp);
@@ -20910,11 +20898,9 @@ fn proof_v16_haircut_b_in_flight_support_bounds() {
     };
     let claim_num = claim_atoms * BOUND_SCALE;
     let pending_num = pending_atoms * BOUND_SCALE;
-    let realizable =
-        kani_source_credit_state_realizable_support_for_claim_num(state, claim_num).unwrap();
+    let realizable = kani_source_credit_state_realizable_support_for_claim_num(state, claim_num).unwrap();
     let in_flight =
-        kani_source_credit_state_in_flight_support_for_claim_num(state, claim_num, pending_num)
-            .unwrap();
+        kani_source_credit_state_in_flight_support_for_claim_num(state, claim_num, pending_num).unwrap();
     kani::cover!(in_flight > realizable, "in-flight backing lifts support");
     kani::cover!(pending_atoms == 0, "nothing in flight");
     assert!(in_flight >= realizable);
@@ -20976,22 +20962,13 @@ fn proof_v16_changed_raw_target_restarts_the_cap_anchor() {
     if target == 0 || target > MAX_ORACLE_PRICE {
         assert_eq!(res, Err(V16Error::InvalidConfig));
         assert!(kani_eq_market_group_v16_header_account(&h0, &header));
-        assert!(kani_eq_engine_asset_slot_v16_account(
-            &s0,
-            &markets[0].engine
-        ));
+        assert!(kani_eq_engine_asset_slot_v16_account(&s0, &markets[0].engine));
         return;
     }
     assert_eq!(res, Ok(()));
     let changed = target != stored;
-    kani::cover!(
-        changed && anchor != mark,
-        "a changed target moves a stale anchor to the mark"
-    );
-    kani::cover!(
-        !changed && anchor != mark,
-        "an unchanged target keeps an anchor that differs from the mark"
-    );
+    kani::cover!(changed && anchor != mark, "a changed target moves a stale anchor to the mark");
+    kani::cover!(!changed && anchor != mark, "an unchanged target keeps an anchor that differs from the mark");
     let mut es = s0;
     let mut expected = s0.asset.try_to_runtime().unwrap();
     expected.raw_oracle_target_price = target;
@@ -20999,10 +20976,7 @@ fn proof_v16_changed_raw_target_restarts_the_cap_anchor() {
         expected.fund_px_last = mark;
     }
     es.asset = AssetStateV16Account::from_runtime(&expected);
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &es,
-        &markets[0].engine
-    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
     let after = markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(after.effective_price, mark);
     assert_eq!(after.fund_px_last, if changed { mark } else { anchor });

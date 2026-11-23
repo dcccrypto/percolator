@@ -60,12 +60,7 @@ impl W {
                 )
                 .unwrap();
         }
-        W {
-            header,
-            markets,
-            slot: 2 * n as u64 - 1,
-            n,
-        }
+        W { header, markets, slot: 2 * n as u64 - 1, n }
     }
     fn view(&mut self) -> MarketGroupV16ViewMut<'_, u64> {
         MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets)
@@ -92,12 +87,7 @@ impl W {
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
             &mut PortfolioV16ViewMut::new(long),
             &mut PortfolioV16ViewMut::new(short),
-            TradeRequestV16 {
-                asset_index: 0,
-                size_q: size,
-                exec_price: p,
-                fee_bps: 0,
-            },
+            TradeRequestV16 { asset_index: 0, size_q: size, exec_price: p, fee_bps: 0 },
             true,
         )
         .unwrap();
@@ -113,19 +103,15 @@ impl W {
             let new = (old + old * d as i128 / 10_000) as u64;
             let slot = self.slot;
             let mut m = self.view();
-            m.accrue_asset_to_not_atomic(0, slot, new, 0, true)
-                .expect("accrue");
+            m.accrue_asset_to_not_atomic(0, slot, new, 0, true).expect("accrue");
             m.markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(new);
         }
     }
     fn refresh(&mut self, a: &mut PortfolioAccountV16Account) {
         let mut m = self.view();
         let mut budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
-        m.full_account_refresh_with_s10_budget_not_atomic(
-            &mut PortfolioV16ViewMut::new(a),
-            &mut budget,
-        )
-        .unwrap();
+        m.full_account_refresh_with_s10_budget_not_atomic(&mut PortfolioV16ViewMut::new(a), &mut budget)
+            .unwrap();
     }
     fn resolve(&mut self) {
         let slot = self.slot;
@@ -135,8 +121,7 @@ impl W {
         &mut self,
         a: &mut PortfolioAccountV16Account,
     ) -> Result<ResolvedCloseOutcomeV16, V16Error> {
-        self.view()
-            .close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(a), 0)
+        self.view().close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(a), 0)
     }
     /// Call `close` until it reports `Closed` (bounded), returning the payout.
     fn close_fully(&mut self, a: &mut PortfolioAccountV16Account) -> u128 {
@@ -175,8 +160,7 @@ impl W {
         panic!("pair never closed");
     }
     fn topup(&mut self, a: &mut PortfolioAccountV16Account) -> Result<u128, V16Error> {
-        self.view()
-            .claim_resolved_payout_topup_not_atomic(&mut PortfolioV16ViewMut::new(a))
+        self.view().claim_resolved_payout_topup_not_atomic(&mut PortfolioV16ViewMut::new(a))
     }
     fn advance(&mut self, slot: u64) -> Result<(), V16Error> {
         self.view().advance_resolved_slot_not_atomic(slot)
@@ -187,8 +171,7 @@ impl W {
         start: usize,
         reserved: u128,
     ) -> Result<TerminalSlabOutcomeV16, V16Error> {
-        self.view()
-            .advance_terminal_slab_not_atomic(slot, start, reserved)
+        self.view().advance_terminal_slab_not_atomic(slot, start, reserved)
     }
     fn cur_slot(&self) -> u64 {
         self.header.current_slot.get()
@@ -197,14 +180,7 @@ impl W {
 
 /// Two accounts, A long / B short one unit, price moved `bps`, then resolved.
 /// Returns (world, A, B, deposit each).
-fn winner_loser(
-    bps: i64,
-) -> (
-    W,
-    PortfolioAccountV16Account,
-    PortfolioAccountV16Account,
-    u128,
-) {
+fn winner_loser(bps: i64) -> (W, PortfolioAccountV16Account, PortfolioAccountV16Account, u128) {
     let dep = 1_000_000u128;
     let mut w = W::new(1);
     let (mut a, mut b) = (account(1), account(2));
@@ -225,10 +201,7 @@ fn resolved_payout_close_empty_account_pays_zero() {
     let mut w = W::new(1);
     let mut a = account(1);
     w.resolve();
-    assert_eq!(
-        w.close(&mut a),
-        Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 })
-    );
+    assert_eq!(w.close(&mut a), Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 }));
     assert_eq!((w.vault(), w.c_tot()), (0, 0));
 }
 
@@ -238,10 +211,7 @@ fn resolved_payout_close_flat_account_returns_exact_deposit() {
     let mut a = account(1);
     w.deposit(&mut a, 12_345);
     w.resolve();
-    assert_eq!(
-        w.close(&mut a),
-        Ok(ResolvedCloseOutcomeV16::Closed { payout: 12_345 })
-    );
+    assert_eq!(w.close(&mut a), Ok(ResolvedCloseOutcomeV16::Closed { payout: 12_345 }));
     assert_eq!((w.vault(), w.c_tot(), a.capital.get()), (0, 0, 0));
 }
 
@@ -251,10 +221,7 @@ fn resolved_payout_close_one_atom_dust() {
     let mut a = account(1);
     w.deposit(&mut a, 1);
     w.resolve();
-    assert_eq!(
-        w.close(&mut a),
-        Ok(ResolvedCloseOutcomeV16::Closed { payout: 1 })
-    );
+    assert_eq!(w.close(&mut a), Ok(ResolvedCloseOutcomeV16::Closed { payout: 1 }));
     assert_eq!(w.vault(), 0);
 }
 
@@ -264,12 +231,7 @@ fn resolved_payout_close_max_tvl_deposit_pays_in_full() {
     let mut a = account(1);
     w.deposit(&mut a, MAX_VAULT_TVL);
     w.resolve();
-    assert_eq!(
-        w.close(&mut a),
-        Ok(ResolvedCloseOutcomeV16::Closed {
-            payout: MAX_VAULT_TVL
-        })
-    );
+    assert_eq!(w.close(&mut a), Ok(ResolvedCloseOutcomeV16::Closed { payout: MAX_VAULT_TVL }));
     assert_eq!((w.vault(), w.c_tot()), (0, 0));
 }
 
@@ -292,10 +254,7 @@ fn resolved_payout_second_close_pays_nothing_more() {
     let mut a = account(1);
     w.deposit(&mut a, 700);
     w.resolve();
-    assert_eq!(
-        w.close(&mut a),
-        Ok(ResolvedCloseOutcomeV16::Closed { payout: 700 })
-    );
+    assert_eq!(w.close(&mut a), Ok(ResolvedCloseOutcomeV16::Closed { payout: 700 }));
     let vault_after_first = w.vault();
     // A repeat must never pay again. It may succeed with zero or be refused.
     match w.close(&mut a) {
@@ -356,11 +315,7 @@ fn resolved_payout_winner_and_loser_conserve_total_value() {
         let tb = w.topup(&mut b).unwrap_or(0);
         let paid = pa + pb + ta + tb;
         assert!(paid <= total_in, "bps {bps}: paid {paid} > in {total_in}");
-        assert_eq!(
-            w.vault(),
-            total_in - paid,
-            "bps {bps}: vault must equal in - out"
-        );
+        assert_eq!(w.vault(), total_in - paid, "bps {bps}: vault must equal in - out");
         // No insurance was funded, so the zero-sum book pays out (almost) everything.
         assert!(w.vault() <= 1, "bps {bps}: dust left {}", w.vault());
         assert_eq!(w.c_tot(), 0, "bps {bps}");
@@ -394,10 +349,7 @@ fn resolved_payout_close_order_does_not_change_total_paid() {
         let tb = w.topup(&mut b).unwrap_or(0);
         totals.push((pa + ta, pb + tb, w.vault()));
     }
-    assert_eq!(
-        totals[0], totals[1],
-        "close order changed payouts: {totals:?}"
-    );
+    assert_eq!(totals[0], totals[1], "close order changed payouts: {totals:?}");
 }
 
 // ---------------------------------------------------------------- advance_resolved_slot
@@ -443,11 +395,7 @@ fn resolved_payout_advance_slot_keeps_resolved_slot_and_payout() {
     let (mut w, mut a, mut b, dep) = winner_loser(0);
     let rs = w.header.resolved_slot.get();
     w.advance(rs + 1_000).unwrap();
-    assert_eq!(
-        w.header.resolved_slot.get(),
-        rs,
-        "resolved_slot is fixed at resolution"
-    );
+    assert_eq!(w.header.resolved_slot.get(), rs, "resolved_slot is fixed at resolution");
     assert_eq!(w.close_pair(&mut a, &mut b, true), (dep, dep));
 }
 
@@ -472,10 +420,7 @@ fn resolved_payout_terminal_slab_empty_market_is_ready_with_zero_retired() {
     let mut w = W::new(1);
     w.resolve();
     let s = w.cur_slot();
-    assert_eq!(
-        w.terminal(s, 0, 0),
-        Ok(TerminalSlabOutcomeV16::ReadyToClose { retired: 0 })
-    );
+    assert_eq!(w.terminal(s, 0, 0), Ok(TerminalSlabOutcomeV16::ReadyToClose { retired: 0 }));
 }
 
 #[test]
@@ -514,11 +459,7 @@ fn resolved_payout_terminal_slab_after_all_closed_conserves_value() {
     let s = w.cur_slot();
     match w.terminal(s, 0, 0) {
         Ok(TerminalSlabOutcomeV16::ReadyToClose { retired }) => {
-            assert_eq!(
-                w.vault(),
-                vault_before - retired,
-                "retired atoms leave the vault"
-            );
+            assert_eq!(w.vault(), vault_before - retired, "retired atoms leave the vault");
         }
         Ok(_) => {}
         Err(_) => {}
@@ -537,6 +478,7 @@ fn resolved_payout_terminal_slab_reserve_never_exceeds_vault_drop() {
         assert_eq!(w.vault(), before - retired);
     }
 }
+
 
 #[test]
 fn resolved_payout_winner_close_waits_for_loser_then_pays() {

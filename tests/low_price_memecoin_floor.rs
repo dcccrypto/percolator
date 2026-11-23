@@ -69,26 +69,14 @@ fn world_sized(p0: u64, move_bps: u64, cap: u128, size: i128) -> World {
             g.execute_trade_with_fee_loss_stale_scoped_not_atomic(
                 &mut lv,
                 &mut sv,
-                TradeRequestV16 {
-                    asset_index: 0,
-                    size_q: size,
-                    exec_price: p0,
-                    fee_bps: 0,
-                },
+                TradeRequestV16 { asset_index: 0, size_q: size, exec_price: p0, fee_bps: 0 },
                 true,
             )
             .unwrap();
         }
     }
     let slot = markets[0].engine.asset.slot_last.get();
-    World {
-        header,
-        markets,
-        long,
-        short,
-        slot,
-        rem: 0,
-    }
+    World { header, markets, long, short, slot, rem: 0 }
 }
 
 fn world(p0: u64) -> World {
@@ -148,11 +136,7 @@ impl World {
         let mark = asset.effective_price.get();
         let same_side =
             old != 0 && ((old > mark && target > mark) || (old < mark && target < mark));
-        let mut rem = if target_changed && !same_side {
-            0
-        } else {
-            rem_in
-        };
+        let mut rem = if target_changed && !same_side { 0 } else { rem_in };
         let mut steps = Vec::new();
         for _ in 0..dt {
             let (next, after) = canonical_band_accrual_price_step_v16(
@@ -247,9 +231,7 @@ fn low_price_floor_five_e7_dollar_token_has_no_usable_price_with_6_decimal_quote
     cfg.max_price_move_bps_per_slot = STEP_BPS;
     let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 1, 0).unwrap();
     let mut m = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
-    assert!(header
-        .activate_empty_asset_slot_not_atomic(0, &mut m[0].engine, 0, 1)
-        .is_err());
+    assert!(header.activate_empty_asset_slot_not_atomic(0, &mut m[0].engine, 0, 1).is_err());
 }
 
 #[test]
@@ -280,9 +262,7 @@ fn low_price_floor_above_max_oracle_price_and_zero_are_rejected_at_listing() {
         let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 6_480_000);
         let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 1, 0).unwrap();
         let mut m = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
-        assert!(header
-            .activate_empty_asset_slot_not_atomic(0, &mut m[0].engine, bad, 1)
-            .is_err());
+        assert!(header.activate_empty_asset_slot_not_atomic(0, &mut m[0].engine, bad, 1).is_err());
     }
 }
 
@@ -425,12 +405,7 @@ fn low_price_floor_bug_forged_remainder_must_not_beat_the_cap() {
     w.try_path(1, 100, 0).unwrap();
     // same target again, forged remainder: the cap says price 1 may not move in one slot
     let _ = w.try_path(1, 100, 9_999);
-    assert_eq!(
-        w.price(),
-        1,
-        "price moved to {} in one slot at a 3% cap",
-        w.price()
-    );
+    assert_eq!(w.price(), 1, "price moved to {} in one slot at a 3% cap", w.price());
 }
 
 #[test]
@@ -478,11 +453,7 @@ fn low_price_floor_moving_target_pins_at_33_atoms_today() {
     }
     assert_eq!(w.price(), 33);
     drift_down(&mut w, 200);
-    assert_eq!(
-        w.price(),
-        33,
-        "the price cannot leave 33 while the target keeps changing"
-    );
+    assert_eq!(w.price(), 33, "the price cannot leave 33 while the target keeps changing");
     w.assert_sound();
 }
 
@@ -507,11 +478,7 @@ fn low_price_floor_two_slot_crank_moves_a_moving_target_down_and_pins_at_16() {
             break;
         }
     }
-    assert_eq!(
-        w.price(),
-        16,
-        "pinned at 16 with 2-slot cranks, 33 with 1-slot cranks"
-    );
+    assert_eq!(w.price(), 16, "pinned at 16 with 2-slot cranks, 33 with 1-slot cranks");
 }
 
 /// BUG (failing on purpose): while the oracle target changes every slot, a market priced below
@@ -533,11 +500,7 @@ fn low_price_floor_bug_moving_target_must_still_make_progress_below_34_atoms() {
         let rem = w.rem;
         w.try_path(1, t, rem).unwrap();
     }
-    assert!(
-        w.price() < 33,
-        "price still {} after 100 slots of a falling oracle",
-        w.price()
-    );
+    assert!(w.price() < 33, "price still {} after 100 slots of a falling oracle", w.price());
 }
 
 /// Same bug upward: a rising oracle cannot lift a pinned market off 33 either.
@@ -549,11 +512,7 @@ fn low_price_floor_bug_moving_target_must_make_progress_upward_below_34_atoms() 
         let rem = w.rem;
         w.try_path(1, t, rem).unwrap();
     }
-    assert!(
-        w.price() > 20,
-        "price still {} after 100 slots of a rising oracle",
-        w.price()
-    );
+    assert!(w.price() > 20, "price still {} after 100 slots of a rising oracle", w.price());
 }
 
 // ---------- listing rule: smallest safe price ----------
@@ -608,10 +567,7 @@ fn low_price_floor_liquidation_fires_at_tiny_price_and_conserves_value() {
     w.walk_fixed(40, 100);
     assert_eq!(w.price(), 40);
     w.refresh_both();
-    assert!(
-        w.try_liq_long().is_ok(),
-        "bankrupt long must be liquidatable at 40 atoms"
-    );
+    assert!(w.try_liq_long().is_ok(), "bankrupt long must be liquidatable at 40 atoms");
     w.assert_sound();
     // the long cannot have lost more than it owned and the short cannot be paid more than that
     assert!(w.long.capital.get() as i128 + w.long.pnl.get() >= 0);
@@ -679,10 +635,7 @@ fn low_price_floor_crash_to_one_then_recover_never_mints_value() {
     assert_eq!(w.price(), 300);
     assert!(n > 9_000 && n < 11_000, "took {n}");
     let t = w.total();
-    assert!(
-        (2 * BIG as i128 - 2..=2 * BIG as i128).contains(&t),
-        "total {t}"
-    );
+    assert!((2 * BIG as i128 - 2..=2 * BIG as i128).contains(&t), "total {t}");
     assert!(Self_eq(&w.long) <= BIG as i128 && Self_eq(&w.short) <= BIG as i128 + 2);
     w.assert_sound();
 }
@@ -699,10 +652,7 @@ fn low_price_floor_max_size_position_at_max_price_does_not_overflow_on_a_99pct_c
     w.walk_fixed(MAX_ORACLE_PRICE / 100, 100);
     assert_eq!(w.price(), MAX_ORACLE_PRICE / 100);
     let t = w.total();
-    assert!(
-        (2 * dep as i128 - 2..=2 * dep as i128).contains(&t),
-        "total {t}"
-    );
+    assert!((2 * dep as i128 - 2..=2 * dep as i128).contains(&t), "total {t}");
     w.assert_sound();
 }
 
@@ -728,29 +678,20 @@ fn low_price_floor_funding_on_a_tiny_notional_rounds_per_slot_but_conserves() {
         .unwrap();
     let (mut long, mut short) = (account(10), account(11));
     let mut g = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let (mut lv, mut sv) = (
-        PortfolioV16ViewMut::new(&mut long),
-        PortfolioV16ViewMut::new(&mut short),
-    );
+    let (mut lv, mut sv) = (PortfolioV16ViewMut::new(&mut long), PortfolioV16ViewMut::new(&mut short));
     g.deposit_not_atomic(&mut lv, 100_000).unwrap();
     g.deposit_not_atomic(&mut sv, 100_000).unwrap();
     g.execute_trade_with_fee_loss_stale_scoped_not_atomic(
         &mut lv,
         &mut sv,
-        TradeRequestV16 {
-            asset_index: 0,
-            size_q: Q,
-            exec_price: 33,
-            fee_bps: 0,
-        },
+        TradeRequestV16 { asset_index: 0, size_q: Q, exec_price: 33, fee_bps: 0 },
         true,
     )
     .unwrap();
     let mut slot = g.markets[0].engine.asset.slot_last.get();
     for _ in 0..500 {
         slot += 1;
-        g.accrue_asset_to_not_atomic(0, slot, 33, 1_000, true)
-            .unwrap();
+        g.accrue_asset_to_not_atomic(0, slot, 33, 1_000, true).unwrap();
     }
     for v in [&mut lv, &mut sv] {
         let mut done = false;
@@ -784,3 +725,4 @@ fn low_price_floor_funding_on_a_tiny_notional_rounds_per_slot_but_conserves() {
     // 500 slots * 330 atoms * 1e-6 = 0.165 atom: nothing visible may be paid
     assert!((l - 100_000).abs() <= 1, "long moved {}", l - 100_000);
 }
+

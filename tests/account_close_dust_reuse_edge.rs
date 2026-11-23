@@ -10,8 +10,8 @@
 use percolator::{
     EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
     PortfolioAccountV16Account, PortfolioV16View, PortfolioV16ViewMut, ProvenanceHeaderV16,
-    ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16, V16Config, V16Error, V16PodI128,
-    V16PodU128, V16PodU64,
+    ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16, V16Config, V16Error, V16PodI128, V16PodU128,
+    V16PodU64,
 };
 
 const PRICE: u64 = 1_000_000;
@@ -20,8 +20,7 @@ fn account(seed: u32) -> PortfolioAccountV16Account {
     let mut key = [0u8; 32];
     key[..4].copy_from_slice(&seed.to_le_bytes());
     key[31] = 0x5A;
-    let header =
-        ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], key, [3; 32]));
+    let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], key, [3; 32]));
     let mut a = PortfolioAccountV16Account::default();
     a.init_empty_in_place(header).unwrap();
     a
@@ -43,57 +42,37 @@ impl W {
         cfg.min_funding_lifetime_slots = 10_000_000;
         let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 1, 0).unwrap();
         let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
-        header
-            .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, PRICE, 1)
-            .unwrap();
+        header.activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, PRICE, 1).unwrap();
         W { header, markets }
     }
     fn view(&mut self) -> MarketGroupV16ViewMut<'_, u64> {
         MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets)
     }
-    fn vault(&self) -> u128 {
-        self.header.vault.get()
-    }
-    fn c_tot(&self) -> u128 {
-        self.header.c_tot.get()
-    }
-    fn insurance(&self) -> u128 {
-        self.header.insurance.get()
-    }
-    fn count(&self) -> u64 {
-        self.header.materialized_portfolio_count.get()
-    }
+    fn vault(&self) -> u128 { self.header.vault.get() }
+    fn c_tot(&self) -> u128 { self.header.c_tot.get() }
+    fn insurance(&self) -> u128 { self.header.insurance.get() }
+    fn count(&self) -> u64 { self.header.materialized_portfolio_count.get() }
     fn deposit(&mut self, a: &mut PortfolioAccountV16Account, amt: u128) -> bool {
-        self.view()
-            .deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt)
-            .is_ok()
+        self.view().deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt).is_ok()
     }
     fn withdraw(&mut self, a: &mut PortfolioAccountV16Account, amt: u128) -> bool {
-        self.view()
-            .withdraw_not_atomic(&mut PortfolioV16ViewMut::new(a), amt)
-            .is_ok()
+        self.view().withdraw_not_atomic(&mut PortfolioV16ViewMut::new(a), amt).is_ok()
     }
     fn register(&mut self, a: &PortfolioAccountV16Account) -> Result<(), V16Error> {
-        self.view()
-            .register_empty_materialized_portfolio_not_atomic(&PortfolioV16View::new(a))
+        self.view().register_empty_materialized_portfolio_not_atomic(&PortfolioV16View::new(a))
     }
     fn deregister(&mut self, a: &PortfolioAccountV16Account) -> Result<(), V16Error> {
-        self.view()
-            .deregister_empty_materialized_portfolio_not_atomic(&PortfolioV16View::new(a))
+        self.view().deregister_empty_materialized_portfolio_not_atomic(&PortfolioV16View::new(a))
     }
     fn resolve(&mut self) {
         let s = self.header.current_slot.get() + 1;
         self.view().resolve_market_not_atomic(s).unwrap();
     }
     fn close(&mut self, a: &mut PortfolioAccountV16Account, rate: u128) -> ResolvedCloseOutcomeV16 {
-        self.view()
-            .close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(a), rate)
-            .unwrap()
+        self.view().close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(a), rate).unwrap()
     }
     fn fee_sync(&mut self, a: &mut PortfolioAccountV16Account, slot: u64, rate: u128) -> u128 {
-        self.view()
-            .sync_account_fee_to_slot_not_atomic(&mut PortfolioV16ViewMut::new(a), slot, rate)
-            .unwrap()
+        self.view().sync_account_fee_to_slot_not_atomic(&mut PortfolioV16ViewMut::new(a), slot, rate).unwrap()
     }
 }
 
@@ -174,9 +153,7 @@ fn close_every_single_stale_field_blocks_deregister() {
         ("pnl +1", |a| a.pnl = V16PodI128::new(1)),
         ("pnl -1", |a| a.pnl = V16PodI128::new(-1)),
         ("fee_credits", |a| a.fee_credits = V16PodI128::new(-1)),
-        ("cancel_deposit_escrow", |a| {
-            a.cancel_deposit_escrow = V16PodU128::new(1)
-        }),
+        ("cancel_deposit_escrow", |a| a.cancel_deposit_escrow = V16PodU128::new(1)),
         ("stale_state", |a| a.stale_state = 1),
         ("rebalance_lock", |a| a.rebalance_lock = 1),
     ];
@@ -187,15 +164,8 @@ fn close_every_single_stale_field_blocks_deregister() {
         poke(&mut a);
         let before = w.header;
         let r = w.deregister(&a);
-        assert_eq!(
-            r,
-            Err(V16Error::LockActive),
-            "{name}: deregister must be refused"
-        );
-        assert_eq!(
-            w.header, before,
-            "{name}: refusal must not change the header"
-        );
+        assert_eq!(r, Err(V16Error::LockActive), "{name}: deregister must be refused");
+        assert_eq!(w.header, before, "{name}: refusal must not change the header");
     }
     // b_stale and liquidation_lock too
     {
@@ -237,9 +207,7 @@ fn close_reinit_over_a_used_account_leaves_no_stale_state() {
     a.rebalance_lock = 1;
     a.liquidation_lock = 1;
     a.loss_provenance = percolator::V16PodU32::new(12345);
-    let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
-        [1; 32], [7; 32], [3; 32],
-    ));
+    let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], [7; 32], [3; 32]));
     a.init_empty_in_place(header).unwrap();
     assert_eq!(a, {
         let mut f = PortfolioAccountV16Account::default();
@@ -263,11 +231,7 @@ fn close_freed_slot_is_reusable_many_times_and_conserves_value() {
         assert!(w.deposit(&mut a, amt));
         assert!(w.withdraw(&mut a, amt));
         w.deregister(&a).unwrap();
-        assert_eq!(
-            (w.count(), w.vault(), w.c_tot()),
-            (0, 0, 0),
-            "round {round}"
-        );
+        assert_eq!((w.count(), w.vault(), w.c_tot()), (0, 0, 0), "round {round}");
     }
 }
 
@@ -307,14 +271,8 @@ fn close_resolved_twice_second_pays_zero_for_every_dust_size() {
         assert!(w.deposit(&mut b, 10));
         w.resolve();
         assert_eq!(paid(w.close(&mut a, 0)), amt);
-        let again = w
-            .view()
-            .close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(&mut a), 0);
-        assert_eq!(
-            again,
-            Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 }),
-            "amt {amt}"
-        );
+        let again = w.view().close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(&mut a), 0);
+        assert_eq!(again, Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 }), "amt {amt}");
         assert_eq!((w.vault(), w.c_tot()), (10, 10), "amt {amt}");
     }
 }
@@ -396,9 +354,5 @@ fn close_fresh_account_is_not_billed_for_slots_before_it_existed() {
     // The account first exists at the current slot; sync fee at slot 100, 1 atom/slot.
     let existed_from = w.header.current_slot.get();
     let charged = w.fee_sync(&mut a, 100, 1);
-    assert_eq!(
-        charged,
-        (100 - existed_from).into(),
-        "billed {charged}, expected only slots since it existed"
-    );
+    assert_eq!(charged, (100 - existed_from).into(), "billed {charged}, expected only slots since it existed");
 }

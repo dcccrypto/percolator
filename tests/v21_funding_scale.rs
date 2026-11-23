@@ -84,8 +84,7 @@ fn trade(
 
 fn accrue(slab: &mut Slab, slot: u64, price: u64, rate: i128) {
     let mut m = MarketGroupV16ViewMut::new(&mut slab.0, &mut slab.1);
-    m.accrue_asset_to_not_atomic(0, slot, price, rate, true)
-        .unwrap();
+    m.accrue_asset_to_not_atomic(0, slot, price, rate, true).unwrap();
     m.markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(price);
 }
 
@@ -97,8 +96,7 @@ fn refresh(slab: &mut Slab, acct: &mut PortfolioAccountV16Account) {
 
 fn insure(slab: &mut Slab, domain: usize, amount: u128) {
     let mut m = MarketGroupV16ViewMut::new(&mut slab.0, &mut slab.1);
-    m.deposit_domain_insurance_not_atomic(domain, amount)
-        .unwrap();
+    m.deposit_domain_insurance_not_atomic(domain, amount).unwrap();
 }
 
 fn asset(slab: &Slab) -> percolator::AssetStateV16 {
@@ -113,21 +111,13 @@ fn validate(slab: &mut Slab, accounts: &mut [&mut PortfolioAccountV16Account]) {
     let m = MarketGroupV16ViewMut::new(&mut slab.0, &mut slab.1);
     m.validate_shape().unwrap();
     for a in accounts.iter_mut() {
-        PortfolioV16ViewMut::new(a)
-            .validate_with_market(&m.as_view())
-            .unwrap();
+        PortfolioV16ViewMut::new(a).validate_with_market(&m.as_view()).unwrap();
     }
 }
 
 /// `n` traders each long one unit against one maker short; then a funding accrual opens a
 /// cohort on both sides.
-fn funded_cohort(
-    n: usize,
-) -> (
-    Slab,
-    PortfolioAccountV16Account,
-    Vec<PortfolioAccountV16Account>,
-) {
+fn funded_cohort(n: usize) -> (Slab, PortfolioAccountV16Account, Vec<PortfolioAccountV16Account>) {
     let mut slab = market(9_000);
     let mut maker = account(0);
     deposit(&mut slab, &mut maker, MAKER_CAPITAL);
@@ -140,10 +130,7 @@ fn funded_cohort(
     }
     accrue(&mut slab, 2, PRICE, RATE_E9);
     let a = asset(&slab);
-    assert_eq!(
-        a.stale_account_count_long, n as u64,
-        "funding re-stales every long"
-    );
+    assert_eq!(a.stale_account_count_long, n as u64, "funding re-stales every long");
     assert_eq!(a.stale_account_count_short, 1, "and the maker");
     (slab, maker, traders)
 }
@@ -196,14 +183,8 @@ fn v21_insurance_cover_admits_entrant_at_exact_boundary_without_refreshing_60_ac
     trade(&mut slab, &mut entrant, &mut maker, POS_SCALE, PRICE)
         .expect("hidden K/F loss fully insured: the entrant opens without a global refresh");
     let a = asset(&slab);
-    assert_eq!(
-        a.stale_account_count_long, n as u64,
-        "the 60 longs are still stale"
-    );
-    assert_eq!(
-        a.stale_account_count_short, 0,
-        "the maker was settled by its own trade"
-    );
+    assert_eq!(a.stale_account_count_long, n as u64, "the 60 longs are still stale");
+    assert_eq!(a.stale_account_count_short, 0, "the maker was settled by its own trade");
     assert_eq!(a.stored_pos_count_long, n as u64 + 1);
 
     // The bound is sound: settling the cohort recognizes exactly 10 atoms per long.
@@ -255,27 +236,14 @@ fn v21_price_travel_beyond_cover_falls_back_to_baseline() {
     let mut entrant = account(10_000);
     deposit(&mut slab, &mut entrant, TRADER_CAPITAL);
     assert_eq!(
-        trade(
-            &mut slab,
-            &mut entrant,
-            &mut maker,
-            POS_SCALE,
-            PRICE - PRICE / 20
-        ),
+        trade(&mut slab, &mut entrant, &mut maker, POS_SCALE, PRICE - PRICE / 20),
         Err(V16Error::LossStale)
     );
     // Settle everyone (the baseline path) and the same order lands.
     for t in traders.iter_mut() {
         refresh(&mut slab, t);
     }
-    trade(
-        &mut slab,
-        &mut entrant,
-        &mut maker,
-        POS_SCALE,
-        PRICE - PRICE / 20,
-    )
-    .unwrap();
+    trade(&mut slab, &mut entrant, &mut maker, POS_SCALE, PRICE - PRICE / 20).unwrap();
 }
 
 #[test]
@@ -309,16 +277,12 @@ fn v21_insurance_withdrawal_cannot_dip_into_hidden_loss_cover() {
     insure(&mut slab, SHORT_DOMAIN, bound + 100);
     {
         let mut m = MarketGroupV16ViewMut::new(&mut slab.0, &mut slab.1);
-        assert_eq!(
-            m.domain_insurance_withdraw_capacity(SHORT_DOMAIN).unwrap(),
-            100
-        );
+        assert_eq!(m.domain_insurance_withdraw_capacity(SHORT_DOMAIN).unwrap(), 100);
         assert_eq!(
             m.withdraw_domain_insurance_not_atomic(SHORT_DOMAIN, 101),
             Err(V16Error::LockActive)
         );
-        m.withdraw_domain_insurance_not_atomic(SHORT_DOMAIN, 100)
-            .unwrap();
+        m.withdraw_domain_insurance_not_atomic(SHORT_DOMAIN, 100).unwrap();
     }
     // Once the cohort settles the reservation is released.
     refresh(&mut slab, &mut maker);
@@ -326,10 +290,7 @@ fn v21_insurance_withdrawal_cannot_dip_into_hidden_loss_cover() {
         refresh(&mut slab, t);
     }
     let m = MarketGroupV16ViewMut::new(&mut slab.0, &mut slab.1);
-    assert_eq!(
-        m.domain_insurance_withdraw_capacity(SHORT_DOMAIN).unwrap(),
-        bound
-    );
+    assert_eq!(m.domain_insurance_withdraw_capacity(SHORT_DOMAIN).unwrap(), bound);
 }
 
 #[test]
@@ -371,10 +332,7 @@ fn v21_generation_rotation_tracks_laggards_across_repeated_funding_accruals() {
         + prior_term
         + 2 * u128::from(a.stale_account_count_long);
     // The stale weight is exactly one unit of weight per stale long.
-    assert_eq!(
-        d.stale_weight,
-        u128::from(a.stale_account_count_long) * POS_SCALE
-    );
+    assert_eq!(d.stale_weight, u128::from(a.stale_account_count_long) * POS_SCALE);
     assert_eq!(d.laggard_weight, u128::from(d.laggard_count) * POS_SCALE);
     assert!(hidden > 0);
     assert!(

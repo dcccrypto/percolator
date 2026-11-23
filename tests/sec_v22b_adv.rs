@@ -2840,3 +2840,4 @@ fn band_replace_smallest_eviction_lets_an_honest_trader_in() {
     w.assert_census();
     w.assert_conservation();
 }
+

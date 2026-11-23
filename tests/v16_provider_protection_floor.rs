@@ -396,8 +396,7 @@ fn an_asset_restart_starts_the_floor_again() {
     // (upstream 35c42e20). On v2.2 an asset whose buckets lapsed is restarted through
     // retirement, which rewrites the lapsed buckets to the empty bucket. Neither step
     // brings a floor up to date: both stored floors go into the restart as they are.
-    w.op(|m, _| m.retire_empty_asset_not_atomic(0, slot))
-        .unwrap();
+    w.op(|m, _| m.retire_empty_asset_not_atomic(0, slot)).unwrap();
     assert_eq!((stored_floor(&w, 0), stored_floor(&w, 1)), (7, 16));
 
     w.op(|m, _| m.restart_empty_asset_preserving_insurance_budget_not_atomic(0, PX0, slot))

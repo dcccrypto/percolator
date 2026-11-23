@@ -15,13 +15,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use percolator::ADL_ONE;
 use percolator::{
     AdlWindDownBoundV16, AdlWindDownRequestV16, EngineAssetSlotV16Account, Market,
     MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PortfolioAccountV16Account, PortfolioV16ViewMut, SideModeV16,
     SideV16, V16Error,
 };
+use percolator::ADL_ONE;
 
 const WRAPPER_HEADER_LEN: usize = 16;
 const WRAPPER_CONFIG_LEN: usize = 576;
@@ -65,8 +65,8 @@ fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
     let config_off = core::mem::offset_of!(MarketGroupV16HeaderAccount, config);
     let chunk_off =
         config_off + core::mem::offset_of!(V16ConfigAccount, max_recovery_fallback_deviation_bps);
-    let old_config_end =
-        config_off + core::mem::size_of::<V16ConfigAccount>() - V22_CONFIG_EXTRA + OLD_CHUNK_LEN;
+    let old_config_end = config_off + core::mem::size_of::<V16ConfigAccount>() - V22_CONFIG_EXTRA
+        + OLD_CHUNK_LEN;
     let new_slot_len = core::mem::size_of::<EngineAssetSlotV16Account>();
     let old_slot_len = new_slot_len - V22_ASSET_EXTRA - RAW_BASIS_SUM_EXTRA;
     let old_asset_len =
@@ -87,11 +87,7 @@ fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
     // is never loaded in place because the stride changed). v2.1 + tail input is also accepted.
     const KF_DRIFT_APPENDED: usize = 160 + 32 + 32 + 32; // #277 drift tail + #282 R1 words + S10 provider mirror + provider-protection floor (upstream e18a3b98)
     let bare = rest.len() % old_stride != 0;
-    let stride = if bare {
-        old_stride - KF_DRIFT_APPENDED
-    } else {
-        old_stride
-    };
+    let stride = if bare { old_stride - KF_DRIFT_APPENDED } else { old_stride };
     assert_eq!(
         rest.len() % stride,
         0,
@@ -163,19 +159,11 @@ fn load(name: &'static str) -> LiveMarket {
     // `upgrade_v21_slab` already produced the CURRENT layout (drift tail + band/rent words).
     let stride = ASSET_ORACLE_WRAPPER_LEN + slot_len;
     let trailing = slab.len() - MARKET_GROUP_OFF - header_len;
-    assert_eq!(
-        trailing % stride,
-        0,
-        "{name}: slab length must be header + N slots"
-    );
+    assert_eq!(trailing % stride, 0, "{name}: slab length must be header + N slots");
     let capacity = trailing / stride;
     let header: MarketGroupV16HeaderAccount =
         bytemuck::pod_read_unaligned(&slab[MARKET_GROUP_OFF..MARKET_GROUP_OFF + header_len]);
-    assert_eq!(
-        header.asset_slot_capacity.get() as usize,
-        capacity,
-        "{name}: capacity"
-    );
+    assert_eq!(header.asset_slot_capacity.get() as usize, capacity, "{name}: capacity");
     let mut markets = Vec::with_capacity(capacity);
     for i in 0..capacity {
         let engine_off = MARKET_GROUP_OFF + header_len + i * stride + ASSET_ORACLE_WRAPPER_LEN;
@@ -346,6 +334,7 @@ fn p2b_live_fixtures_load_and_validate() {
     }
 }
 
+
 // ------------------------------------------------------------------ helpers --
 
 impl LiveMarket {
@@ -377,9 +366,7 @@ impl LiveMarket {
                         action: PermissionlessCrankActionV16::Refresh,
                     },
                 )
-                .unwrap_or_else(|e| {
-                    panic!("{}: refresh {}: {e:?}", self.name, self.portfolios[i].0)
-                });
+                .unwrap_or_else(|e| panic!("{}: refresh {}: {e:?}", self.name, self.portfolios[i].0));
             let p = &self.portfolios[i].1;
             if p.stale_state == 0 && p.b_stale_state == 0 {
                 break;
@@ -469,10 +456,7 @@ impl LiveMarket {
 fn replay_percolator_adl_wind_down_exits_close_only_and_conserves_value() {
     let mut m = load("percolator");
     let a = m.asset();
-    assert!(
-        a.a_long != ADL_ONE && a.a_short != ADL_ONE,
-        "both sides ADL'd on 10-05"
-    );
+    assert!(a.a_long != ADL_ONE && a.a_short != ADL_ONE, "both sides ADL'd on 10-05");
     assert_eq!(a.mode_short, SideModeV16::DrainOnly);
     let shorts: Vec<usize> = (0..m.portfolios.len())
         .filter(|&i| {
@@ -504,10 +488,7 @@ fn replay_percolator_adl_wind_down_exits_close_only_and_conserves_value() {
         let (closed, c) = m
             .wind_down(i)
             .unwrap_or_else(|e| panic!("wind-down of {}: {e:?}", m.portfolios[i].0));
-        println!(
-            "wind-down {} closed {} adl_cleared {}",
-            m.portfolios[i].0, closed, c
-        );
+        println!("wind-down {} closed {} adl_cleared {}", m.portfolios[i].0, closed, c);
         assert!(closed > 0);
         if k + 1 < shorts.len() {
             assert!(!c);
@@ -518,11 +499,7 @@ fn replay_percolator_adl_wind_down_exits_close_only_and_conserves_value() {
     assert!(cleared, "the last short leg zeroes both sides and resets A");
     let a = m.asset();
     assert_eq!((a.a_long, a.a_short), (ADL_ONE, ADL_ONE));
-    assert_eq!(
-        m.trade(other, lp, 1_000_000),
-        Err(V16Error::AdlReduceOnly),
-        "reset still pending"
-    );
+    assert_eq!(m.trade(other, lp, 1_000_000), Err(V16Error::AdlReduceOnly), "reset still pending");
 
     // Keeper Refresh settles the long survivors at the epoch-start indices.
     m.refresh_all();
@@ -534,10 +511,7 @@ fn replay_percolator_adl_wind_down_exits_close_only_and_conserves_value() {
         market.validate_shape().unwrap();
     }
     let a = m.asset();
-    assert_eq!(
-        (a.mode_long, a.mode_short),
-        (SideModeV16::Normal, SideModeV16::Normal)
-    );
+    assert_eq!((a.mode_long, a.mode_short), (SideModeV16::Normal, SideModeV16::Normal));
     assert_eq!((a.oi_eff_long_q, a.oi_eff_short_q), (0, 0));
     assert_eq!((a.stored_pos_count_long, a.stored_pos_count_short), (0, 0));
 
@@ -546,8 +520,7 @@ fn replay_percolator_adl_wind_down_exits_close_only_and_conserves_value() {
     assert_eq!(m.value(), value0, "no value created or destroyed, no fee");
 
     // The market reopens.
-    m.trade(other, lp, 1_000_000)
-        .expect("Percolator reopens after the wind-down");
+    m.trade(other, lp, 1_000_000).expect("Percolator reopens after the wind-down");
 }
 
 // ================================================================= L1 replay ===
@@ -565,18 +538,10 @@ fn replay_hlock_legacy_latch_holds_and_attributed_latch_tracks_its_domain() {
         assert_eq!(m.header.bankruptcy_hlock_active, 1, "{name}: legacy latch");
         let d0 = m.domain_claims(0);
         let d1 = m.domain_claims(1);
-        println!(
-            "{name}: hlock=1 ppt={} d0={} d1={}",
-            m.header.pnl_pos_tot.get(),
-            d0,
-            d1
-        );
+        println!("{name}: hlock=1 ppt={} d0={} d1={}", m.header.pnl_pos_tot.get(), d0, d1);
         assert!(m.header.pnl_pos_tot.get() > 0);
         // (a) legacy: holds.
-        assert!(
-            !m.try_clear(),
-            "{name}: legacy latch must hold while any claim remains"
-        );
+        assert!(!m.try_clear(), "{name}: legacy latch must hold while any claim remains");
         assert_eq!(m.header.bankruptcy_hlock_active, 1);
         // (b) attributed to a domain WITH claims: holds.
         for (d, claims) in [(0usize, d0), (1usize, d1)] {
@@ -607,20 +572,13 @@ fn replay_hlock_legacy_latch_holds_and_attributed_latch_tracks_its_domain() {
                 c.domain_claims(1),
                 c.header.mode,
             );
-            assert!(
-                c.try_clear(),
-                "{name}: domain {d} claimants gone, must clear"
-            );
+            assert!(c.try_clear(), "{name}: domain {d} claimants gone, must clear");
             // NEGATIVE CONTROL: legacy byte on that same book holds.
             if other != 0 {
                 let mut l = load(name);
                 l.refresh_all();
                 zero_domain_claims(&mut l, d);
-                assert!(
-                    !l.try_clear(),
-                    "{name}: legacy byte must hold while domain {} has claims",
-                    1 - d
-                );
+                assert!(!l.try_clear(), "{name}: legacy byte must hold while domain {} has claims", 1 - d);
             }
         }
     }
@@ -664,3 +622,4 @@ fn zero_domain_claims(m: &mut LiveMarket, d: usize) {
     h.c_tot = percolator::V16PodU128::new(h.c_tot.get() + retired_pnl);
     let _ = removed;
 }
+

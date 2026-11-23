@@ -24,14 +24,8 @@ fn check(a: &AssetStateV16Account) {
         assert_eq!(a.market_id.get(), rt.market_id);
         assert_eq!(a.stored_pos_count_long.get(), rt.stored_pos_count_long);
         assert_eq!(a.stored_pos_count_short.get(), rt.stored_pos_count_short);
-        assert_eq!(
-            a.stale_account_count_long.get(),
-            rt.stale_account_count_long
-        );
-        assert_eq!(
-            a.stale_account_count_short.get(),
-            rt.stale_account_count_short
-        );
+        assert_eq!(a.stale_account_count_long.get(), rt.stale_account_count_long);
+        assert_eq!(a.stale_account_count_short.get(), rt.stale_account_count_short);
     }
 }
 

@@ -41,8 +41,7 @@ fn account(seed: u32) -> PortfolioAccountV16Account {
     let mut key = [0u8; 32];
     key[..4].copy_from_slice(&seed.to_le_bytes());
     key[31] = 0x3C;
-    let h =
-        ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], key, [3; 32]));
+    let h = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], key, [3; 32]));
     let mut a = PortfolioAccountV16Account::default();
     a.init_empty_in_place(h).unwrap();
     a
@@ -70,29 +69,18 @@ enum Who {
 /// `steps`: per-slot (price, funding rate). `who` is settled after every `every`-th slot; both
 /// legs are always settled after the last one (loser first).
 fn run(basis_q: u128, price0: u64, steps: &[(u64, i128)], every: usize, who: Who) -> Outcome {
-    let max_rate = steps
-        .iter()
-        .map(|s| s.1.unsigned_abs() as u64)
-        .max()
-        .unwrap_or(0);
+    let max_rate = steps.iter().map(|s| s.1.unsigned_abs() as u64).max().unwrap_or(0);
     let mut s = market(price0, max_rate);
     let mut long = account(1);
     let mut short = account(2);
     {
         let mut m = MarketGroupV16ViewMut::new(&mut s.0, &mut s.1);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut long), 1_000_000_000_000)
-            .unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut short), 1_000_000_000_000)
-            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut long), 1_000_000_000_000).unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut short), 1_000_000_000_000).unwrap();
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
             &mut PortfolioV16ViewMut::new(&mut long),
             &mut PortfolioV16ViewMut::new(&mut short),
-            TradeRequestV16 {
-                asset_index: 0,
-                size_q: basis_q as i128,
-                exec_price: price0,
-                fee_bps: 0,
-            },
+            TradeRequestV16 { asset_index: 0, size_q: basis_q as i128, exec_price: price0, fee_bps: 0 },
             true,
         )
         .unwrap();
@@ -100,8 +88,7 @@ fn run(basis_q: u128, price0: u64, steps: &[(u64, i128)], every: usize, who: Who
     let (l0, s0) = (equity(&long), equity(&short));
     for (i, &(price, rate)) in steps.iter().enumerate() {
         let mut m = MarketGroupV16ViewMut::new(&mut s.0, &mut s.1);
-        m.accrue_asset_to_not_atomic(0, 2 + i as u64, price, rate, true)
-            .unwrap();
+        m.accrue_asset_to_not_atomic(0, 2 + i as u64, price, rate, true).unwrap();
         m.markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(price);
         let last = i + 1 == steps.len();
         if (i + 1) % every == 0 || last {
@@ -114,33 +101,20 @@ fn run(basis_q: u128, price0: u64, steps: &[(u64, i128)], every: usize, who: Who
                     Err(e) => panic!("expiry crank: {e:?}"),
                 }
             }
-            let (first, second) = if who == Who::Short {
-                (&mut short, &mut long)
-            } else {
-                (&mut long, &mut short)
-            };
-            m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(first))
-                .unwrap();
+            let (first, second) = if who == Who::Short { (&mut short, &mut long) } else { (&mut long, &mut short) };
+            m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(first)).unwrap();
             if last || who == Who::Both {
-                m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(second))
-                    .unwrap();
+                m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(second)).unwrap();
             }
         }
     }
     {
         let m = MarketGroupV16ViewMut::new(&mut s.0, &mut s.1);
         m.validate_shape().unwrap();
-        PortfolioV16ViewMut::new(&mut long)
-            .validate_with_market(&m.as_view())
-            .unwrap();
-        PortfolioV16ViewMut::new(&mut short)
-            .validate_with_market(&m.as_view())
-            .unwrap();
+        PortfolioV16ViewMut::new(&mut long).validate_with_market(&m.as_view()).unwrap();
+        PortfolioV16ViewMut::new(&mut short).validate_with_market(&m.as_view()).unwrap();
     }
-    let (ll, sl) = (
-        long.legs[0].try_to_runtime().unwrap(),
-        short.legs[0].try_to_runtime().unwrap(),
-    );
+    let (ll, sl) = (long.legs[0].try_to_runtime().unwrap(), short.legs[0].try_to_runtime().unwrap());
     Outcome {
         long_delta: equity(&long) - l0,
         short_delta: equity(&short) - s0,
@@ -152,10 +126,7 @@ fn run(basis_q: u128, price0: u64, steps: &[(u64, i128)], every: usize, who: Who
 /// The OLD rule for one side: sum of per-settle floors with no carry.
 fn old_fragmented(basis_q: u128, deltas: &[i128]) -> i128 {
     let den = (ADL_ONE * POS_SCALE) as i128;
-    deltas
-        .iter()
-        .map(|d| (basis_q as i128 * d).div_euclid(den))
-        .sum()
+    deltas.iter().map(|d| (basis_q as i128 * d).div_euclid(den)).sum()
 }
 
 #[test]
@@ -167,19 +138,11 @@ fn v22_fractional_funding_settles_the_same_for_any_refresh_cadence() {
         let steps: Vec<(u64, i128)> = vec![(price, rate); n];
         let once = run(basis, price, &steps, n, payer);
         for every in [1usize, 2, 3, 7, 50, 499] {
-            assert_eq!(
-                run(basis, price, &steps, every, payer),
-                once,
-                "rate {rate}, settle every {every}"
-            );
+            assert_eq!(run(basis, price, &steps, every, payer), once, "rate {rate}, settle every {every}");
         }
         // exact total: 7.000001 * 111 * 3086 * 500 / 1e9 = 1.1989.. atoms; payer pays 2, receiver gets 1
         let exact = basis as f64 / 1e6 * 111.0 * price as f64 * n as f64 / 1e9;
-        let (paid, recv) = if rate > 0 {
-            (once.long_delta, once.short_delta)
-        } else {
-            (once.short_delta, once.long_delta)
-        };
+        let (paid, recv) = if rate > 0 { (once.long_delta, once.short_delta) } else { (once.short_delta, once.long_delta) };
         assert_eq!(paid, -(exact.ceil() as i128));
         assert_eq!(recv, exact.floor() as i128);
         // the pair never gains, and loses less than one atom in TOTAL, whatever the cadence
@@ -202,11 +165,7 @@ fn v22_fractional_price_pnl_settles_the_same_for_any_refresh_cadence() {
             .collect();
         let once = run(basis, price0, &steps, n, loser);
         for every in [1usize, 2, 5, 13, 199] {
-            assert_eq!(
-                run(basis, price0, &steps, every, loser),
-                once,
-                "dir {dir}, settle every {every}"
-            );
+            assert_eq!(run(basis, price0, &steps, every, loser), once, "dir {dir}, settle every {every}");
         }
         let sum = once.long_delta + once.short_delta;
         assert!(sum <= 0 && sum >= -1, "pair total {sum}");
@@ -222,11 +181,7 @@ fn v22_winner_and_loser_settle_the_same_inside_one_backing_window() {
         let steps: Vec<(u64, i128)> = vec![(price, rate); n];
         let once = run(basis, price, &steps, n, Who::Both);
         for every in [1usize, 2, 3, 9] {
-            assert_eq!(
-                run(basis, price, &steps, every, Who::Both),
-                once,
-                "rate {rate}, every {every}"
-            );
+            assert_eq!(run(basis, price, &steps, every, Who::Both), once, "rate {rate}, every {every}");
         }
         assert_eq!(once.long_delta + once.short_delta, -1);
     }
@@ -243,17 +198,9 @@ fn v22_negative_control_old_per_settle_floor_was_cadence_dependent() {
     let single = (basis as i128 * d * n as i128).div_euclid(den);
     let fragmented_old = old_fragmented(basis, &vec![d; n]);
     assert_eq!(single, -2);
-    assert_eq!(
-        fragmented_old,
-        -(n as i128),
-        "old rule: one atom lost on EVERY settle"
-    );
+    assert_eq!(fragmented_old, -(n as i128), "old rule: one atom lost on EVERY settle");
     let steps: Vec<(u64, i128)> = vec![(price, rate); n];
-    assert_eq!(
-        run(basis, price, &steps, 1, Who::Long).long_delta,
-        single,
-        "engine == single settle"
-    );
+    assert_eq!(run(basis, price, &steps, 1, Who::Long).long_delta, single, "engine == single settle");
 }
 
 #[test]
@@ -262,30 +209,19 @@ fn v22_leg_remainder_must_stay_below_its_denominator() {
     let mut long = account(1);
     let mut short = account(2);
     let mut m = MarketGroupV16ViewMut::new(&mut s.0, &mut s.1);
-    m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut long), 1_000_000_000)
-        .unwrap();
-    m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut short), 1_000_000_000)
-        .unwrap();
+    m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut long), 1_000_000_000).unwrap();
+    m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut short), 1_000_000_000).unwrap();
     m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
         &mut PortfolioV16ViewMut::new(&mut long),
         &mut PortfolioV16ViewMut::new(&mut short),
-        TradeRequestV16 {
-            asset_index: 0,
-            size_q: POS_SCALE as i128,
-            exec_price: 1_000_000,
-            fee_bps: 0,
-        },
+        TradeRequestV16 { asset_index: 0, size_q: POS_SCALE as i128, exec_price: 1_000_000, fee_bps: 0 },
         true,
     )
     .unwrap();
-    PortfolioV16ViewMut::new(&mut long)
-        .validate_with_market(&m.as_view())
-        .unwrap();
+    PortfolioV16ViewMut::new(&mut long).validate_with_market(&m.as_view()).unwrap();
     let den = ADL_ONE * POS_SCALE;
     long.legs[0].k_rem_num = V16PodU128::new(den - 1);
-    PortfolioV16ViewMut::new(&mut long)
-        .validate_with_market(&m.as_view())
-        .unwrap();
+    PortfolioV16ViewMut::new(&mut long).validate_with_market(&m.as_view()).unwrap();
     long.legs[0].k_rem_num = V16PodU128::new(den);
     assert_eq!(
         PortfolioV16ViewMut::new(&mut long).validate_with_market(&m.as_view()),
@@ -311,9 +247,6 @@ fn v22_leg_layout_is_pinned() {
     assert_eq!(offset_of!(PortfolioLegV16Account, kf_epoch_snap), 110);
     assert_eq!(size_of::<PortfolioLegV16Account>(), 217);
     assert_eq!(size_of::<PortfolioAccountV16Account>(), 10463);
-    assert_eq!(
-        offset_of!(PortfolioAccountV16Account, loss_provenance),
-        10459
-    );
+    assert_eq!(offset_of!(PortfolioAccountV16Account, loss_provenance), 10459);
     assert_eq!(V16_LAYOUT_DISCRIMINATOR, 20);
 }

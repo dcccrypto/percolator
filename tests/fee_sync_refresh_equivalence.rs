@@ -81,8 +81,9 @@ impl W {
         cfg.liquidation_fee_cap = 1_000_000;
         cfg.min_nonzero_mm_req = 1;
         cfg.min_nonzero_im_req = 2;
-        let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, n as u32, 0)
-            .unwrap_or_else(|e| panic!("new_dynamic n={n}: {e:?}"));
+        let mut header =
+            MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, n as u32, 0)
+                .unwrap_or_else(|e| panic!("new_dynamic n={n}: {e:?}"));
         let mut markets: Vec<Market<u64>> = (0..n as u64)
             .map(|i| Market::new(i, EngineAssetSlotV16Account::default()))
             .collect();
@@ -96,12 +97,7 @@ impl W {
                 )
                 .unwrap();
         }
-        let mut w = W {
-            header,
-            markets,
-            slot: n as u64,
-            n,
-        };
+        let mut w = W { header, markets, slot: n as u64, n };
         w.tick(0, &vec![0; n]); // bring every asset clock to the same slot
         w
     }
@@ -112,9 +108,7 @@ impl W {
         self.markets[i].engine.asset.effective_price.get()
     }
     fn deposit(&mut self, a: &mut PortfolioAccountV16Account, amt: u128) {
-        self.view()
-            .deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt)
-            .unwrap();
+        self.view().deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt).unwrap();
     }
     fn trade(
         &mut self,
@@ -127,12 +121,7 @@ impl W {
             .execute_trade_with_fee_loss_stale_scoped_not_atomic(
                 &mut PortfolioV16ViewMut::new(long),
                 &mut PortfolioV16ViewMut::new(short),
-                TradeRequestV16 {
-                    asset_index: i,
-                    size_q: LEG_SIZE,
-                    exec_price: p,
-                    fee_bps: 0,
-                },
+                TradeRequestV16 { asset_index: i, size_q: LEG_SIZE, exec_price: p, fee_bps: 0 },
                 true,
             )
             .expect("trade");
@@ -145,13 +134,7 @@ impl W {
             let p = self.price(j) as i128;
             let new = (p * (10_000 + bps[j] as i128) / 10_000).max(1) as u64;
             let mut m = self.view();
-            m.accrue_asset_to_not_atomic(j, slot, new, 0, true)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "accrue asset {j} slot {slot} dt {dt} price {} -> {new}: {e:?}",
-                        p
-                    )
-                });
+            m.accrue_asset_to_not_atomic(j, slot, new, 0, true).unwrap_or_else(|e| panic!("accrue asset {j} slot {slot} dt {dt} price {} -> {new}: {e:?}", p));
             m.markets[j].engine.asset.raw_oracle_target_price = V16PodU64::new(new);
         }
     }
@@ -173,9 +156,7 @@ impl W {
     }
     fn refresh(&mut self, a: &mut PortfolioAccountV16Account) -> percolator::HealthCertV16 {
         for _ in 0..64 {
-            let r = self
-                .view()
-                .full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(a));
+            let r = self.view().full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(a));
             match r {
                 Err(V16Error::BStale) => self.crank_refresh_all(a),
                 r => return r.expect("refresh"),
@@ -191,11 +172,10 @@ impl W {
     ) -> Result<u128, V16Error> {
         for _ in 0..64 {
             let slot = self.slot;
-            match self.view().sync_account_fee_to_slot_not_atomic(
-                &mut PortfolioV16ViewMut::new(a),
-                slot,
-                rate,
-            ) {
+            match self
+                .view()
+                .sync_account_fee_to_slot_not_atomic(&mut PortfolioV16ViewMut::new(a), slot, rate)
+            {
                 Err(V16Error::BStale) => self.crank_refresh_all(a),
                 r => return r,
             }
@@ -270,22 +250,15 @@ fn cases() -> Vec<Case> {
     let mut seed = 1u64;
     for &legs in &leg_counts {
         for &rate in &rates {
-            for &(max_gap, steps, vol_bps, drift_bps, cap_pct) in &[
-                (1u64, 3u32, 6u64, 0u64, 300u64),
-                (50, 4, 7, 0, 150),
-                (3, 6, 7, 0, 102),
-                (50, 4, 1, 5, 105),
-            ] {
-                v.push(Case {
-                    seed,
-                    legs,
-                    rate,
-                    max_gap,
-                    steps,
-                    vol_bps,
-                    drift_bps,
-                    cap_pct,
-                });
+            for &(max_gap, steps, vol_bps, drift_bps, cap_pct) in
+                &[
+                    (1u64, 3u32, 6u64, 0u64, 300u64),
+                    (50, 4, 7, 0, 150),
+                    (3, 6, 7, 0, 102),
+                    (50, 4, 1, 5, 105),
+                ]
+            {
+                v.push(Case { seed, legs, rate, max_gap, steps, vol_bps, drift_bps, cap_pct });
                 seed += 1;
             }
         }
@@ -330,22 +303,8 @@ fn assert_same_state(label: &str, left: &Snapshot, right: &Snapshot) {
                 stringify!($x), left.line(), right.line());
         )*};
     }
-    f!(
-        fee_result,
-        liquidated,
-        capital,
-        pnl,
-        last_fee_slot,
-        legs,
-        cp_capital,
-        cp_pnl,
-        insurance,
-        vault,
-        c_tot,
-        cert_equity,
-        cert_maintenance,
-        cert_liq_deficit
-    );
+    f!(fee_result, liquidated, capital, pnl, last_fee_slot, legs, cp_capital, cp_pnl, insurance,
+       vault, c_tot, cert_equity, cert_maintenance, cert_liq_deficit);
 }
 
 fn snapshot(
@@ -381,14 +340,7 @@ fn snapshot(
 
 /// Today's order: fee sync (settles all legs), then refresh walks them again, then liquidate if
 /// the certificate says so. A merged single-pass version must leave the same `Snapshot`.
-fn run_two_pass(
-    c: Case,
-) -> (
-    W,
-    PortfolioAccountV16Account,
-    PortfolioAccountV16Account,
-    Snapshot,
-) {
+fn run_two_pass(c: Case) -> (W, PortfolioAccountV16Account, PortfolioAccountV16Account, Snapshot) {
     let (mut w, mut a, mut b) = build(c);
     let fee = w.sync_fee(&mut a, c.rate);
     let cert = w.refresh(&mut a);
@@ -426,9 +378,7 @@ fn fnv(s: &str, mut h: u64) -> u64 {
 }
 
 fn digest(snaps: &[Snapshot]) -> u64 {
-    snaps
-        .iter()
-        .fold(0xcbf2_9ce4_8422_2325, |h, s| fnv(&s.line(), h))
+    snaps.iter().fold(0xcbf2_9ce4_8422_2325, |h, s| fnv(&s.line(), h))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -451,45 +401,28 @@ fn fee_sync_refresh_invariants_hold_for_every_case() {
         let (mut w, mut a, mut b, s) = run_two_pass(c);
         let label = format!("{c:?}");
         // conservation: vault covers capital plus insurance
-        assert!(
-            s.vault >= s.c_tot + s.insurance,
-            "{label}: V < C_tot + I: {}",
-            s.line()
-        );
+        assert!(s.vault >= s.c_tot + s.insurance, "{label}: V < C_tot + I: {}", s.line());
         // validity of both accounts and the market
         let g = w.view();
         g.validate_shape().unwrap();
-        PortfolioV16ViewMut::new(&mut a)
-            .validate_with_market(&g.as_view())
-            .unwrap();
-        PortfolioV16ViewMut::new(&mut b)
-            .validate_with_market(&g.as_view())
-            .unwrap();
+        PortfolioV16ViewMut::new(&mut a).validate_with_market(&g.as_view()).unwrap();
+        PortfolioV16ViewMut::new(&mut b).validate_with_market(&g.as_view()).unwrap();
         // the fee never exceeds the requested amount: rate * slots elapsed
         if let Ok(charged) = s.fee_result {
             let elapsed = (w.slot).saturating_sub(0) as u128;
-            assert!(
-                charged <= c.rate * elapsed,
-                "{label}: charged {charged} > rate*slots"
-            );
+            assert!(charged <= c.rate * elapsed, "{label}: charged {charged} > rate*slots");
             if c.rate == 0 {
                 assert_eq!(charged, 0, "{label}: fee charged with zero rate");
             }
         }
         // fee anchor never runs past the current slot
-        assert!(
-            s.last_fee_slot <= w.slot,
-            "{label}: fee slot ahead of clock"
-        );
+        assert!(s.last_fee_slot <= w.slot, "{label}: fee slot ahead of clock");
         // a liquidated account has no more deficit than it started with
         if !s.liquidated {
             assert!(s.legs.len() <= c.legs, "{label}");
         }
         // capital only goes down from fee/loss, never above deposit plus gains realised as capital
-        assert!(
-            s.capital <= c.legs as u128 * P0 as u128 * c.cap_pct as u128 / 100 + 1,
-            "{label}"
-        );
+        assert!(s.capital <= c.legs as u128 * P0 as u128 * c.cap_pct as u128 / 100 + 1, "{label}");
     }
 }
 
@@ -512,10 +445,7 @@ fn fee_sync_refresh_second_crank_at_same_slot_changes_nothing() {
             continue;
         }
         let fee = w.sync_fee(&mut a, c.rate);
-        assert!(
-            matches!(fee, Ok(0)) || fee.is_err(),
-            "{c:?}: second sync charged {fee:?}"
-        );
+        assert!(matches!(fee, Ok(0)) || fee.is_err(), "{c:?}: second sync charged {fee:?}");
         w.refresh(&mut b);
         let cert = w.refresh(&mut a);
         let s2 = snapshot(&mut w, &a, &b, s1.fee_result.clone(), s1.liquidated, cert);
@@ -529,16 +459,7 @@ fn fee_sync_refresh_second_crank_at_same_slot_changes_nothing() {
 fn fee_sync_refresh_split_sync_charges_same_total_when_prices_flat() {
     for &legs in &[2usize, 4, V16_MAX_PORTFOLIO_ASSETS_N] {
         for &rate in &[1u128, 9] {
-            let c = Case {
-                seed: 1,
-                legs,
-                rate,
-                max_gap: 1,
-                steps: 0,
-                vol_bps: 0,
-                drift_bps: 0,
-                cap_pct: 400,
-            };
+            let c = Case { seed: 1, legs, rate, max_gap: 1, steps: 0, vol_bps: 0, drift_bps: 0, cap_pct: 400 };
             let flat = vec![0i64; legs];
             let (mut w1, mut a1, _b1) = build(c);
             w1.tick(10, &flat);
@@ -550,11 +471,7 @@ fn fee_sync_refresh_split_sync_charges_same_total_when_prices_flat() {
             w2.tick(20, &flat);
             let all = w2.sync_fee(&mut a2, rate).unwrap();
             assert_eq!(two, all, "legs {legs} rate {rate}");
-            assert_eq!(
-                a1.capital.get(),
-                a2.capital.get(),
-                "legs {legs} rate {rate}"
-            );
+            assert_eq!(a1.capital.get(), a2.capital.get(), "legs {legs} rate {rate}");
             assert_eq!(w1.header.insurance.get(), w2.header.insurance.get());
         }
     }
@@ -571,26 +488,14 @@ fn fee_sync_refresh_golden_post_crank_state() {
     let snaps: Vec<Snapshot> = cs.iter().map(|&c| run_two_pass(c).3).collect();
     let d = digest(&snaps);
     let liq = snaps.iter().filter(|s| s.liquidated).count();
-    let fee = snaps
-        .iter()
-        .filter(|s| matches!(s.fee_result, Ok(f) if f > 0))
-        .count();
-    println!(
-        "DIGEST {d:#x} liquidated {liq} fee_charged {fee} cases {}",
-        snaps.len()
-    );
+    let fee = snaps.iter().filter(|s| matches!(s.fee_result, Ok(f) if f > 0)).count();
+    println!("DIGEST {d:#x} liquidated {liq} fee_charged {fee} cases {}", snaps.len());
     for (c, s) in cs.iter().zip(&snaps) {
         println!("{c:?} => {}", s.line());
     }
     assert_eq!(liq, GOLDEN_LIQUIDATED, "liquidation outcome count moved");
-    assert_eq!(
-        fee, GOLDEN_FEE_CHARGED_CASES,
-        "fee-charged case count moved"
-    );
-    assert_eq!(
-        d, GOLDEN_DIGEST,
-        "post-crank state digest moved; see --nocapture output"
-    );
+    assert_eq!(fee, GOLDEN_FEE_CHARGED_CASES, "fee-charged case count moved");
+    assert_eq!(d, GOLDEN_DIGEST, "post-crank state digest moved; see --nocapture output");
 }
 
 /// The golden run is deterministic: two runs give identical snapshots.

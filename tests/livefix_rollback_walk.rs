@@ -61,16 +61,12 @@ fn account_fixture(_market_slots: u32, account_seed: u8) -> PortfolioAccountV16A
 
 /// LIVEFIX measurement switch: mid-path trades that can create liens (default off).
 fn liens_in_live() -> bool {
-    std::env::var("LIVEFIX_WALK_LIENS")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    std::env::var("LIVEFIX_WALK_LIENS").map(|v| v == "1").unwrap_or(false)
 }
 
 /// LIVEFIX measurement switch (default off = the v22med walk unchanged).
 fn keeper_expires_in_live() -> bool {
-    std::env::var("LIVEFIX_WALK_KEEPER")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    std::env::var("LIVEFIX_WALK_KEEPER").map(|v| v == "1").unwrap_or(false)
 }
 
 fn signed_q(q: u128) -> i128 {
@@ -97,10 +93,7 @@ struct S16acWorld {
 impl S16acWorld {
     fn tx<R>(
         &mut self,
-        f: impl FnOnce(
-            &mut MarketGroupV16ViewMut<'_, u64>,
-            &mut [PortfolioAccountV16Account; 4],
-        ) -> Result<R, V16Error>,
+        f: impl FnOnce(&mut MarketGroupV16ViewMut<'_, u64>, &mut [PortfolioAccountV16Account; 4]) -> Result<R, V16Error>,
     ) -> Result<R, V16Error> {
         let (h, m, a) = (self.header, self.markets.clone(), self.acc);
         let r = {
@@ -117,32 +110,15 @@ impl S16acWorld {
             // stale/pending terms never decide it (see the doc at that predicate).
             let asset = self.markets[0].engine.asset.try_to_runtime().unwrap();
             for (stored, stale, pending) in [
-                (
-                    asset.stored_pos_count_long,
-                    asset.stale_account_count_long,
-                    asset.pending_obligation_count_long,
-                ),
-                (
-                    asset.stored_pos_count_short,
-                    asset.stale_account_count_short,
-                    asset.pending_obligation_count_short,
-                ),
+                (asset.stored_pos_count_long, asset.stale_account_count_long, asset.pending_obligation_count_long),
+                (asset.stored_pos_count_short, asset.stale_account_count_short, asset.pending_obligation_count_short),
             ] {
-                assert!(
-                    stale <= stored && pending <= stored,
-                    "stored {stored} stale {stale} pending {pending}"
-                );
+                assert!(stale <= stored && pending <= stored, "stored {stored} stale {stale} pending {pending}");
             }
         }
         r
     }
-    fn close(
-        &mut self,
-        who: usize,
-        paid: &mut [u128; 4],
-        closed: &mut [bool; 4],
-        auto: bool,
-    ) -> Result<bool, V16Error> {
+    fn close(&mut self, who: usize, paid: &mut [u128; 4], closed: &mut [bool; 4], auto: bool) -> Result<bool, V16Error> {
         let r = if auto {
             self.tx(|m, acc| {
                 let observations = [AutoCrankObservationV16 {
@@ -155,25 +131,14 @@ impl S16acWorld {
                     observations: &observations,
                     resolved_close_fee_rate_per_slot: 0,
                 };
-                match m
-                    .permissionless_auto_crank_not_atomic(
-                        &mut PortfolioV16ViewMut::new(&mut acc[who]),
-                        work,
-                    )?
-                    .outcome
-                {
-                    AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::Closed {
-                        payout,
-                    }) => Ok(Some(payout)),
+                match m.permissionless_auto_crank_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc[who]), work)?.outcome {
+                    AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::Closed { payout }) => Ok(Some(payout)),
                     _ => Ok(None),
                 }
             })
         } else {
             self.tx(|m, acc| {
-                match m.close_resolved_account_not_atomic(
-                    &mut PortfolioV16ViewMut::new(&mut acc[who]),
-                    0,
-                )? {
+                match m.close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc[who]), 0)? {
                     ResolvedCloseOutcomeV16::Closed { payout } => Ok(Some(payout)),
                     _ => Ok(None),
                 }
@@ -190,17 +155,10 @@ impl S16acWorld {
         }
     }
     fn topup(&mut self, who: usize, paid: &mut [u128; 4]) {
-        if !self.acc[who]
-            .resolved_payout_receipt
-            .try_to_runtime()
-            .unwrap()
-            .present
-        {
+        if !self.acc[who].resolved_payout_receipt.try_to_runtime().unwrap().present {
             return;
         }
-        if let Ok(t) = self.tx(|m, acc| {
-            m.claim_resolved_payout_topup_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc[who]))
-        }) {
+        if let Ok(t) = self.tx(|m, acc| m.claim_resolved_payout_topup_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc[who]))) {
             paid[who] += t;
         }
     }
@@ -228,18 +186,12 @@ fn s16ac_walk(seed: u64, steps: usize) -> Option<S16acOut> {
     let mut w = S16acWorld {
         header,
         markets,
-        acc: [
-            account_fixture(1, 221),
-            account_fixture(1, 222),
-            account_fixture(1, 223),
-            account_fixture(1, 224),
-        ],
+        acc: [account_fixture(1, 221), account_fixture(1, 222), account_fixture(1, 223), account_fixture(1, 224)],
     };
     let mut deposits = 0u128;
     for k in 0..4 {
         let c = [200u128, 400, 800, 1000][r.n(4) as usize];
-        w.tx(|m, acc| m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc[k]), c))
-            .unwrap();
+        w.tx(|m, acc| m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc[k]), c)).unwrap();
         deposits += c;
     }
     let mut trades = 0;
@@ -255,20 +207,11 @@ fn s16ac_walk(seed: u64, steps: usize) -> Option<S16acOut> {
                 let (lo, hi) = (x.min(y), x.max(y));
                 let (a, b) = acc.split_at_mut(hi);
                 let (first, second) = (&mut a[lo], &mut b[0]);
-                let (l, s) = if x < y {
-                    (first, second)
-                } else {
-                    (second, first)
-                };
+                let (l, s) = if x < y { (first, second) } else { (second, first) };
                 m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
                     &mut PortfolioV16ViewMut::new(l),
                     &mut PortfolioV16ViewMut::new(s),
-                    TradeRequestV16 {
-                        asset_index: 0,
-                        size_q: signed_q(sz * POS_SCALE),
-                        exec_price: 100,
-                        fee_bps: 0,
-                    },
+                    TradeRequestV16 { asset_index: 0, size_q: signed_q(sz * POS_SCALE), exec_price: 100, fee_bps: 0 },
                     true,
                 )
             })
@@ -286,26 +229,19 @@ fn s16ac_walk(seed: u64, steps: usize) -> Option<S16acOut> {
         let tgt = [60u64, 80, 120, 160, 220, 300][r.n(6) as usize];
         while p != tgt {
             slot += 1;
-            p = if tgt > p {
-                (p + 10).min(tgt)
-            } else {
-                p.saturating_sub(10).max(tgt)
-            };
-            if w.tx(|m, _| {
-                m.set_asset_raw_oracle_target_not_atomic(0, p)?;
-                m.accrue_asset_to_not_atomic(0, slot, p, 0, true)
-            })
-            .is_err()
+            p = if tgt > p { (p + 10).min(tgt) } else { p.saturating_sub(10).max(tgt) };
+            if w
+                .tx(|m, _| {
+                    m.set_asset_raw_oracle_target_not_atomic(0, p)?;
+                    m.accrue_asset_to_not_atomic(0, slot, p, 0, true)
+                })
+                .is_err()
             {
                 return None;
             }
             for k in 0..4 {
                 if r.n(3) == 0 {
-                    let _ = w.tx(|m, acc| {
-                        m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(
-                            &mut acc[k],
-                        ))
-                    });
+                    let _ = w.tx(|m, acc| m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc[k])));
                 }
             }
             if liens_in_live() && r2.n(4) == 0 {
@@ -317,20 +253,11 @@ fn s16ac_walk(seed: u64, steps: usize) -> Option<S16acOut> {
                     let (lo, hi) = (x.min(y), x.max(y));
                     let (a, b) = acc.split_at_mut(hi);
                     let (first, second) = (&mut a[lo], &mut b[0]);
-                    let (l, s) = if x < y {
-                        (first, second)
-                    } else {
-                        (second, first)
-                    };
+                    let (l, s) = if x < y { (first, second) } else { (second, first) };
                     m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
                         &mut PortfolioV16ViewMut::new(l),
                         &mut PortfolioV16ViewMut::new(s),
-                        TradeRequestV16 {
-                            asset_index: 0,
-                            size_q: signed_q(sz * POS_SCALE),
-                            exec_price: p,
-                            fee_bps: 0,
-                        },
+                        TradeRequestV16 { asset_index: 0, size_q: signed_q(sz * POS_SCALE), exec_price: p, fee_bps: 0 },
                         true,
                     )
                 });
@@ -338,10 +265,7 @@ fn s16ac_walk(seed: u64, steps: usize) -> Option<S16acOut> {
             if keeper_expires_in_live() {
                 // a Live keeper running the permissionless expiry (wrapper tag 89) every slot
                 for d in 0..2 {
-                    let _ = w.tx(|m, _| {
-                        let s = m.header.current_slot.get();
-                        m.expire_source_backing_bucket_not_atomic(d, s)
-                    });
+                    let _ = w.tx(|m, _| { let s = m.header.current_slot.get(); m.expire_source_backing_bucket_not_atomic(d, s) });
                 }
             }
         }
@@ -364,32 +288,20 @@ fn s16ac_walk(seed: u64, steps: usize) -> Option<S16acOut> {
             3 if !closed[who] => w.topup(who, &mut paid),
             4 => {
                 for d in 0..2 {
-                    let _ = w.tx(|m, _| {
-                        let s = m.header.current_slot.get();
-                        m.expire_source_backing_bucket_not_atomic(d, s)
-                    });
+                    let _ = w.tx(|m, _| { let s = m.header.current_slot.get(); m.expire_source_backing_bucket_not_atomic(d, s) });
                 }
             }
             5 => {
                 let dt = 1 + r.n(3_000_000);
-                let _ = w.tx(|m, _| {
-                    let now = m.header.current_slot.get() + dt;
-                    m.advance_resolved_slot_not_atomic(now)
-                });
+                let _ = w.tx(|m, _| { let now = m.header.current_slot.get() + dt; m.advance_resolved_slot_not_atomic(now) });
             }
             _ => {}
         }
     }
     for round in 0..40usize {
-        let _ = w.tx(|m, _| {
-            let now = m.header.current_slot.get() + 5_000_000;
-            m.advance_resolved_slot_not_atomic(now)
-        });
+        let _ = w.tx(|m, _| { let now = m.header.current_slot.get() + 5_000_000; m.advance_resolved_slot_not_atomic(now) });
         for d in 0..2 {
-            let _ = w.tx(|m, _| {
-                let s = m.header.current_slot.get();
-                m.expire_source_backing_bucket_not_atomic(d, s)
-            });
+            let _ = w.tx(|m, _| { let s = m.header.current_slot.get(); m.expire_source_backing_bucket_not_atomic(d, s) });
         }
         for j in 0..4usize {
             let who = (j + round) % 4;
@@ -419,22 +331,13 @@ fn s16ac_walk(seed: u64, steps: usize) -> Option<S16acOut> {
     }
     let mk = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
     mk.validate_shape().unwrap();
-    Some(S16acOut {
-        paid,
-        closed,
-        vault: w.header.vault.get(),
-        insurance: w.header.insurance.get(),
-        deposits,
-        last_err,
-    })
+    Some(S16acOut { paid, closed, vault: w.header.vault.get(), insurance: w.header.insurance.get(), deposits, last_err })
 }
 
 fn s16ac_walk_stats(steps: usize) -> (usize, Vec<u64>, Vec<u64>, u128) {
     let (mut built, mut stuck, mut leaky, mut left) = (0usize, vec![], vec![], 0u128);
     for seed in 0..6000u64 {
-        let Some(o) = s16ac_walk(seed, steps) else {
-            continue;
-        };
+        let Some(o) = s16ac_walk(seed, steps) else { continue };
         built += 1;
         if o.paid.iter().sum::<u128>() + o.vault != o.deposits + o.insurance {
             leaky.push(seed);
@@ -447,6 +350,7 @@ fn s16ac_walk_stats(steps: usize) -> (usize, Vec<u64>, Vec<u64>, u128) {
     }
     (built, stuck, leaky, left)
 }
+
 
 /// Per-seed dump for a base-vs-branch comparison: `LIVEFIX_WALK_DUMP=<file>`.
 #[test]
@@ -461,14 +365,9 @@ fn livefix_walk_dump() {
                 writeln!(
                     f,
                     "{steps} {seed} {} {} {} {} {} {} {} {} {} {}",
-                    o.paid[0],
-                    o.paid[1],
-                    o.paid[2],
-                    o.paid[3],
+                    o.paid[0], o.paid[1], o.paid[2], o.paid[3],
                     o.closed.iter().all(|c| *c) as u8,
-                    o.vault,
-                    o.insurance,
-                    o.deposits,
+                    o.vault, o.insurance, o.deposits,
                     o.paid.iter().sum::<u128>() + o.vault == o.deposits + o.insurance,
                     o.last_err.iter().filter(|e| e.is_some()).count()
                 )

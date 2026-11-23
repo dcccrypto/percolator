@@ -27,19 +27,17 @@ use percolator::{
 const P0: u64 = 1_000_000;
 const UNIT_Q: i128 = 10_000;
 
-fn down(p: u64) -> u64 {
-    p - p * 49 / 1000
-}
-fn up(p: u64) -> u64 {
-    p + p * 49 / 1000
-}
+fn down(p: u64) -> u64 { p - p * 49 / 1000 }
+fn up(p: u64) -> u64 { p + p * 49 / 1000 }
 
 type Header = MarketGroupV16HeaderAccount;
 type Markets = Vec<Market<u64>>;
 
 fn account(seed: u8) -> PortfolioAccountV16Account {
     let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
-        [1; 32], [seed; 32], [3; 32],
+        [1; 32],
+        [seed; 32],
+        [3; 32],
     ));
     let mut a = PortfolioAccountV16Account::default();
     a.init_empty_in_place(header).unwrap();
@@ -121,24 +119,13 @@ fn trade(
     g.execute_trade_with_fee_loss_stale_scoped_not_atomic(
         &mut lv,
         &mut sv,
-        TradeRequestV16 {
-            asset_index,
-            size_q,
-            exec_price: price,
-            fee_bps: 0,
-        },
+        TradeRequestV16 { asset_index, size_q, exec_price: price, fee_bps: 0 },
         true,
     )
     .map(|_| ())
 }
 
-fn accrue(
-    h: &mut Header,
-    m: &mut Markets,
-    asset_index: usize,
-    slot: u64,
-    price: u64,
-) -> Result<(), V16Error> {
+fn accrue(h: &mut Header, m: &mut Markets, asset_index: usize, slot: u64, price: u64) -> Result<(), V16Error> {
     let mut g = MarketGroupV16ViewMut::new(h, m);
     g.accrue_asset_to_not_atomic(asset_index, slot, price, 0, true)?;
     g.markets[asset_index].engine.asset.raw_oracle_target_price = V16PodU64::new(price);
@@ -150,12 +137,7 @@ fn price_of(m: &Markets, i: usize) -> u64 {
 }
 
 /// Public refresh crank on `asset_index`, repeated while the account is b-stale (the keeper loop).
-fn refresh(
-    h: &mut Header,
-    m: &mut Markets,
-    a: &mut PortfolioAccountV16Account,
-    asset_index: usize,
-) -> Result<(), V16Error> {
+fn refresh(h: &mut Header, m: &mut Markets, a: &mut PortfolioAccountV16Account, asset_index: usize) -> Result<(), V16Error> {
     let now_slot = h.current_slot.get();
     let price = price_of(m, asset_index);
     for _ in 0..64 {
@@ -178,28 +160,16 @@ fn refresh(
     Ok(())
 }
 
-fn auto_crank(
-    h: &mut Header,
-    m: &mut Markets,
-    a: &mut PortfolioAccountV16Account,
-) -> Result<percolator::AutoCrankResultV16, V16Error> {
+fn auto_crank(h: &mut Header, m: &mut Markets, a: &mut PortfolioAccountV16Account) -> Result<percolator::AutoCrankResultV16, V16Error> {
     let now_slot = h.current_slot.get();
     let obs: Vec<AutoCrankObservationV16> = (0..m.len())
-        .map(|i| AutoCrankObservationV16 {
-            asset_index: i,
-            effective_price: price_of(m, i),
-            funding_rate_e9: 0,
-        })
+        .map(|i| AutoCrankObservationV16 { asset_index: i, effective_price: price_of(m, i), funding_rate_e9: 0 })
         .collect();
     let mut g = MarketGroupV16ViewMut::new(h, m);
     let mut v = PortfolioV16ViewMut::new(a);
     g.permissionless_auto_crank_not_atomic(
         &mut v,
-        AutoCrankWorkV16 {
-            now_slot,
-            observations: &obs,
-            resolved_close_fee_rate_per_slot: 0,
-        },
+        AutoCrankWorkV16 { now_slot, observations: &obs, resolved_close_fee_rate_per_slot: 0 },
     )
 }
 
@@ -253,20 +223,7 @@ fn g9_s1_below_maintenance_is_always_liquidated_by_the_public_crank() {
                 for drops in 1u64..=6 {
                     for &short_target in &[false, true] {
                         for &insurance in &[0u128, 1_000_000] {
-                            run_s1(
-                                Cfg {
-                                    n: 1,
-                                    fee_bps,
-                                    min_liq_abs: min_abs,
-                                    lifetime: 100,
-                                },
-                                capital,
-                                units,
-                                drops,
-                                short_target,
-                                insurance,
-                                &mut st,
-                            );
+                            run_s1(Cfg { n: 1, fee_bps, min_liq_abs: min_abs, lifetime: 100 }, capital, units, drops, short_target, insurance, &mut st);
                         }
                     }
                 }
@@ -274,34 +231,16 @@ fn g9_s1_below_maintenance_is_always_liquidated_by_the_public_crank() {
         }
     }
     eprintln!("G9-S1 stats: {st:?}");
-    assert!(
-        st.unexpected.is_empty(),
-        "unexpected outcomes: {:#?}",
-        st.unexpected
-    );
+    assert!(st.unexpected.is_empty(), "unexpected outcomes: {:#?}", st.unexpected);
     // non-vacuity: every interesting branch was reached
-    assert!(
-        st.below >= 50,
-        "too few below-maintenance scenarios: {}",
-        st.below
-    );
+    assert!(st.below >= 50, "too few below-maintenance scenarios: {}", st.below);
     assert!(st.partial_steps > 0 && st.full_closes > 0 && st.to_healthy > 0 && st.to_flat > 0);
     assert!(st.healthy_refused > 0);
     assert!(st.insurance_scenarios > 0 && st.bankrupt > 0);
 }
 
-fn run_s1(
-    c: Cfg,
-    capital: u128,
-    units: u128,
-    drops: u64,
-    short_target: bool,
-    insurance: u128,
-    st: &mut Stats,
-) {
-    let Some((mut h, mut m)) = market(c) else {
-        return;
-    };
+fn run_s1(c: Cfg, capital: u128, units: u128, drops: u64, short_target: bool, insurance: u128, st: &mut Stats) {
+    let Some((mut h, mut m)) = market(c) else { return };
     st.scenarios += 1;
     let mut t = account(10);
     let mut cp = account(11);
@@ -328,9 +267,7 @@ fn run_s1(
         tick(&mut h, &mut m, &[price]).unwrap();
     }
     if let Err(e) = refresh(&mut h, &mut m, &mut t, 0) {
-        st.unexpected.push(format!(
-            "refresh failed {e:?} c={capital} u={units} d={drops} s={short_target}"
-        ));
+        st.unexpected.push(format!("refresh failed {e:?} c={capital} u={units} d={drops} s={short_target}"));
         return;
     }
     let c0 = cert(&t);
@@ -343,13 +280,11 @@ fn run_s1(
             g.liquidate_account_not_atomic(&mut v, LiquidationRequestV16 { asset_index: 0 })
         };
         if r != Err(V16Error::NonProgress) {
-            st.unexpected
-                .push(format!("healthy account not refused NonProgress: {r:?}"));
+            st.unexpected.push(format!("healthy account not refused NonProgress: {r:?}"));
         }
         // the engine's refresh inside the call may re-certify, never move value or the position
         if (t.capital.get(), abs_basis_total(&t)) != before {
-            st.unexpected
-                .push("healthy refusal moved capital or position".into());
+            st.unexpected.push("healthy refusal moved capital or position".into());
         }
         st.healthy_refused += 1;
         return;
@@ -376,18 +311,9 @@ fn run_s1(
         match r {
             Ok(res) => {
                 match (res.selected, res.outcome) {
-                    (
-                        AutoCrankPlanV16::Liquidate { .. },
-                        AutoCrankOutcomeV16::Progressed(
-                            PermissionlessProgressOutcomeV16::RecoveryDeclared(_),
-                        ),
-                    ) => {
+                    (AutoCrankPlanV16::Liquidate { .. }, AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::RecoveryDeclared(_))) => {
                         st.recovery_declared += 1;
-                        assert_eq!(
-                            mode(&h),
-                            2,
-                            "RecoveryDeclared must leave the market in Recovery"
-                        );
+                        assert_eq!(mode(&h), 2, "RecoveryDeclared must leave the market in Recovery");
                         return;
                     }
                     (AutoCrankPlanV16::Liquidate { .. }, AutoCrankOutcomeV16::Progressed(_)) => {
@@ -397,15 +323,9 @@ fn run_s1(
                             st.unexpected.push(format!("liquidation without position progress step={step} {pos_before}->{pos_after}"));
                             return;
                         }
-                        if pos_after == 0 {
-                            st.full_closes += 1
-                        } else {
-                            st.partial_steps += 1
-                        }
+                        if pos_after == 0 { st.full_closes += 1 } else { st.partial_steps += 1 }
                     }
-                    (AutoCrankPlanV16::AdvanceClose, _)
-                    | (AutoCrankPlanV16::RefreshAccount { .. }, _)
-                    | (AutoCrankPlanV16::SettleBChunk { .. }, _) => {
+                    (AutoCrankPlanV16::AdvanceClose, _) | (AutoCrankPlanV16::RefreshAccount { .. }, _) | (AutoCrankPlanV16::SettleBChunk { .. }, _) => {
                         // bounded housekeeping the selector ranks above Liquidate (pending close / stale / B)
                     }
                     other => {
@@ -430,15 +350,12 @@ fn run_s1(
                 return;
             }
             if let Err(e) = refresh(&mut h, &mut m, &mut t, 0) {
-                st.unexpected
-                    .push(format!("refresh after liquidation failed {e:?}"));
+                st.unexpected.push(format!("refresh after liquidation failed {e:?}"));
                 return;
             }
         }
     }
-    st.unexpected.push(format!(
-        "no terminal state after 16 cranks c={capital} u={units} d={drops} s={short_target}"
-    ));
+    st.unexpected.push(format!("no terminal state after 16 cranks c={capital} u={units} d={drops} s={short_target}"));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -461,12 +378,7 @@ fn r1_world() -> World2 {
 }
 
 fn r1_world_with(asset1_drops: usize) -> World2 {
-    let c = Cfg {
-        n: 2,
-        fee_bps: 0,
-        min_liq_abs: 0,
-        lifetime: 1_000,
-    };
+    let c = Cfg { n: 2, fee_bps: 0, min_liq_abs: 0, lifetime: 1_000 };
     let (mut h, mut m) = market(c).expect("config");
     let mut t = account(10);
     let mut cp = account(11);
@@ -477,7 +389,7 @@ fn r1_world_with(asset1_drops: usize) -> World2 {
     deposit(&mut h, &mut m, &mut s2, 1_200);
     deposit(&mut h, &mut m, &mut l2, 1_000_000_000);
     let unit = UNIT_Q; // notional 10_000 at P0
-                       // S2 short 1 unit on asset 0 against L2 (S2 has ~12% margin)
+    // S2 short 1 unit on asset 0 against L2 (S2 has ~12% margin)
     trade(&mut h, &mut m, &mut l2, &mut s2, 0, unit, P0).unwrap();
     // T long 1 unit on asset 0 (vs CP), then long 2 units on asset 1 (vs CP)
     trade(&mut h, &mut m, &mut t, &mut cp, 0, unit, P0).unwrap();
@@ -490,19 +402,8 @@ fn r1_world_with(asset1_drops: usize) -> World2 {
     }
     // S2's terminal trade: buys back its short from L2 at the mark -> residual, LONG barrier on asset 0
     trade(&mut h, &mut m, &mut s2, &mut l2, 0, unit, p0).expect("S2 terminal close");
-    assert!(
-        s2.close_progress
-            .try_to_runtime()
-            .unwrap()
-            .residual_remaining
-            > 0,
-        "S2 holds a pending bankrupt close"
-    );
-    assert_eq!(
-        m[0].engine.pending_domain_loss_barrier_long.get(),
-        1,
-        "the long barrier on asset 0 is up"
-    );
+    assert!(s2.close_progress.try_to_runtime().unwrap().residual_remaining > 0, "S2 holds a pending bankrupt close");
+    assert_eq!(m[0].engine.pending_domain_loss_barrier_long.get(), 1, "the long barrier on asset 0 is up");
     assert_eq!(m[0].engine.pending_domain_loss_barrier_short.get(), 0);
     // asset 1 falls 5 x 4.9% (T loses ~4_300 on 2 units of 10_000 notional -> below maintenance)
     let mut p1 = P0;
@@ -518,30 +419,12 @@ fn r1_world_with(asset1_drops: usize) -> World2 {
 fn g9_r1_barrier_on_the_first_leg_no_longer_blocks_the_crank_when_another_leg_is_liquidatable() {
     let mut w = r1_world();
     let c0 = cert(&w.t);
-    eprintln!(
-        "R1 cert: equity={} mm={} deficit={}",
-        c0.certified_equity, c0.certified_maintenance_req, c0.certified_liq_deficit
-    );
-    assert!(
-        c0.valid && c0.certified_liq_deficit != 0,
-        "T must be below maintenance"
-    );
-    assert_eq!(
-        w.m[0].engine.pending_domain_loss_barrier_long.get(),
-        1,
-        "barrier still pending"
-    );
-    let legs: Vec<_> =
-        w.t.legs
-            .iter()
-            .map(|l| l.try_to_runtime().unwrap())
-            .filter(|l| l.active)
-            .collect();
+    eprintln!("R1 cert: equity={} mm={} deficit={}", c0.certified_equity, c0.certified_maintenance_req, c0.certified_liq_deficit);
+    assert!(c0.valid && c0.certified_liq_deficit != 0, "T must be below maintenance");
+    assert_eq!(w.m[0].engine.pending_domain_loss_barrier_long.get(), 1, "barrier still pending");
+    let legs: Vec<_> = w.t.legs.iter().map(|l| l.try_to_runtime().unwrap()).filter(|l| l.active).collect();
     assert_eq!(legs.len(), 2);
-    assert_eq!(
-        legs[0].asset_index, 0,
-        "slot 0 holds the asset-0 (barrier) leg"
-    );
+    assert_eq!(legs[0].asset_index, 0, "slot 0 holds the asset-0 (barrier) leg");
 
     // The public crank (the ONLY liquidation entry the wrapper exposes, tag 5) selects
     // Liquidate { asset 0 } and is refused.
@@ -555,11 +438,7 @@ fn g9_r1_barrier_on_the_first_leg_no_longer_blocks_the_crank_when_another_leg_is
         Ok(AutoCrankPlanV16::Liquidate { asset_index: 1 }),
         "crank liquidates the unblocked leg"
     );
-    assert_eq!(
-        w.m[0].engine.pending_domain_loss_barrier_long.get(),
-        1,
-        "the barrier is untouched"
-    );
+    assert_eq!(w.m[0].engine.pending_domain_loss_barrier_long.get(), 1, "the barrier is untouched");
 
     // The same account IS liquidatable on its other leg: the engine kernel accepts asset 1.
     let (mut h, mut m, mut t) = snapshot;
@@ -578,22 +457,13 @@ fn g9_r1_barrier_on_the_first_leg_no_longer_blocks_the_crank_when_another_leg_is
     // progress, the barrier stays until `max_close_slot` and the market goes to Recovery.
     let mut w = r1_world();
     let r = auto_crank(&mut w.h, &mut w.m, &mut w.s2);
-    eprintln!(
-        "R1 crank S2 (bankrupt close owner): {:?}",
-        r.as_ref().map(|x| x.selected)
-    );
-    eprintln!(
-        "R1 barrier after S2 crank: long={}",
-        w.m[0].engine.pending_domain_loss_barrier_long.get()
-    );
+    eprintln!("R1 crank S2 (bankrupt close owner): {:?}", r.as_ref().map(|x| x.selected));
+    eprintln!("R1 barrier after S2 crank: long={}", w.m[0].engine.pending_domain_loss_barrier_long.get());
     if w.m[0].engine.pending_domain_loss_barrier_long.get() == 0 {
         refresh(&mut w.h, &mut w.m, &mut w.t, 0).unwrap();
         let before = abs_basis_total(&w.t);
         let r = auto_crank(&mut w.h, &mut w.m, &mut w.t);
-        eprintln!(
-            "R1 crank T after the barrier cleared: {:?}",
-            r.as_ref().map(|x| x.selected)
-        );
+        eprintln!("R1 crank T after the barrier cleared: {:?}", r.as_ref().map(|x| x.selected));
         assert!(matches!(r, Ok(ref x) if matches!(x.selected, AutoCrankPlanV16::Liquidate { .. })));
         assert!(abs_basis_total(&w.t) < before);
     }
@@ -602,12 +472,7 @@ fn g9_r1_barrier_on_the_first_leg_no_longer_blocks_the_crank_when_another_leg_is
 /// R1 control: same world without the barrier (S2 solvent): the crank liquidates.
 #[test]
 fn g9_r1_control_without_barrier_the_crank_liquidates() {
-    let c = Cfg {
-        n: 2,
-        fee_bps: 0,
-        min_liq_abs: 0,
-        lifetime: 1_000,
-    };
+    let c = Cfg { n: 2, fee_bps: 0, min_liq_abs: 0, lifetime: 1_000 };
     let (mut h, mut m) = market(c).expect("config");
     let mut t = account(10);
     let mut cp = account(11);
@@ -633,10 +498,7 @@ fn g9_r1_control_without_barrier_the_crank_liquidates() {
     // Upstream #176 (a5e0de73), merged into F-LIVE-1's selector: with no barrier both legs are
     // unblocked, so the crank picks the higher ADL-effective notional, not slot 0. Asset 1
     // (2 units after 5 x -4.9%, ~1.56 x P0) outweighs asset 0 (1 unit after 4 x +4.9%, ~1.21 x P0).
-    assert!(matches!(
-        r.selected,
-        AutoCrankPlanV16::Liquidate { asset_index: 1 }
-    ));
+    assert!(matches!(r.selected, AutoCrankPlanV16::Liquidate { asset_index: 1 }));
     assert!(abs_basis_total(&t) < before);
 }
 
@@ -649,25 +511,15 @@ fn g9_r1_control_without_barrier_the_crank_liquidates() {
 
 const E7_INS_DOMAIN: usize = 1;
 
-fn e7_fixture(
-    capital: u128,
-    insurance: u128,
-) -> Option<(Header, Markets, PortfolioAccountV16Account)> {
-    let (mut h, mut m) = market(Cfg {
-        n: 1,
-        fee_bps: 50,
-        min_liq_abs: 2,
-        lifetime: 100,
-    })
-    .expect("E7 config");
+fn e7_fixture(capital: u128, insurance: u128) -> Option<(Header, Markets, PortfolioAccountV16Account)> {
+    let (mut h, mut m) = market(Cfg { n: 1, fee_bps: 50, min_liq_abs: 2, lifetime: 100 }).expect("E7 config");
     let mut t = account(10);
     let mut cp = account(11);
     deposit(&mut h, &mut m, &mut t, capital);
     deposit(&mut h, &mut m, &mut cp, 1_000_000);
     {
         let mut g = MarketGroupV16ViewMut::new(&mut h, &mut m);
-        g.deposit_domain_insurance_not_atomic(E7_INS_DOMAIN, insurance)
-            .ok()?;
+        g.deposit_domain_insurance_not_atomic(E7_INS_DOMAIN, insurance).ok()?;
     }
     trade(&mut h, &mut m, &mut t, &mut cp, 0, 2 * UNIT_Q, P0).ok()?;
     let mut p = P0;
@@ -682,30 +534,18 @@ fn e7_fixture(
         let mut v = PortfolioV16ViewMut::new(&mut t);
         g.permissionless_crank_not_atomic(
             &mut v,
-            PermissionlessCrankRequestV16 {
-                now_slot,
-                asset_index: 0,
-                effective_price: p,
-                funding_rate_e9: 0,
-                action: PermissionlessCrankActionV16::Refresh,
-            },
+            PermissionlessCrankRequestV16 { now_slot, asset_index: 0, effective_price: p, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh },
         )
         .unwrap();
     }
-    assert!(
-        cert(&t).valid && t.stale_state == 0 && t.b_stale_state == 0,
-        "one refresh must suffice"
-    );
+    assert!(cert(&t).valid && t.stale_state == 0 && t.b_stale_state == 0, "one refresh must suffice");
     Some((h, m, t))
 }
 
 #[test]
 fn g9_e7_native_twin_of_the_kani_fixture() {
     let mut seen = std::collections::BTreeSet::new();
-    for &capital in &[
-        1_000u128, 2_000, 2_001, 2_500, 2_798, 2_799, 2_800, 3_000, 3_500, 4_000, 4_400, 4_519,
-        4_520, 4_600, 6_000,
-    ] {
+    for &capital in &[1_000u128, 2_000, 2_001, 2_500, 2_798, 2_799, 2_800, 3_000, 3_500, 4_000, 4_400, 4_519, 4_520, 4_600, 6_000] {
         for &ins in &[0u128, 300, 5_000] {
             let Some((mut h, mut m, mut t)) = e7_fixture(capital, ins) else {
                 seen.insert("open refused (below IM)");
@@ -732,31 +572,14 @@ fn g9_e7_native_twin_of_the_kani_fixture() {
             let out = r.expect("below maintenance must liquidate");
             assert!(out.closed_q >= 1 && abs_basis_total(&t) < pos0);
             assert!(active_legs(&t) == 0 || c1.certified_liq_deficit == 0);
-            if active_legs(&t) != 0 {
-                seen.insert("partial");
-            } else {
-                seen.insert("full");
-            }
-            if c0.certified_equity < 0 {
-                seen.insert("bankrupt");
-            }
-            if out.insurance_used > 0 {
-                seen.insert("insurance");
-            }
-            if out.residual_booked + out.explicit_loss > 0 {
-                seen.insert("residual");
-            }
+            if active_legs(&t) != 0 { seen.insert("partial"); } else { seen.insert("full"); }
+            if c0.certified_equity < 0 { seen.insert("bankrupt"); }
+            if out.insurance_used > 0 { seen.insert("insurance"); }
+            if out.residual_booked + out.explicit_loss > 0 { seen.insert("residual"); }
         }
     }
     eprintln!("E7 branches: {seen:?}");
-    for b in [
-        "healthy refused",
-        "partial",
-        "full",
-        "bankrupt",
-        "insurance",
-        "residual",
-    ] {
+    for b in ["healthy refused", "partial", "full", "bankrupt", "insurance", "residual"] {
         assert!(seen.contains(b), "fixture never reaches {b}");
     }
 }
@@ -772,10 +595,7 @@ fn g9_e7_native_twin_of_the_kani_fixture() {
 #[test]
 fn g9_f_live_1_red_crank_liquidates_a_below_maintenance_account_with_a_liquidatable_leg() {
     let mut w = r1_world();
-    assert!(
-        cert(&w.t).certified_liq_deficit != 0,
-        "precondition: below maintenance"
-    );
+    assert!(cert(&w.t).certified_liq_deficit != 0, "precondition: below maintenance");
     let before = abs_basis_total(&w.t);
     let r = auto_crank(&mut w.h, &mut w.m, &mut w.t);
     assert!(
@@ -800,12 +620,7 @@ struct World3 {
 }
 
 fn r2_world() -> World3 {
-    let c = Cfg {
-        n: 3,
-        fee_bps: 0,
-        min_liq_abs: 0,
-        lifetime: 1_000,
-    };
+    let c = Cfg { n: 3, fee_bps: 0, min_liq_abs: 0, lifetime: 1_000 };
     let (mut h, mut m) = market(c).expect("config");
     let mut t = account(20);
     let mut cp = account(21);
@@ -830,19 +645,8 @@ fn r2_world() -> World3 {
     }
     // L2's terminal trade: sells its long back to SS at the mark -> residual, SHORT barrier on asset 0
     trade(&mut h, &mut m, &mut ss, &mut l2, 0, unit, p0).expect("L2 terminal close");
-    assert!(
-        l2.close_progress
-            .try_to_runtime()
-            .unwrap()
-            .residual_remaining
-            > 0,
-        "L2 holds a pending bankrupt close"
-    );
-    assert_eq!(
-        m[0].engine.pending_domain_loss_barrier_short.get(),
-        1,
-        "the short barrier on asset 0 is up"
-    );
+    assert!(l2.close_progress.try_to_runtime().unwrap().residual_remaining > 0, "L2 holds a pending bankrupt close");
+    assert_eq!(m[0].engine.pending_domain_loss_barrier_short.get(), 1, "the short barrier on asset 0 is up");
     assert_eq!(m[0].engine.pending_domain_loss_barrier_long.get(), 0);
     // assets 1 and 2 fall 5 x 4.9%: T is below maintenance
     let (mut p1, mut p2) = (P0, P0);
@@ -873,33 +677,18 @@ fn leg_basis_for_asset(a: &PortfolioAccountV16Account, asset: u32) -> i128 {
 fn g9_livefix_r2_short_barrier_three_legs_crank_liquidates_the_riskiest_unblocked_leg() {
     let mut w = r2_world();
     let c0 = cert(&w.t);
-    eprintln!(
-        "R2 cert: equity={} mm={} deficit={}",
-        c0.certified_equity, c0.certified_maintenance_req, c0.certified_liq_deficit
-    );
-    assert!(
-        c0.valid && c0.certified_liq_deficit != 0,
-        "T must be below maintenance"
-    );
-    let legs: Vec<_> =
-        w.t.legs
-            .iter()
-            .map(|l| l.try_to_runtime().unwrap())
-            .filter(|l| l.active)
-            .collect();
+    eprintln!("R2 cert: equity={} mm={} deficit={}", c0.certified_equity, c0.certified_maintenance_req, c0.certified_liq_deficit);
+    assert!(c0.valid && c0.certified_liq_deficit != 0, "T must be below maintenance");
+    let legs: Vec<_> = w.t.legs.iter().map(|l| l.try_to_runtime().unwrap()).filter(|l| l.active).collect();
     assert_eq!(legs.len(), 3);
-    assert_eq!(
-        legs[0].asset_index, 0,
-        "slot 0 holds the asset-0 (barrier) leg"
-    );
+    assert_eq!(legs[0].asset_index, 0, "slot 0 holds the asset-0 (barrier) leg");
     // the kernel itself refuses the barrier leg (the barrier is intentional and stays)
     {
         let mut probe = (w.h, w.m.clone(), w.t);
         let mut g = MarketGroupV16ViewMut::new(&mut probe.0, &mut probe.1);
         let mut v = PortfolioV16ViewMut::new(&mut probe.2);
         assert_eq!(
-            g.liquidate_account_not_atomic(&mut v, LiquidationRequestV16 { asset_index: 0 })
-                .map(|_| ()),
+            g.liquidate_account_not_atomic(&mut v, LiquidationRequestV16 { asset_index: 0 }).map(|_| ()),
             Err(V16Error::LockActive),
             "a direct liquidation of the barrier leg is still refused"
         );
@@ -914,25 +703,10 @@ fn g9_livefix_r2_short_barrier_three_legs_crank_liquidates_the_riskiest_unblocke
             && matches!(x.outcome, AutoCrankOutcomeV16::Progressed(_))),
         "public crank must liquidate the riskiest unblocked leg: {r:?}"
     );
-    assert_eq!(
-        leg_basis_for_asset(&w.t, 0),
-        basis0,
-        "the barrier leg is not touched"
-    );
-    assert!(
-        leg_basis_for_asset(&w.t, 2).unsigned_abs() < basis2.unsigned_abs(),
-        "asset-2 leg reduced"
-    );
-    assert_eq!(
-        w.m[0].engine.pending_domain_loss_barrier_short.get(),
-        1,
-        "the barrier stays up"
-    );
-    assert_eq!(
-        w.h.vault.get(),
-        vault_before,
-        "no external value moves (fee 0)"
-    );
+    assert_eq!(leg_basis_for_asset(&w.t, 0), basis0, "the barrier leg is not touched");
+    assert!(leg_basis_for_asset(&w.t, 2).unsigned_abs() < basis2.unsigned_abs(), "asset-2 leg reduced");
+    assert_eq!(w.m[0].engine.pending_domain_loss_barrier_short.get(), 1, "the barrier stays up");
+    assert_eq!(w.h.vault.get(), vault_before, "no external value moves (fee 0)");
     // keep cranking (keeper loop) until T is healthy or only the barrier leg is left
     for _ in 0..8 {
         if cert(&w.t).valid && cert(&w.t).certified_liq_deficit == 0 {
@@ -947,10 +721,7 @@ fn g9_livefix_r2_short_barrier_three_legs_crank_liquidates_the_riskiest_unblocke
         if leg_basis_for_asset(&w.t, 1) == 0 && leg_basis_for_asset(&w.t, 2) == 0 {
             break;
         }
-        assert!(
-            r.is_ok(),
-            "a later crank on an unblocked leg must not be refused: {r:?}"
-        );
+        assert!(r.is_ok(), "a later crank on an unblocked leg must not be refused: {r:?}");
     }
     let _ = &w.l2;
 }
@@ -961,12 +732,7 @@ fn g9_livefix_r2_short_barrier_three_legs_crank_liquidates_the_riskiest_unblocke
 /// over asset 0 (1 unit at ~0.82 x P0) and asset 1 (1 unit at ~0.78 x P0).
 #[test]
 fn g9_livefix_r2_control_without_barrier_selects_the_riskiest_leg() {
-    let c = Cfg {
-        n: 3,
-        fee_bps: 0,
-        min_liq_abs: 0,
-        lifetime: 1_000,
-    };
+    let c = Cfg { n: 3, fee_bps: 0, min_liq_abs: 0, lifetime: 1_000 };
     let (mut h, mut m) = market(c).expect("config");
     let mut t = account(20);
     let mut cp = account(21);
@@ -990,11 +756,7 @@ fn g9_livefix_r2_control_without_barrier_selects_the_riskiest_leg() {
     refresh(&mut h, &mut m, &mut t, 0).unwrap();
     assert!(cert(&t).certified_liq_deficit != 0);
     let r = auto_crank(&mut h, &mut m, &mut t).expect("crank liquidates");
-    assert_eq!(
-        r.selected,
-        AutoCrankPlanV16::Liquidate { asset_index: 2 },
-        "riskiest liquidatable leg (#176)"
-    );
+    assert_eq!(r.selected, AutoCrankPlanV16::Liquidate { asset_index: 2 }, "riskiest liquidatable leg (#176)");
 }
 
 /// R3 fallback: when EVERY liquidatable leg is behind a barrier the selector falls back to the
@@ -1003,12 +765,7 @@ fn g9_livefix_r2_control_without_barrier_selects_the_riskiest_leg() {
 /// asset 0 reverses after the barrier went up.
 #[test]
 fn g9_livefix_r3_all_legs_behind_barriers_still_refused_without_state_change() {
-    let c = Cfg {
-        n: 2,
-        fee_bps: 0,
-        min_liq_abs: 0,
-        lifetime: 1_000,
-    };
+    let c = Cfg { n: 2, fee_bps: 0, min_liq_abs: 0, lifetime: 1_000 };
     let (mut h, mut m) = market(c).expect("config");
     let mut t = account(30);
     let mut cp = account(31);
@@ -1035,36 +792,18 @@ fn g9_livefix_r3_all_legs_behind_barriers_still_refused_without_state_change() {
     }
     refresh(&mut h, &mut m, &mut t, 0).unwrap();
     let c0 = cert(&t);
-    eprintln!(
-        "R3 cert: equity={} mm={} deficit={}",
-        c0.certified_equity, c0.certified_maintenance_req, c0.certified_liq_deficit
-    );
-    assert!(
-        c0.valid && c0.certified_liq_deficit != 0,
-        "T must be below maintenance"
-    );
-    assert_eq!(
-        m[0].engine.pending_domain_loss_barrier_long.get(),
-        1,
-        "barrier still pending"
-    );
+    eprintln!("R3 cert: equity={} mm={} deficit={}", c0.certified_equity, c0.certified_maintenance_req, c0.certified_liq_deficit);
+    assert!(c0.valid && c0.certified_liq_deficit != 0, "T must be below maintenance");
+    assert_eq!(m[0].engine.pending_domain_loss_barrier_long.get(), 1, "barrier still pending");
     let before = (h, m.clone(), t);
     let r = auto_crank(&mut h, &mut m, &mut t);
     eprintln!("R3 auto-crank: {r:?}");
-    assert_eq!(
-        r.map(|x| x.selected),
-        Err(V16Error::LockActive),
-        "unchanged refusal on the barrier leg"
-    );
+    assert_eq!(r.map(|x| x.selected), Err(V16Error::LockActive), "unchanged refusal on the barrier leg");
     // no state change on the refusal, so the SVM rollback is a no-op (compare raw bytes)
     assert_eq!(bytes_of(&before.2), bytes_of(&t), "account unchanged");
     assert_eq!(bytes_of(&before.0), bytes_of(&h), "header unchanged");
     for i in 0..m.len() {
-        assert_eq!(
-            bytes_of(&before.1[i].engine),
-            bytes_of(&m[i].engine),
-            "asset {i} unchanged"
-        );
+        assert_eq!(bytes_of(&before.1[i].engine), bytes_of(&m[i].engine), "asset {i} unchanged");
     }
 }
 
@@ -1084,21 +823,9 @@ fn bytes_of<T: Copy>(v: &T) -> Vec<u8> {
 fn g9_livefix_r4_bankrupt_account_with_barrier_leg_is_reduced_on_its_unblocked_leg() {
     let mut w = r1_world_with(12);
     let c0 = cert(&w.t);
-    eprintln!(
-        "R4 cert: equity={} mm={} deficit={} capital={} pnl={} lock={}",
-        c0.certified_equity,
-        c0.certified_maintenance_req,
-        c0.certified_liq_deficit,
-        w.t.capital.get(),
-        w.t.pnl.get(),
-        w.t.liquidation_lock
-    );
+    eprintln!("R4 cert: equity={} mm={} deficit={} capital={} pnl={} lock={}", c0.certified_equity, c0.certified_maintenance_req, c0.certified_liq_deficit, w.t.capital.get(), w.t.pnl.get(), w.t.liquidation_lock);
     assert!(c0.valid && c0.certified_equity < 0, "T must be bankrupt");
-    assert_eq!(
-        w.m[0].engine.pending_domain_loss_barrier_long.get(),
-        1,
-        "barrier still pending"
-    );
+    assert_eq!(w.m[0].engine.pending_domain_loss_barrier_long.get(), 1, "barrier still pending");
     let basis0 = leg_basis_for_asset(&w.t, 0);
     let basis1 = leg_basis_for_asset(&w.t, 1);
     let insurance_before = w.h.insurance.get();
@@ -1108,23 +835,8 @@ fn g9_livefix_r4_bankrupt_account_with_barrier_leg_is_reduced_on_its_unblocked_l
     assert_eq!(r.selected, AutoCrankPlanV16::Liquidate { asset_index: 1 });
     assert!(matches!(r.outcome, AutoCrankOutcomeV16::Progressed(_)));
     assert_eq!(mode(&w.h), 0, "no Recovery declared");
-    assert!(
-        leg_basis_for_asset(&w.t, 1).unsigned_abs() < basis1.unsigned_abs(),
-        "asset-1 leg reduced"
-    );
-    assert_eq!(
-        leg_basis_for_asset(&w.t, 0),
-        basis0,
-        "the barrier leg is not touched"
-    );
-    assert_eq!(
-        w.m[0].engine.pending_domain_loss_barrier_long.get(),
-        1,
-        "the barrier stays up"
-    );
-    assert_eq!(
-        w.h.insurance.get(),
-        insurance_before,
-        "no insurance consumed on the lock path"
-    );
+    assert!(leg_basis_for_asset(&w.t, 1).unsigned_abs() < basis1.unsigned_abs(), "asset-1 leg reduced");
+    assert_eq!(leg_basis_for_asset(&w.t, 0), basis0, "the barrier leg is not touched");
+    assert_eq!(w.m[0].engine.pending_domain_loss_barrier_long.get(), 1, "the barrier stays up");
+    assert_eq!(w.h.insurance.get(), insurance_before, "no insurance consumed on the lock path");
 }

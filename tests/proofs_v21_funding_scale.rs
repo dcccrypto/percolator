@@ -108,11 +108,7 @@ fn proof_v21_settlement_discharges_laggard_with_its_cohort_member() {
     assert!(t.laggard_count <= settled.stale_account_count_long);
     assert_eq!(
         t.laggard_count,
-        if snap < d.gen_epoch {
-            d.laggard_count - 1
-        } else {
-            d.laggard_count
-        }
+        if snap < d.gen_epoch { d.laggard_count - 1 } else { d.laggard_count }
     );
     assert_eq!(
         settled.stale_account_count_long,
@@ -120,14 +116,8 @@ fn proof_v21_settlement_discharges_laggard_with_its_cohort_member() {
     );
     assert!(t.stale_weight <= d.stale_weight);
     assert!(t.laggard_weight <= d.laggard_weight);
-    assert_eq!(
-        (t.gen_epoch, t.drift_gen, t.drift_prior),
-        (d.gen_epoch, d.drift_gen, d.drift_prior)
-    );
+    assert_eq!((t.gen_epoch, t.drift_gen, t.drift_prior), (d.gen_epoch, d.drift_gen, d.drift_prior));
     kani::cover!(snap < d.gen_epoch, "a laggard settles");
-    kani::cover!(
-        snap >= d.gen_epoch && snap < kf_epoch,
-        "a non-laggard stale leg settles"
-    );
+    kani::cover!(snap >= d.gen_epoch && snap < kf_epoch, "a non-laggard stale leg settles");
     kani::cover!(snap == kf_epoch, "a current leg is a no-op");
 }

@@ -40,12 +40,7 @@ fn account(seed: u8) -> PortfolioAccountV16Account {
 }
 
 fn req(size_q: i128, exec_price: u64, fee_bps: u64) -> TradeRequestV16 {
-    TradeRequestV16 {
-        asset_index: 0,
-        size_q,
-        exec_price,
-        fee_bps,
-    }
+    TradeRequestV16 { asset_index: 0, size_q, exec_price, fee_bps }
 }
 
 struct World {
@@ -63,18 +58,10 @@ impl World {
         let (mut long, mut short) = (account(11), account(12));
         {
             let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut long), cap)
-                .unwrap();
-            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut short), cap)
-                .unwrap();
+            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut long), cap).unwrap();
+            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut short), cap).unwrap();
         }
-        World {
-            header,
-            markets,
-            long,
-            short,
-            deposited: 2 * cap,
-        }
+        World { header, markets, long, short, deposited: 2 * cap }
     }
 
     /// one fill, long is the taker when size > 0. Returns total fee charged.
@@ -91,35 +78,21 @@ impl World {
     fn trade(&mut self, size_q: i128, price: u64, fee_bps: u64) -> u128 {
         self.try_trade(size_q, price, fee_bps).expect("trade fills")
     }
-    fn vault(&self) -> u128 {
-        self.header.vault.get()
-    }
-    fn c_tot(&self) -> u128 {
-        self.header.c_tot.get()
-    }
-    fn ins(&self) -> u128 {
-        self.header.insurance.get()
-    }
+    fn vault(&self) -> u128 { self.header.vault.get() }
+    fn c_tot(&self) -> u128 { self.header.c_tot.get() }
+    fn ins(&self) -> u128 { self.header.insurance.get() }
     fn oi(&self) -> (u128, u128) {
         let a = &self.markets[0].engine.asset;
         (a.oi_eff_long_q.get(), a.oi_eff_short_q.get())
     }
-    fn caps(&self) -> (u128, u128) {
-        (self.long.capital.get(), self.short.capital.get())
-    }
-    fn pnls(&self) -> (i128, i128) {
-        (self.long.pnl.get(), self.short.pnl.get())
-    }
+    fn caps(&self) -> (u128, u128) { (self.long.capital.get(), self.short.capital.get()) }
+    fn pnls(&self) -> (i128, i128) { (self.long.pnl.get(), self.short.pnl.get()) }
     /// V == deposits, V >= C + I, C + I == deposits (no leak in either direction), shape ok
     fn assert_conserved(&mut self) {
         assert_eq!(self.vault(), self.deposited, "vault moved");
         let (lc, sc) = self.caps();
         assert_eq!(self.c_tot(), lc + sc, "c_tot != sum of capitals");
-        assert_eq!(
-            self.c_tot() + self.ins(),
-            self.deposited,
-            "capital + insurance != deposits"
-        );
+        assert_eq!(self.c_tot() + self.ins(), self.deposited, "capital + insurance != deposits");
         MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets)
             .validate_shape()
             .unwrap();
@@ -166,18 +139,7 @@ fn tiny_trade_fee_bps_zero_is_the_only_free_setting() {
     assert_eq!(w.ins(), 0);
     w.assert_conserved();
     // and with a nonzero fee bps no (size, price) pair in this grid is free
-    let sizes = [
-        1u128,
-        2,
-        3,
-        9,
-        10,
-        99,
-        1_000,
-        POS_SCALE - 1,
-        POS_SCALE,
-        POS_SCALE + 1,
-    ];
+    let sizes = [1u128, 2, 3, 9, 10, 99, 1_000, POS_SCALE - 1, POS_SCALE, POS_SCALE + 1];
     let prices = [1u64, 2, 3, 7, 100, 999_999, 1_000_000, 123_456_789];
     for &p in &prices {
         for &s in &sizes {
@@ -201,14 +163,7 @@ fn tiny_trade_fee_bps_at_the_cap_and_one_over_is_refused_for_dust() {
 #[test]
 fn tiny_trade_split_sweep_never_pays_less_than_the_single_trade() {
     let prices = [1u64, 3, 100, 999_999, 1_000_000];
-    let totals = [
-        1u128,
-        5,
-        1_000,
-        POS_SCALE / 7,
-        POS_SCALE,
-        3 * POS_SCALE + 11,
-    ];
+    let totals = [1u128, 5, 1_000, POS_SCALE / 7, POS_SCALE, 3 * POS_SCALE + 11];
     let splits = [1u128, 2, 3, 10, 100, 997];
     let bps = [1u64, 3, 10];
     for &p in &prices {
@@ -224,18 +179,10 @@ fn tiny_trade_split_sweep_never_pays_less_than_the_single_trade() {
                     let mut w = World::new(p, 10, BIG);
                     let mut paid = 0u128;
                     for i in 0..n {
-                        let s = if i + 1 == n {
-                            total - part * (n - 1)
-                        } else {
-                            part
-                        };
+                        let s = if i + 1 == n { total - part * (n - 1) } else { part };
                         paid += w.trade(s as i128, p, b);
                     }
-                    assert_eq!(
-                        w.oi().0,
-                        total,
-                        "position lost atoms: p {p} total {total} n {n}"
-                    );
+                    assert_eq!(w.oi().0, total, "position lost atoms: p {p} total {total} n {n}");
                     assert!(
                         paid >= single,
                         "split saved fee: p {p} total {total} bps {b} n {n}: {paid} < {single}"
@@ -269,17 +216,9 @@ fn tiny_trade_fee_is_charged_to_the_taker_whichever_side_it_is() {
     let mut w = World::new(1, 1, BIG);
     let (l0, s0) = w.caps();
     w.trade(1, 1, 1);
-    assert_eq!(
-        w.caps(),
-        (l0 - 1, s0),
-        "long taker pays, short maker does not"
-    );
+    assert_eq!(w.caps(), (l0 - 1, s0), "long taker pays, short maker does not");
     w.trade(-1, 1, 1);
-    assert_eq!(
-        w.caps(),
-        (l0 - 1, s0 - 1),
-        "short taker pays, long maker does not"
-    );
+    assert_eq!(w.caps(), (l0 - 1, s0 - 1), "short taker pays, long maker does not");
     let (lc, sc) = w.caps();
     for _ in 0..50 {
         w.trade(1, 1, 1); // long taker
@@ -302,11 +241,7 @@ fn round_trips(n: u128, size: i128, price: u64, bps: u64) {
         paid += w.trade(-size, price, bps);
     }
     let per = model_fee(size as u128, price, bps);
-    assert_eq!(
-        paid,
-        2 * n * per,
-        "fee per fill drifted: n {n} size {size} price {price}"
-    );
+    assert_eq!(paid, 2 * n * per, "fee per fill drifted: n {n} size {size} price {price}");
     assert_eq!(w.ins(), paid);
     assert_eq!(w.oi(), (0, 0), "dust position left after {n} round trips");
     assert_eq!(w.pnls(), (0, 0), "round trip at the mark moved pnl");
@@ -324,13 +259,7 @@ fn tiny_trade_round_trips_one_to_ten_thousand_conserve_value_with_fee() {
 
 #[test]
 fn tiny_trade_round_trips_at_odd_sizes_and_prices_conserve_value() {
-    for (size, price) in [
-        (1i128, 1u64),
-        (3, 7),
-        (999_999, 1),
-        (333_333, 3),
-        (1, 999_999),
-    ] {
+    for (size, price) in [(1i128, 1u64), (3, 7), (999_999, 1), (333_333, 3), (1, 999_999)] {
         for n in [1u128, 10, 300] {
             round_trips(n, size, price, 3);
         }
@@ -392,11 +321,7 @@ fn tiny_trade_off_mark_fills_never_credit_the_pair_more_than_deposited() {
         assert_eq!(w.oi(), (0, 0));
         let (lp, sp) = w.pnls();
         let total = lc as i128 + sc as i128 + lp + sp + w.ins() as i128;
-        assert!(
-            total <= w.deposited as i128,
-            "off {off}: pair+insurance grew by {}",
-            total - w.deposited as i128
-        );
+        assert!(total <= w.deposited as i128, "off {off}: pair+insurance grew by {}", total - w.deposited as i128);
         assert_eq!(w.vault(), w.deposited);
     }
 }

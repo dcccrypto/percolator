@@ -9,9 +9,9 @@
 //! Run: `cargo test --test backing_buckets_edge`.
 
 use percolator::{
-    adjust_slot_provider_principal, BackingBucketStatusV16, BackingBucketV16,
-    EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
-    V16Config, V16Error, V16PodU128, V16PodU64, BOUND_SCALE,
+    adjust_slot_provider_principal, BackingBucketStatusV16, BackingBucketV16, EngineAssetSlotV16Account,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, V16Config, V16Error, V16PodU128,
+    V16PodU64, BOUND_SCALE,
 };
 
 type Fixture = (MarketGroupV16HeaderAccount, Vec<Market<u64>>);
@@ -59,13 +59,11 @@ fn deposit(f: &mut Fixture, domain: usize, amount: u128, expiry: u64) -> Result<
 }
 
 fn earn(f: &mut Fixture, domain: usize, amount: u128) -> Result<(), V16Error> {
-    MarketGroupV16ViewMut::new(&mut f.0, &mut f.1)
-        .credit_backing_provider_earnings_not_atomic(domain, amount)
+    MarketGroupV16ViewMut::new(&mut f.0, &mut f.1).credit_backing_provider_earnings_not_atomic(domain, amount)
 }
 
 fn expire(f: &mut Fixture, domain: usize, now: u64) -> Result<(), V16Error> {
-    MarketGroupV16ViewMut::new(&mut f.0, &mut f.1)
-        .expire_source_backing_bucket_not_atomic(domain, now)
+    MarketGroupV16ViewMut::new(&mut f.0, &mut f.1).expire_source_backing_bucket_not_atomic(domain, now)
 }
 
 /// Earnings are senior to backing principal (`validate_header_aggregate_totals`), so crediting
@@ -95,10 +93,7 @@ fn backing_deposit_out_of_range_domain_is_invalid_leg() {
     let mut f = fixture();
     // one asset => domains 0 and 1 only
     assert_eq!(deposit(&mut f, 2, 5, 100), Err(V16Error::InvalidLeg));
-    assert_eq!(
-        deposit(&mut f, usize::MAX, 5, 100),
-        Err(V16Error::InvalidLeg)
-    );
+    assert_eq!(deposit(&mut f, usize::MAX, 5, 100), Err(V16Error::InvalidLeg));
     assert_eq!(f.0.vault.get(), 0);
 }
 
@@ -123,10 +118,7 @@ fn backing_deposit_max_amount_overflows_on_scaling_and_leaves_state_clean() {
     assert_eq!(r, Err(V16Error::ArithmeticOverflow));
     // largest amount whose scaled value still fits is MAX / BOUND_SCALE; one above must fail
     let too_big = u128::MAX / BOUND_SCALE + 1;
-    assert_eq!(
-        deposit(&mut f, 0, too_big, 100),
-        Err(V16Error::ArithmeticOverflow)
-    );
+    assert_eq!(deposit(&mut f, 0, too_big, 100), Err(V16Error::ArithmeticOverflow));
     assert_eq!(f.0.vault.get(), 0);
     assert_eq!(bucket(&f.1, 0).status, BackingBucketStatusV16::Empty);
     assert_eq!(principal(&f.1, 0), 0);
@@ -152,16 +144,10 @@ fn backing_deposit_repeated_same_expiry_accumulates_exactly() {
         deposit(&mut f, 0, amt, 100).unwrap();
         total += amt;
         assert_eq!(f.0.vault.get(), total);
-        assert_eq!(
-            bucket(&f.1, 0).fresh_unliened_backing_num,
-            total * BOUND_SCALE
-        );
+        assert_eq!(bucket(&f.1, 0).fresh_unliened_backing_num, total * BOUND_SCALE);
         assert_eq!(principal(&f.1, 0), total * BOUND_SCALE);
         assert_eq!(reserved(&f.1, 0), total * BOUND_SCALE);
-        assert_eq!(
-            f.0.source_fresh_backing_total_num.get(),
-            total * BOUND_SCALE
-        );
+        assert_eq!(f.0.source_fresh_backing_total_num.get(), total * BOUND_SCALE);
     }
 }
 
@@ -193,10 +179,7 @@ fn backing_deposit_vault_overflow_is_refused() {
     let mut f = fixture();
     f.0.vault = V16PodU128::new(u128::MAX);
     let r = deposit(&mut f, 0, 1, 100);
-    assert!(
-        r.is_err(),
-        "vault at u128::MAX must not accept a deposit, got {r:?}"
-    );
+    assert!(r.is_err(), "vault at u128::MAX must not accept a deposit, got {r:?}");
 }
 
 // ---------------------------------------------------------------- earnings
@@ -279,10 +262,7 @@ fn backing_earnings_accumulate_and_do_not_move_vault_or_principal() {
     assert_eq!(f.0.backing_provider_earnings_total.get(), 10);
     assert_eq!(f.0.vault.get(), vault);
     assert_eq!(principal(&f.1, 0), p);
-    assert_eq!(
-        bucket(&f.1, 0).fresh_unliened_backing_num,
-        100 * BOUND_SCALE
-    );
+    assert_eq!(bucket(&f.1, 0).fresh_unliened_backing_num, 100 * BOUND_SCALE);
 }
 
 #[test]
@@ -405,9 +385,7 @@ fn backing_expire_after_earnings_keeps_earnings_total_consistent() {
     earn(&mut f, 0, 2).unwrap();
     expire(&mut f, 0, 100).unwrap();
     // header total must equal the sum over buckets (validate_shape checks it)
-    MarketGroupV16ViewMut::new(&mut f.0, &mut f.1)
-        .validate_shape()
-        .unwrap();
+    MarketGroupV16ViewMut::new(&mut f.0, &mut f.1).validate_shape().unwrap();
     assert_eq!(
         f.0.backing_provider_earnings_total.get(),
         bucket(&f.1, 0).utilization_fee_earnings
@@ -420,12 +398,7 @@ fn backing_expire_after_earnings_keeps_earnings_total_consistent() {
 fn backing_vault_equals_sum_of_deposits_through_full_cycle() {
     let mut f = fixture();
     let mut sum = 0u128;
-    for (d, amt, exp) in [
-        (0usize, 5u128, 100u64),
-        (1, 7, 150),
-        (0, 11, 100),
-        (1, 3, 150),
-    ] {
+    for (d, amt, exp) in [(0usize, 5u128, 100u64), (1, 7, 150), (0, 11, 100), (1, 3, 150)] {
         deposit(&mut f, d, amt, exp).unwrap();
         sum += amt;
         assert_eq!(f.0.vault.get(), sum);
@@ -433,9 +406,7 @@ fn backing_vault_equals_sum_of_deposits_through_full_cycle() {
             f.0.source_fresh_backing_total_num.get(),
             bucket(&f.1, 0).fresh_unliened_backing_num + bucket(&f.1, 1).fresh_unliened_backing_num
         );
-        MarketGroupV16ViewMut::new(&mut f.0, &mut f.1)
-            .validate_shape()
-            .unwrap();
+        MarketGroupV16ViewMut::new(&mut f.0, &mut f.1).validate_shape().unwrap();
     }
     fund_vault(&mut f, 4);
     sum += 4;
@@ -444,9 +415,7 @@ fn backing_vault_equals_sum_of_deposits_through_full_cycle() {
     expire(&mut f, 1, 150).unwrap();
     assert_eq!(f.0.vault.get(), sum);
     assert_eq!(f.0.source_fresh_backing_total_num.get(), 0);
-    MarketGroupV16ViewMut::new(&mut f.0, &mut f.1)
-        .validate_shape()
-        .unwrap();
+    MarketGroupV16ViewMut::new(&mut f.0, &mut f.1).validate_shape().unwrap();
 }
 
 // ---------------------------------------------------------------- adjust_slot_provider_principal
