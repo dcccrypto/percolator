@@ -21,8 +21,8 @@
 use percolator::{
     EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
     PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
-    ProvenanceHeaderV16Account, SideV16, TradeRequestV16, V16Config, V16PodI128, V16PodU128,
-    POS_SCALE,
+    ProvenanceHeaderV16Account, SideV16, TradeRequestV16, V16Config, V16PodI128,
+    POS_SCALE, PUBLIC_B_CHUNK_ATOMS,
 };
 
 fn market_id() -> [u8; 32] {
@@ -52,8 +52,9 @@ fn activated_market() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
 
 #[test]
 fn f02_second_chunk_books_fresh_residual_not_stale_ledger() {
-    const CHUNK_CAP: u128 = 1_000_000;
-    const OPENING_RESIDUAL: u128 = 3_000_000; // > CHUNK_CAP, so the ledger stays open
+    // The public B chunk is the constant PUBLIC_B_CHUNK_ATOMS, so the opening residual must
+    // genuinely exceed it for the close to span more than one chunk.
+    const OPENING_RESIDUAL: u128 = 3 * PUBLIC_B_CHUNK_ATOMS;
     const FRESH_RESIDUAL: u128 = 1_000; // the debt left after a mid-close settlement
 
     let (mut header, mut markets) = activated_market();
@@ -81,8 +82,6 @@ fn f02_second_chunk_books_fresh_residual_not_stale_ledger() {
         )
         .unwrap();
     }
-
-    // Cap a single chunk far below the opening residual so the close spans >1 chunk.
 
     // Taker (long) is the bankrupt side; the loss-bearing side is short (the maker).
     let bankrupt_side = SideV16::Long;
@@ -112,6 +111,18 @@ fn f02_second_chunk_books_fresh_residual_not_stale_ledger() {
             booked1 + explicit1 > 0 && booked1 + explicit1 <= OPENING_RESIDUAL,
             "chunk 1 should book a bounded, non-zero amount (got {})",
             booked1 + explicit1
+        );
+        // Multi-chunk precondition: chunk 1 is capped at the public chunk, so the ledger is
+        // left open with residual remaining (without this the test would pass vacuously).
+        assert_eq!(
+            booked1 + explicit1,
+            PUBLIC_B_CHUNK_ATOMS,
+            "chunk 1 must be capped at PUBLIC_B_CHUNK_ATOMS"
+        );
+        let ledger = t.header.close_progress.try_to_runtime().unwrap();
+        assert!(
+            ledger.active && !ledger.finalized && ledger.residual_remaining > 0,
+            "a pending close ledger must remain open after chunk 1"
         );
     }
 
