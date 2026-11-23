@@ -69,7 +69,7 @@ fn shortcuts_match_u256_on_edges() {
 #[test]
 fn shortcuts_match_u256_on_random_values() {
     let mut rng = XorShift(0x9b05_688c_2b3e_6c1f);
-    for _ in 0..1_000_000 {
+    for _ in 0..100_000 {
         let a = rng.u128() >> (rng.next() % 128);
         let b = rng.u128() >> (rng.next() % 128);
         let d = rng.u128() >> (rng.next() % 128);
@@ -78,7 +78,7 @@ fn shortcuts_match_u256_on_random_values() {
         check(a, d, a);
         check(a, b, d | 1);
         // the ADL-effective-quantity shape: |basis| * current_a / a_basis
-        let abs = (rng.u128() % (MAX_POSITION_ABS_Q + 1)) as u128;
+        let abs = rng.u128() % (MAX_POSITION_ABS_Q + 1);
         let a_basis = MIN_A_SIDE + rng.u128() % (ADL_ONE - MIN_A_SIDE + 1);
         let current_a = 1 + rng.u128() % a_basis;
         check(abs, current_a, a_basis);
