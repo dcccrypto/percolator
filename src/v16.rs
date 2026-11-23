@@ -28423,11 +28423,6 @@ pub struct PortfolioLegV16Account {
     pub rent_carry: V16PodU64,
 }
 
-/// The account encoding of `PortfolioLegV16::EMPTY` (pinned by a unit test).
-/// v2.2 CU: an empty slot is recognised with one byte comparison instead of a
-/// field-by-field decode; any other bytes still take the full decode below,
-/// so every decode error is unchanged.
-/// (Same construct, same names, as v2.2 Wave B `feat/v22-band-rent`, so the two merge as one.)
 /// `leg.is_empty()` for a slot whose `try_to_runtime()` returned `leg`, read from the raw
 /// bytes: the decode is one-to-one (bools and side accept 0/1 only, everything else is a Pod
 /// read, no padding) and `PORTFOLIO_LEG_V16_EMPTY_ACCOUNT` encodes `PortfolioLegV16::EMPTY`, so
@@ -28443,6 +28438,11 @@ pub fn decoded_leg_slot_is_empty_for_test(raw: &PortfolioLegV16Account) -> bool 
     decoded_leg_slot_is_empty(raw)
 }
 
+/// The account encoding of `PortfolioLegV16::EMPTY` (pinned by a unit test).
+/// v2.2 CU: an empty slot is recognised with one byte comparison instead of a
+/// field-by-field decode; any other bytes still take the full decode below,
+/// so every decode error is unchanged.
+/// (Same construct, same names, as v2.2 Wave B `feat/v22-band-rent`, so the two merge as one.)
 pub const PORTFOLIO_LEG_V16_EMPTY_ACCOUNT: PortfolioLegV16Account = PortfolioLegV16Account {
     active: 0,
     asset_index: V16PodU32 { bytes: [0; 4] },
