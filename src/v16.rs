@@ -15222,7 +15222,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset_index: usize,
     ) -> V16Result<()> {
         let config = self.header.config.try_to_runtime_shape()?;
-        let price = self.asset_state(asset_index)?.effective_price;
+        let price = self.asset_state_wire(asset_index)?.effective_price.get();
         let long_principal = Self::increased_initial_margin_principal(
             config,
             trade_preflight.long_old_abs_q,
@@ -17797,14 +17797,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn require_asset_accruable(&self, asset_index: usize) -> V16Result<()> {
-        match self.asset_state(asset_index)?.lifecycle {
+        match decode_asset_lifecycle(self.asset_state_wire(asset_index)?.lifecycle)? {
             AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => Ok(()),
             _ => Err(V16Error::LockActive),
         }
     }
 
     fn require_asset_mark_pushable(&self, asset_index: usize) -> V16Result<()> {
-        match self.asset_state(asset_index)?.lifecycle {
+        match decode_asset_lifecycle(self.asset_state_wire(asset_index)?.lifecycle)? {
             AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => Ok(()),
             _ => Err(V16Error::LockActive),
         }
@@ -17913,7 +17913,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 }
                 prior += 1;
             }
-            changed |= self.asset_state(asset_index)?.raw_oracle_target_price != target;
+            changed |= self.asset_state_wire(asset_index)?.raw_oracle_target_price.get() != target;
             i += 1;
         }
 
@@ -19305,7 +19305,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if let Some(asset_index) = released_obligation_asset {
                 self.validate_unconfigured_market_tail()?;
                 let advanced =
-                    if self.asset_state(asset_index)?.lifecycle == AssetLifecycleV16::Recovery {
+                    if decode_asset_lifecycle(self.asset_state_wire(asset_index)?.lifecycle)?
+                        == AssetLifecycleV16::Recovery
+                    {
                         self.forfeit_recovery_leg_not_atomic(
                             account,
                             asset_index,
@@ -19396,7 +19398,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 // the first supplied observation to give the refresh a price.
                 let (ai, obs) = match asset_index {
                     Some(i) => {
-                        if self.asset_state(i)?.lifecycle == AssetLifecycleV16::Recovery {
+                        if decode_asset_lifecycle(self.asset_state_wire(i)?.lifecycle)?
+                            == AssetLifecycleV16::Recovery
+                        {
                             return Ok(AutoCrankResultV16 {
                                 selected: plan,
                                 outcome: AutoCrankOutcomeV16::Progressed(
@@ -19712,7 +19716,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         self.validate_unconfigured_market_tail()?;
         if now_slot < self.header.current_slot.get()
-            || self.asset_state(asset_index)?.lifecycle != AssetLifecycleV16::Recovery
+            || decode_asset_lifecycle(self.asset_state_wire(asset_index)?.lifecycle)?
+                != AssetLifecycleV16::Recovery
             || Self::active_leg_slot_for_asset(&account.as_view(), asset_index)?.is_none()
         {
             return Err(V16Error::NonProgress);
@@ -19910,10 +19915,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if self.header.config.band_bps.get() == 0 || cap == 0 {
             return Ok(false);
         }
-        let asset = self.asset_state(asset_index)?;
+        let asset = self.asset_state_wire(asset_index)?;
         let count = match side {
-            SideV16::Long => asset.stored_pos_count_long,
-            SideV16::Short => asset.stored_pos_count_short,
+            SideV16::Long => asset.stored_pos_count_long.get(),
+            SideV16::Short => asset.stored_pos_count_short.get(),
         };
         Ok(count >= cap)
     }
@@ -19954,6 +19959,91 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.markets[asset_index].engine.asset.try_to_runtime()
     }
 
+    /// `asset_state` without building the 54-field runtime value: the same bounds check and
+    /// the same validation errors (`validate_wire_only`), for readers that need a few raw fields.
+    fn asset_state_wire(&self, asset_index: usize) -> V16Result<&AssetStateV16Account> {
+        if asset_index >= self.header.config.max_market_slots.get() as usize
+            || asset_index >= self.markets.len()
+        {
+            return Err(V16Error::InvalidLeg);
+        }
+        let asset = &self.markets[asset_index].engine.asset;
+        asset.validate_wire_only()?;
+        Ok(asset)
+    }
+
+    /// Test hook for tests/asset_state_wire_readers.rs (`--features fuzz`): each reader that
+    /// moved to `asset_state_wire`, next to its old body on the full `asset_state` decode. Returns
+    /// (new, old) pairs as debug strings so the test can compare whole `Result`s.
+    #[cfg(all(not(kani), feature = "fuzz"))]
+    pub fn asset_wire_readers_vs_reference_for_test(
+        &self,
+        asset_index: usize,
+    ) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)> {
+        use alloc::format;
+        let mut out = alloc::vec::Vec::new();
+        out.push((
+            format!("{:?}", self.require_asset_risk_change_allowed(asset_index, true)),
+            format!(
+                "{:?}",
+                self.asset_state(asset_index).and_then(|asset| {
+                    if asset.a_long != ADL_ONE || asset.a_short != ADL_ONE {
+                        return Err(V16Error::AdlReduceOnly);
+                    }
+                    asset_risk_increase_gate(asset.lifecycle, asset.mode_long, asset.mode_short)
+                })
+            ),
+        ));
+        out.push((
+            format!("{:?}", self.require_asset_live_reducible(asset_index)),
+            format!(
+                "{:?}",
+                self.asset_state(asset_index).and_then(|asset| match asset.lifecycle {
+                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => Ok(()),
+                    _ => Err(V16Error::LockActive),
+                })
+            ),
+        ));
+        for side in [SideV16::Long, SideV16::Short] {
+            out.push((
+                format!("{:?}", self.side_mode_for(asset_index, side)),
+                format!(
+                    "{:?}",
+                    self.asset_state(asset_index).map(|asset| match side {
+                        SideV16::Long => asset.mode_long,
+                        SideV16::Short => asset.mode_short,
+                    })
+                ),
+            ));
+            let cap = self.header.config.band_max_positions_per_side.get();
+            out.push((
+                format!("{:?}", self.band_side_is_full(asset_index, side)),
+                format!(
+                    "{:?}",
+                    if self.header.config.band_bps.get() == 0 || cap == 0 {
+                        Ok(false)
+                    } else {
+                        self.asset_state(asset_index).map(|asset| {
+                            (match side {
+                                SideV16::Long => asset.stored_pos_count_long,
+                                SideV16::Short => asset.stored_pos_count_short,
+                            }) >= cap
+                        })
+                    }
+                ),
+            ));
+        }
+        out.push((
+            format!("{:?}", self.asset_has_target_effective_lag(asset_index)),
+            format!(
+                "{:?}",
+                self.asset_state(asset_index)
+                    .map(|asset| asset.raw_oracle_target_price != asset.effective_price)
+            ),
+        ));
+        out
+    }
+
     fn set_asset_state(&mut self, asset_index: usize, asset: AssetStateV16) -> V16Result<()> {
         if asset_index >= self.header.config.max_market_slots.get() as usize
             || asset_index >= self.markets.len()
@@ -19986,12 +20076,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !risk_increasing {
             return Ok(());
         }
-        let asset = self.asset_state(asset_index)?;
-        if asset.a_long != ADL_ONE || asset.a_short != ADL_ONE {
+        let asset = self.asset_state_wire(asset_index)?;
+        if asset.a_long.get() != ADL_ONE || asset.a_short.get() != ADL_ONE {
             // P2b E7: distinct from LockActive so clients can say "close-only (ADL)".
             return Err(V16Error::AdlReduceOnly);
         }
-        asset_risk_increase_gate(asset.lifecycle, asset.mode_long, asset.mode_short)
+        asset_risk_increase_gate(
+            decode_asset_lifecycle(asset.lifecycle)?,
+            decode_side_mode(asset.mode_long)?,
+            decode_side_mode(asset.mode_short)?,
+        )
     }
 
     fn require_position_route_adl_safe(
@@ -20166,8 +20260,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn require_asset_live_reducible(&self, asset_index: usize) -> V16Result<()> {
-        let asset = self.asset_state(asset_index)?;
-        match asset.lifecycle {
+        let asset = self.asset_state_wire(asset_index)?;
+        match decode_asset_lifecycle(asset.lifecycle)? {
             AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => Ok(()),
             _ => Err(V16Error::LockActive),
         }
@@ -20273,8 +20367,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn side_mode_for(&self, asset_index: usize, side: SideV16) -> V16Result<SideModeV16> {
-        let asset = self.asset_state(asset_index)?;
-        Ok(match side {
+        let asset = self.asset_state_wire(asset_index)?;
+        decode_side_mode(match side {
             SideV16::Long => asset.mode_long,
             SideV16::Short => asset.mode_short,
         })
@@ -20664,8 +20758,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn asset_has_target_effective_lag(&self, asset_index: usize) -> V16Result<bool> {
-        let asset = self.asset_state(asset_index)?;
-        Ok(asset.raw_oracle_target_price != asset.effective_price)
+        let asset = self.asset_state_wire(asset_index)?;
+        Ok(asset.raw_oracle_target_price.get() != asset.effective_price.get())
     }
 
     fn asset_is_loss_stale(&self, asset_index: usize) -> V16Result<bool> {
@@ -21583,7 +21677,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if asset_index < self.header.config.max_market_slots.get() as usize
             && V16Core::kernel_open_close_snapshot_is_stale(
                 Self::active_leg_slot_for_asset(account, asset_index)?.is_some(),
-                self.asset_state(asset_index)?.slot_last,
+                self.asset_state_wire(asset_index)?.slot_last.get(),
                 ledger.drift_reference_slot,
             )
         {
@@ -22171,15 +22265,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     fn begin_zero_oi_residue_resets(&mut self, asset_index: usize) -> V16Result<()> {
         self.drop_unowned_side_oi(asset_index)?;
-        let asset = self.asset_state(asset_index)?;
-        let reset_long = asset.oi_eff_long_q == 0
-            && asset.pending_obligation_count_long == 0
-            && asset.mode_long != SideModeV16::ResetPending
-            && (asset.stored_pos_count_long != 0 || asset.a_long != ADL_ONE);
-        let reset_short = asset.oi_eff_short_q == 0
-            && asset.pending_obligation_count_short == 0
-            && asset.mode_short != SideModeV16::ResetPending
-            && (asset.stored_pos_count_short != 0 || asset.a_short != ADL_ONE);
+        let asset = self.asset_state_wire(asset_index)?;
+        let (mode_long, mode_short) =
+            (decode_side_mode(asset.mode_long)?, decode_side_mode(asset.mode_short)?);
+        let reset_long = asset.oi_eff_long_q.get() == 0
+            && asset.pending_obligation_count_long.get() == 0
+            && mode_long != SideModeV16::ResetPending
+            && (asset.stored_pos_count_long.get() != 0 || asset.a_long.get() != ADL_ONE);
+        let reset_short = asset.oi_eff_short_q.get() == 0
+            && asset.pending_obligation_count_short.get() == 0
+            && mode_short != SideModeV16::ResetPending
+            && (asset.stored_pos_count_short.get() != 0 || asset.a_short.get() != ADL_ONE);
         if reset_long {
             self.begin_full_drain_reset_inner(asset_index, SideV16::Long)?;
         }
@@ -23364,8 +23460,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::InvalidConfig);
         }
-        let asset = self.asset_state(asset_index)?;
-        if asset.raw_oracle_target_price != asset.effective_price {
+        let asset = self.asset_state_wire(asset_index)?;
+        if asset.raw_oracle_target_price.get() != asset.effective_price.get() {
             let cert = self.compute_account_health_cert_with_price_override(
                 &account.as_view(),
                 false,
