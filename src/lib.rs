@@ -165,6 +165,10 @@ pub use v16::source_domain_tail_is_zero_for_test;
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::bound_num_is_atom_aligned_for_test;
 
+// Raw-byte emptiness of a decoded leg slot vs. PortfolioLegV16::is_empty (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::decoded_leg_slot_is_empty_for_test;
+
 // Source-domain compaction skip predicate vs. the full compaction (differential test only).
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::{compact_source_domain_table_for_test, source_domain_table_already_compact_for_test};

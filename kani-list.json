@@ -57,6 +57,7 @@
       "proof_v16_credit_account_from_insurance_is_value_neutral_and_pool_isolated",
       "proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus",
       "proof_v16_cross_account_source_support_sum_capped_by_shared_backing",
+      "proof_v16_decoded_leg_is_empty_matches_encoding",
       "proof_v16_detached_refresh_leg_skips_post_refresh_accrual",
       "proof_v16_domain_insurance_budget_delta_cannot_overallocate_pooled_insurance",
       "proof_v16_domain_insurance_deposit_updates_o1_remaining_total",
@@ -347,7 +348,7 @@
   "contract-harnesses": {},
   "contracts": [],
   "totals": {
-    "standard-harnesses": 333,
+    "standard-harnesses": 334,
     "contract-harnesses": 0,
     "functions-under-contract": 0
   }

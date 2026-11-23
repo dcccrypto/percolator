@@ -20926,6 +20926,32 @@ fn proof_v16_asset_wire_only_validation_matches_full_decode() {
     assert_eq!(asset.validate_wire_only().err(), full.err());
 }
 
+/// For every leg image that decodes, the decoded leg is empty exactly when the raw image is the
+/// empty encoding, so `validate_with_market` / the refresh loop can test the raw bytes instead of
+/// the 22 decoded fields. `active == 1` images are not decoded here (that would run
+/// `validate_active_leg`'s wide arithmetic): there `leg.active` is true, so `is_empty()` is false,
+/// and `is_empty_encoding()` is false because it requires `active == 0`.
+#[kani::proof]
+#[kani::unwind(220)]
+#[kani::solver(cadical)]
+fn proof_v16_decoded_leg_is_empty_matches_encoding() {
+    let image: [u8; core::mem::size_of::<PortfolioLegV16Account>()] = kani::any();
+    let leg: PortfolioLegV16Account = bytemuck::pod_read_unaligned(&image);
+    if leg.active == 1 {
+        kani::cover!(true, "active image");
+        assert!(!leg.is_empty_encoding());
+        return;
+    }
+    match leg.try_to_runtime() {
+        Ok(decoded) => {
+            kani::cover!(decoded.is_empty(), "inactive image that decodes");
+            let raw_empty = percolator::v16::decoded_leg_slot_is_empty_for_test(&leg);
+            assert_eq!(decoded.is_empty(), raw_empty);
+        }
+        Err(_) => kani::cover!(!leg.is_empty_encoding(), "inactive non-empty image is refused"),
+    }
+}
+
 // INV-045 (program charter): the path accrual moves the mark toward its target by at most
 // `anchor * cap` per slot, the anchor being the mark when the current target took effect. A staged
 // target that changes therefore restarts the anchor (`fund_px_last`) at the effective price, as the

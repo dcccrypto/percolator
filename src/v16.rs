@@ -7666,7 +7666,7 @@ impl<'a> PortfolioV16View<'a> {
             let bit = active_bitmap_get(bitmap, slot);
             let leg = self.header.legs[slot].try_to_runtime()?;
             if slot >= active_leg_cap {
-                if bit || !leg.is_empty() {
+                if bit || !decoded_leg_slot_is_empty(&self.header.legs[slot]) {
                     return Err(V16Error::HiddenLeg);
                 }
                 slot += 1;
@@ -7676,7 +7676,7 @@ impl<'a> PortfolioV16View<'a> {
                 return Err(V16Error::HiddenLeg);
             }
             if !leg.active {
-                if !leg.is_empty() {
+                if !decoded_leg_slot_is_empty(&self.header.legs[slot]) {
                     return Err(V16Error::HiddenLeg);
                 }
                 slot += 1;
@@ -18636,7 +18636,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let leg = account.header.legs[slot].try_to_runtime()?;
             let bit = active_bitmap_get(bitmap, slot);
             if slot >= active_leg_cap {
-                if bit || !leg.is_empty() {
+                if bit || !decoded_leg_slot_is_empty(&account.header.legs[slot]) {
                     return Err(V16Error::HiddenLeg);
                 }
                 slot += 1;
@@ -18646,7 +18646,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 return Err(V16Error::HiddenLeg);
             }
             if !leg.active {
-                if !leg.is_empty() {
+                if !decoded_leg_slot_is_empty(&account.header.legs[slot]) {
                     return Err(V16Error::HiddenLeg);
                 }
                 slot += 1;
@@ -29267,6 +29267,21 @@ pub struct PortfolioLegV16Account {
     pub band_liq_pending: u8,
     pub rent_snap: V16PodU128,
     pub rent_carry: V16PodU64,
+}
+
+/// `leg.is_empty()` for a slot whose `try_to_runtime()` returned `leg`, read from the raw
+/// bytes: the decode is one-to-one (bools and side accept 0/1 only, everything else is a Pod
+/// read, no padding) and `PORTFOLIO_LEG_V16_EMPTY_ACCOUNT` encodes `PortfolioLegV16::EMPTY`, so
+/// this is one memcmp instead of 22 field compares. Only valid after a successful decode.
+/// Pinned by `proof_v16_decoded_leg_is_empty_matches_encoding` and tests/leg_is_empty_encoding.rs.
+#[inline(always)]
+fn decoded_leg_slot_is_empty(raw: &PortfolioLegV16Account) -> bool {
+    raw.is_empty_encoding()
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn decoded_leg_slot_is_empty_for_test(raw: &PortfolioLegV16Account) -> bool {
+    decoded_leg_slot_is_empty(raw)
 }
 
 /// The account encoding of `PortfolioLegV16::EMPTY` (pinned by a unit test).
