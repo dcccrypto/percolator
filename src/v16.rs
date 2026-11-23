@@ -8614,6 +8614,35 @@ impl PositionSlotMapV16 {
                 out.assets[slot] = leg.asset_index;
                 out.positions[slot] = signed_position(leg);
                 out.a_basis[slot] = leg.a_basis;
+            } else if leg.active || !decoded_leg_slot_is_empty(&account.header.legs[slot]) {
+                return Err(V16Error::HiddenLeg);
+            }
+            slot += 1;
+        }
+        Ok(out)
+    }
+
+    /// The pre-change loop (`!leg.is_empty()` on the decoded leg), kept verbatim as the reference
+    /// for tests/position_slot_map_from_account.rs.
+    #[cfg(all(not(kani), feature = "fuzz"))]
+    fn from_account_reference(account: &PortfolioV16View<'_>) -> V16Result<Self> {
+        let mut out = Self {
+            assets: [u32::MAX; V16_MAX_PORTFOLIO_ASSETS_N],
+            positions: [0; V16_MAX_PORTFOLIO_ASSETS_N],
+            a_basis: [0; V16_MAX_PORTFOLIO_ASSETS_N],
+        };
+        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let in_bitmap = active_bitmap_get(bitmap, slot);
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if in_bitmap {
+                if !leg.active || out.assets[..slot].contains(&leg.asset_index) {
+                    return Err(V16Error::HiddenLeg);
+                }
+                out.assets[slot] = leg.asset_index;
+                out.positions[slot] = signed_position(leg);
+                out.a_basis[slot] = leg.a_basis;
             } else if leg.active || !leg.is_empty() {
                 return Err(V16Error::HiddenLeg);
             }
@@ -29282,6 +29311,18 @@ fn decoded_leg_slot_is_empty(raw: &PortfolioLegV16Account) -> bool {
 #[cfg(any(kani, feature = "fuzz"))]
 pub fn decoded_leg_slot_is_empty_for_test(raw: &PortfolioLegV16Account) -> bool {
     decoded_leg_slot_is_empty(raw)
+}
+
+/// Test hook for tests/position_slot_map_from_account.rs (`--features fuzz`): the slot map built
+/// from `account` by the production loop and by the pre-change reference, as debug strings.
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub fn position_slot_map_from_account_vs_reference_for_test(
+    account: &PortfolioV16View<'_>,
+) -> (alloc::string::String, alloc::string::String) {
+    (
+        alloc::format!("{:?}", PositionSlotMapV16::from_account(account)),
+        alloc::format!("{:?}", PositionSlotMapV16::from_account_reference(account)),
+    )
 }
 
 /// The account encoding of `PortfolioLegV16::EMPTY` (pinned by a unit test).

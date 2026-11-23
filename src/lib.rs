@@ -176,3 +176,7 @@ pub use v16::{compact_source_domain_table_for_test, source_domain_table_already_
 // u128 mul-div cancelled-factor shortcut (differential test only).
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::mul_div_cancelled_factor_for_test;
+
+// PositionSlotMapV16::from_account vs. its pre-change loop (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::position_slot_map_from_account_vs_reference_for_test;
