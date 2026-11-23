@@ -143,3 +143,7 @@ pub use v16::STRESS_ENVELOPE_TRIGGER_BPS_E9;
 // Source-domain all-zero tail check (test only).
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::source_domain_tail_is_zero_for_test;
+
+// Atom-alignment check without u128 modulo vs. `% BOUND_SCALE` (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::bound_num_is_atom_aligned_for_test;
