@@ -2552,6 +2552,59 @@ impl V16Core {
         Ok((account_claim_bound_num, source))
     }
 
+    /// PRODUCTION KERNEL (bankruptcy residual, the size of one booking step): how many
+    /// atoms of a bankruptcy residual one step may book onto the opposite side's B
+    /// index. The step is at most the residual and at most the configured chunk. It
+    /// takes that whole chunk when booking it moves the index (`delta_b >= 1`) without
+    /// overflowing it; otherwise it takes the largest chunk the index can still absorb
+    /// (`(b_headroom + 1) * weight_sum - 1 - remainder`, in units of `1 /
+    /// SOCIAL_LOSS_DEN`), which can be zero. A side with no loss weight takes nothing.
+    /// Pure scalar; `bankruptcy_residual_single_step_capacity` calls exactly this
+    /// after reading the side's B index, weight sum and remainder.
+    #[inline(always)]
+    pub(crate) fn kernel_bankruptcy_residual_step_capacity(
+        b_now: u128,
+        weight_sum: u128,
+        rem: u128,
+        residual_remaining: u128,
+        chunk_atoms: u128,
+    ) -> V16Result<u128> {
+        if residual_remaining == 0 || weight_sum == 0 {
+            return Ok(0);
+        }
+        // the chunk is capped by the residual AND the per-call public cap
+        let candidate = residual_remaining.min(chunk_atoms);
+        if candidate != 0 {
+            if let Some(delta_b) = candidate
+                .checked_mul(SOCIAL_LOSS_DEN)
+                .and_then(|v| v.checked_add(rem))
+                .map(|v| v / weight_sum)
+            {
+                if delta_b != 0 && b_now.checked_add(delta_b).is_some() {
+                    return Ok(candidate);
+                }
+            }
+        }
+        let headroom_plus_one = U256::from_u128(u128::MAX - b_now)
+            .checked_add(U256::ONE)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let max_scaled = headroom_plus_one
+            .checked_mul(U256::from_u128(weight_sum))
+            .and_then(|v| v.checked_sub(U256::ONE))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if U256::from_u128(rem) > max_scaled {
+            return Ok(0);
+        }
+        let max_chunk_by_b_wide = max_scaled
+            .checked_sub(U256::from_u128(rem))
+            .and_then(|v| v.checked_div(U256::from_u128(SOCIAL_LOSS_DEN)))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let max_chunk_by_b = max_chunk_by_b_wide
+            .try_into_u128()
+            .unwrap_or(residual_remaining);
+        Ok(residual_remaining.min(max_chunk_by_b).min(chunk_atoms))
+    }
+
     /// PRODUCTION KERNEL (B settlement, one bounded step of a leg's share of a
     /// bankruptcy residual): the side's B index has moved from the leg's snapshot
     /// `b_snap` to `target`; the leg owes `loss_weight` times the move, in units of
@@ -22135,41 +22188,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 asset.social_loss_remainder_short_num,
             ),
         };
-        if weight_sum == 0 {
-            return Ok(0);
-        }
-        let candidate = residual_remaining.min(self.header.config.public_b_chunk_atoms.get());
-        if candidate != 0 {
-            if let Some(delta_b) = candidate
-                .checked_mul(SOCIAL_LOSS_DEN)
-                .and_then(|v| v.checked_add(rem))
-                .map(|v| v / weight_sum)
-            {
-                if delta_b != 0 && b_now.checked_add(delta_b).is_some() {
-                    return Ok(candidate);
-                }
-            }
-        }
-        let headroom_plus_one = U256::from_u128(u128::MAX - b_now)
-            .checked_add(U256::ONE)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let max_scaled = headroom_plus_one
-            .checked_mul(U256::from_u128(weight_sum))
-            .and_then(|v| v.checked_sub(U256::ONE))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if U256::from_u128(rem) > max_scaled {
-            return Ok(0);
-        }
-        let max_chunk_by_b_wide = max_scaled
-            .checked_sub(U256::from_u128(rem))
-            .and_then(|v| v.checked_div(U256::from_u128(SOCIAL_LOSS_DEN)))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let max_chunk_by_b = max_chunk_by_b_wide
-            .try_into_u128()
-            .unwrap_or(residual_remaining);
-        Ok(residual_remaining
-            .min(max_chunk_by_b)
-            .min(self.header.config.public_b_chunk_atoms.get()))
+        // PRODUCTION KERNEL: the largest step the residual, the chunk and the index allow.
+        V16Core::kernel_bankruptcy_residual_step_capacity(
+            b_now,
+            weight_sum,
+            rem,
+            residual_remaining,
+            self.header.config.public_b_chunk_atoms.get(),
+        )
     }
 
     #[cfg(kani)]
