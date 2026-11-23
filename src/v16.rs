@@ -6627,8 +6627,9 @@ impl<'a> PortfolioV16View<'a> {
             seen[seen_count] = d_u32;
             seen_count += 1;
             let asset_index = d / 2;
-            let asset = market.markets[asset_index].engine.asset.try_to_runtime()?;
-            if source.source_claim_market_id.get() != asset.market_id {
+            let asset = &market.markets[asset_index].engine.asset;
+            asset.validate_wire_only()?;
+            if source.source_claim_market_id.get() != asset.market_id.get() {
                 return Err(V16Error::HiddenLeg);
             }
             let slot = market.markets[asset_index].engine_slot();
@@ -8968,6 +8969,26 @@ impl AssetStateV16Account {
         }
     }
 
+    /// The fallible steps of `try_to_runtime`, in the same order, without building the
+    /// 54-field runtime value (~350 CU on SBF): for callers that need one or two raw fields.
+    /// `validate_wire_only().err() == try_to_runtime().err()` for every account value
+    /// (tests/asset_state_wire_only.rs); keep the two in step when a fallible field is added.
+    #[inline]
+    pub fn validate_wire_only(&self) -> V16Result<()> {
+        decode_asset_lifecycle(self.lifecycle)?;
+        decode_side_mode(self.mode_long)?;
+        decode_side_mode(self.mode_short)?;
+        validate_non_min_i128(self.k_long.get())?;
+        validate_non_min_i128(self.k_short.get())?;
+        validate_non_min_i128(self.f_long_num.get())?;
+        validate_non_min_i128(self.f_short_num.get())?;
+        validate_non_min_i128(self.k_epoch_start_long.get())?;
+        validate_non_min_i128(self.k_epoch_start_short.get())?;
+        validate_non_min_i128(self.f_epoch_start_long_num.get())?;
+        validate_non_min_i128(self.f_epoch_start_short_num.get())?;
+        Ok(())
+    }
+
     pub fn try_to_runtime(&self) -> V16Result<AssetStateV16> {
         let out = AssetStateV16 {
             market_id: self.market_id.get(),
@@ -9199,12 +9220,14 @@ fn asset_is_loss_stale_at_slot(asset: AssetStateV16, current_slot: u64) -> bool 
 }
 
 fn slot_resolved_payout_blockers_v16(slot: &EngineAssetSlotV16Account) -> V16Result<u64> {
-    let asset = slot.asset.try_to_runtime()?;
+    let asset = &slot.asset;
+    asset.validate_wire_only()?;
     asset
         .stored_pos_count_long
-        .checked_add(asset.stored_pos_count_short)
-        .and_then(|v| v.checked_add(asset.stale_account_count_long))
-        .and_then(|v| v.checked_add(asset.stale_account_count_short))
+        .get()
+        .checked_add(asset.stored_pos_count_short.get())
+        .and_then(|v| v.checked_add(asset.stale_account_count_long.get()))
+        .and_then(|v| v.checked_add(asset.stale_account_count_short.get()))
         .and_then(|v| v.checked_add(slot.pending_domain_loss_barrier_long.get()))
         .and_then(|v| v.checked_add(slot.pending_domain_loss_barrier_short.get()))
         .ok_or(V16Error::CounterOverflow)
@@ -9263,10 +9286,11 @@ impl EngineAssetSlotV16Account {
     }
 
     fn validate_market_id_binding(&self) -> V16Result<()> {
-        let asset = self.asset.try_to_runtime()?;
+        self.asset.validate_wire_only()?;
+        let asset_market_id = self.asset.market_id.get();
         let long_bucket = self.backing_long.try_to_runtime()?;
         let short_bucket = self.backing_short.try_to_runtime()?;
-        if long_bucket.market_id != asset.market_id || short_bucket.market_id != asset.market_id {
+        if long_bucket.market_id != asset_market_id || short_bucket.market_id != asset_market_id {
             return Err(V16Error::InvalidConfig);
         }
         Ok(())

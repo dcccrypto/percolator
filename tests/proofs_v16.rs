@@ -20514,3 +20514,18 @@ fn proof_v16_haircut_b_in_flight_support_bounds() {
         assert_eq!(in_flight, realizable);
     }
 }
+
+/// `AssetStateV16Account::validate_wire_only` (used instead of the full decode by readers that
+/// need only raw fields) fails exactly when `try_to_runtime` fails, with the same error, for every
+/// account image.
+#[kani::proof]
+#[kani::unwind(1024)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_wire_only_validation_matches_full_decode() {
+    let image: [u8; core::mem::size_of::<AssetStateV16Account>()] = kani::any();
+    let asset: AssetStateV16Account = bytemuck::pod_read_unaligned(&image);
+    let full = asset.try_to_runtime();
+    kani::cover!(full.is_ok(), "valid image");
+    kani::cover!(full.is_err(), "invalid image");
+    assert_eq!(asset.validate_wire_only().err(), full.err());
+}
