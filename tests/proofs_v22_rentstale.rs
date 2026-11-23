@@ -44,11 +44,30 @@ fn proof_v22_rentstale_rent_charge_never_creates_or_grows_a_deficit() {
         "a rent charge never creates or grows a deficit"
     );
     if pnl >= 0 {
-        assert_eq!(charged, due.min(capital), "no loss: the full due up to capital");
+        assert_eq!(
+            charged,
+            due.min(capital),
+            "no loss: the full due up to capital"
+        );
     }
-    kani::cover!(pnl < 0 && charged > 0 && charged == due, "loser pays its full rent from loss-free capital");
-    kani::cover!(pnl < 0 && charged > 0 && charged < due, "loser's rent capped at its loss-free capital");
-    kani::cover!(pnl < 0 && due > 0 && charged == 0 && deficit(capital, pnl) > 0, "insolvent: no rent taken");
-    kani::cover!(pnl < 0 && due > 0 && charged == 0 && deficit(capital, pnl) == 0, "exactly loss-owned: no rent");
-    kani::cover!(pnl >= 0 && charged > 0 && charged < due, "no loss: capped at capital");
+    kani::cover!(
+        pnl < 0 && charged > 0 && charged == due,
+        "loser pays its full rent from loss-free capital"
+    );
+    kani::cover!(
+        pnl < 0 && charged > 0 && charged < due,
+        "loser's rent capped at its loss-free capital"
+    );
+    kani::cover!(
+        pnl < 0 && due > 0 && charged == 0 && deficit(capital, pnl) > 0,
+        "insolvent: no rent taken"
+    );
+    kani::cover!(
+        pnl < 0 && due > 0 && charged == 0 && deficit(capital, pnl) == 0,
+        "exactly loss-owned: no rent"
+    );
+    kani::cover!(
+        pnl >= 0 && charged > 0 && charged < due,
+        "no loss: capped at capital"
+    );
 }

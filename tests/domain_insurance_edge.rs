@@ -14,14 +14,18 @@ use percolator::{
 
 fn market_fixture(slots: u32) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
     let cfg = V16Config::public_user_fund_with_market_slots(slots as u16, slots, 0, 10);
-    let mut header =
-        MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, slots, 0).unwrap();
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, slots, 0).unwrap();
     let mut markets = (0..slots)
         .map(|i| Market::new(i as u64, EngineAssetSlotV16Account::default()))
         .collect::<Vec<_>>();
     for i in 0..slots as usize {
         header
-            .activate_empty_asset_slot_not_atomic(i as u32, &mut markets[i].engine, 100, (i + 1) as u64)
+            .activate_empty_asset_slot_not_atomic(
+                i as u32,
+                &mut markets[i].engine,
+                100,
+                (i + 1) as u64,
+            )
             .unwrap();
     }
     {
@@ -32,8 +36,9 @@ fn market_fixture(slots: u32) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>)
 }
 
 fn account_fixture(slots: u32, seed: u8) -> PortfolioAccountV16Account {
-    let header =
-        ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], [seed; 32], [3; 32]));
+    let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        [1; 32], [seed; 32], [3; 32],
+    ));
     let _ = v16_domain_count_for_market_slots(slots).unwrap();
     let mut a = PortfolioAccountV16Account::default();
     a.init_empty_in_place(header).unwrap();
@@ -101,7 +106,9 @@ fn domain_insurance_deposit_to_out_of_range_domain_is_rejected_and_changes_nothi
     let (mut h, mut ms) = market_fixture(1);
     let mut m = MarketGroupV16ViewMut::new(&mut h, &mut ms);
     assert!(m.deposit_domain_insurance_not_atomic(2, 5).is_err());
-    assert!(m.deposit_domain_insurance_not_atomic(usize::MAX, 5).is_err());
+    assert!(m
+        .deposit_domain_insurance_not_atomic(usize::MAX, 5)
+        .is_err());
     assert_eq!(m.header.vault.get(), 0);
     assert_eq!(m.header.insurance.get(), 0);
     assert_conserved(&m);
@@ -138,7 +145,8 @@ fn domain_insurance_deposit_past_vault_tvl_cap_is_rejected() {
 fn domain_insurance_deposit_exactly_to_vault_tvl_cap_is_accepted() {
     let (mut h, mut ms) = market_fixture(1);
     let mut m = MarketGroupV16ViewMut::new(&mut h, &mut ms);
-    m.deposit_domain_insurance_not_atomic(0, percolator::MAX_VAULT_TVL).unwrap();
+    m.deposit_domain_insurance_not_atomic(0, percolator::MAX_VAULT_TVL)
+        .unwrap();
     assert_eq!(m.header.vault.get(), percolator::MAX_VAULT_TVL);
     assert_eq!(
         m.domain_insurance_withdraw_capacity(0),
@@ -211,7 +219,9 @@ fn domain_insurance_credit_u128_max_reports_error_not_wrap() {
     let mut m = MarketGroupV16ViewMut::new(&mut h, &mut ms);
     m.credit_domain_insurance_budget_not_atomic(0, 4).unwrap();
     // 4 + MAX overflows u128: must be an error, never a wrapped small budget.
-    assert!(m.credit_domain_insurance_budget_not_atomic(0, u128::MAX).is_err());
+    assert!(m
+        .credit_domain_insurance_budget_not_atomic(0, u128::MAX)
+        .is_err());
     assert_eq!(m.domain_insurance_budget_remaining(0), Ok(4));
     assert_eq!(m.header.insurance_domain_budget_remaining_total.get(), 4);
 }
@@ -222,7 +232,8 @@ fn domain_insurance_credit_leaves_vault_and_insurance_untouched() {
     h.vault = V16PodU128::new(30);
     h.insurance = V16PodU128::new(30);
     let mut m = MarketGroupV16ViewMut::new(&mut h, &mut ms);
-    m.credit_domain_insurance_budgets_not_atomic(&[(0, 10), (3, 20)]).unwrap();
+    m.credit_domain_insurance_budgets_not_atomic(&[(0, 10), (3, 20)])
+        .unwrap();
     assert_eq!(m.header.vault.get(), 30);
     assert_eq!(m.header.insurance.get(), 30);
     assert_eq!(m.header.insurance_domain_budget_remaining_total.get(), 30);
@@ -237,7 +248,9 @@ fn domain_insurance_credit_batch_order_does_not_change_the_result() {
         h.insurance = V16PodU128::new(20);
         let mut m = MarketGroupV16ViewMut::new(&mut h, &mut ms);
         m.credit_domain_insurance_budgets_not_atomic(order).unwrap();
-        (0..4).map(|d| m.domain_insurance_budget_remaining(d).unwrap()).collect::<Vec<_>>()
+        (0..4)
+            .map(|d| m.domain_insurance_budget_remaining(d).unwrap())
+            .collect::<Vec<_>>()
     };
     let a = run(&[(0, 3), (1, 4), (0, 5), (3, 8)]);
     let b = run(&[(3, 8), (0, 5), (1, 4), (0, 3)]);
@@ -261,7 +274,10 @@ fn domain_insurance_credit_batch_equals_sequence_of_single_credits() {
         b.credit_domain_insurance_budget_not_atomic(d, x).unwrap();
     }
     for d in 0..4 {
-        assert_eq!(a.domain_insurance_budget_remaining(d), b.domain_insurance_budget_remaining(d));
+        assert_eq!(
+            a.domain_insurance_budget_remaining(d),
+            b.domain_insurance_budget_remaining(d)
+        );
     }
     assert_eq!(
         a.header.insurance_domain_budget_remaining_total.get(),
@@ -395,7 +411,8 @@ fn domain_insurance_account_credit_zero_is_a_noop_even_with_no_insurance() {
     let mut ah = account_fixture(1, 9);
     let mut m = MarketGroupV16ViewMut::new(&mut h, &mut ms);
     let mut a = PortfolioV16ViewMut::new(&mut ah);
-    m.credit_account_from_insurance_not_atomic(&mut a, 0, 0).unwrap();
+    m.credit_account_from_insurance_not_atomic(&mut a, 0, 0)
+        .unwrap();
     assert_eq!(a.header.capital.get(), 0);
     assert_eq!(m.header.c_tot.get(), 0);
 }
@@ -429,12 +446,21 @@ fn domain_insurance_account_credit_exactly_unbudgeted_surplus_then_one_more_fail
         Err(V16Error::LockActive)
     );
     assert_eq!(m.header.insurance.get(), 10);
-    m.credit_account_from_insurance_not_atomic(&mut a, 6, 0).unwrap();
+    m.credit_account_from_insurance_not_atomic(&mut a, 6, 0)
+        .unwrap();
     assert_eq!(a.header.capital.get(), 6);
     assert_eq!(m.header.c_tot.get(), 6);
     assert_eq!(m.header.insurance.get(), 4);
-    assert_eq!(m.header.vault.get(), 10, "vault is unchanged: value only moves insurance -> capital");
-    assert_eq!(m.domain_insurance_budget_remaining(0), Ok(4), "budget untouched by reward credit");
+    assert_eq!(
+        m.header.vault.get(),
+        10,
+        "vault is unchanged: value only moves insurance -> capital"
+    );
+    assert_eq!(
+        m.domain_insurance_budget_remaining(0),
+        Ok(4),
+        "budget untouched by reward credit"
+    );
     assert_conserved(&m);
     assert_eq!(
         m.credit_account_from_insurance_not_atomic(&mut a, 1, 0),
@@ -451,7 +477,8 @@ fn domain_insurance_account_credit_repeated_small_credits_equal_one_big_credit()
     let mut m = MarketGroupV16ViewMut::new(&mut h, &mut ms);
     let mut a = PortfolioV16ViewMut::new(&mut ah);
     for _ in 0..100 {
-        m.credit_account_from_insurance_not_atomic(&mut a, 1, 0).unwrap();
+        m.credit_account_from_insurance_not_atomic(&mut a, 1, 0)
+            .unwrap();
     }
     assert_eq!(a.header.capital.get(), 100);
     assert_eq!(m.header.insurance.get(), 0);
@@ -467,7 +494,9 @@ fn domain_insurance_account_credit_u128_max_is_rejected() {
     let mut ah = account_fixture(1, 9);
     let mut m = MarketGroupV16ViewMut::new(&mut h, &mut ms);
     let mut a = PortfolioV16ViewMut::new(&mut ah);
-    assert!(m.credit_account_from_insurance_not_atomic(&mut a, u128::MAX, 0).is_err());
+    assert!(m
+        .credit_account_from_insurance_not_atomic(&mut a, u128::MAX, 0)
+        .is_err());
     assert_eq!(m.header.insurance.get(), 10);
     assert_eq!(a.header.capital.get(), 0);
 }
@@ -491,7 +520,8 @@ fn domain_insurance_account_credit_additional_reserved_boundary() {
         Err(V16Error::LockActive)
     );
     // reserved 9: exactly 1 free.
-    m.credit_account_from_insurance_not_atomic(&mut a, 1, 9).unwrap();
+    m.credit_account_from_insurance_not_atomic(&mut a, 1, 9)
+        .unwrap();
     assert_eq!(m.header.insurance.get(), 9);
 }
 

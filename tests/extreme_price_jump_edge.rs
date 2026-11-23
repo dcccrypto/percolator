@@ -11,8 +11,9 @@
 
 use percolator::{
     EngineAssetSlotV16Account, LiquidationRequestV16, Market, MarketGroupV16HeaderAccount,
-    MarketGroupV16ViewMut, PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
-    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, ProvenanceHeaderV16Account, TradeRequestV16, V16Config, V16Error, V16PodU64, POS_SCALE,
+    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
+    ProvenanceHeaderV16Account, TradeRequestV16, V16Config, V16Error, V16PodU64, POS_SCALE,
 };
 
 const P0: u64 = 1_000_000;
@@ -65,13 +66,24 @@ fn world(move_bps: u64, max_dt: u64, cap: u128) -> World {
         g.execute_trade_with_fee_loss_stale_scoped_not_atomic(
             &mut lv,
             &mut sv,
-            TradeRequestV16 { asset_index: 0, size_q: Q, exec_price: P0, fee_bps: 0 },
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: Q,
+                exec_price: P0,
+                fee_bps: 0,
+            },
             true,
         )
         .unwrap();
     }
     let slot = markets[0].engine.asset.slot_last.get();
-    World { header, markets, long, short, slot }
+    World {
+        header,
+        markets,
+        long,
+        short,
+        slot,
+    }
 }
 
 impl World {
@@ -92,7 +104,11 @@ impl World {
         while self.price() != target {
             let p = self.price();
             let step = (p * STEP_BPS / 10_000).max(1);
-            let next = if target > p { (p + step).min(target) } else { p.saturating_sub(step).max(target) };
+            let next = if target > p {
+                (p + step).min(target)
+            } else {
+                p.saturating_sub(step).max(target)
+            };
             self.jump(1, next);
         }
     }
@@ -102,7 +118,12 @@ impl World {
     fn refresh_both(&mut self) {
         let slot = self.slot;
         let mut g = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-        let price = g.markets[0].engine.asset.try_to_runtime().unwrap().effective_price;
+        let price = g.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .effective_price;
         for acct in [&mut self.long, &mut self.short] {
             let mut v = PortfolioV16ViewMut::new(acct);
             // after a B booking the plain refresh refuses (BStale); a keeper runs the
@@ -157,9 +178,15 @@ impl World {
         let g = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         g.domain_insurance_budget_remaining(d)
     }
-    fn vault(&self) -> u128 { self.header.vault.get() }
-    fn c_tot(&self) -> u128 { self.header.c_tot.get() }
-    fn ins(&self) -> u128 { self.header.insurance.get() }
+    fn vault(&self) -> u128 {
+        self.header.vault.get()
+    }
+    fn c_tot(&self) -> u128 {
+        self.header.c_tot.get()
+    }
+    fn ins(&self) -> u128 {
+        self.header.insurance.get()
+    }
     fn eq(a: &PortfolioAccountV16Account) -> i128 {
         a.capital.get() as i128 + a.pnl.get()
     }
@@ -205,7 +232,10 @@ fn jump_exactly_at_the_cap_passes_and_one_atom_past_is_refused() {
     // cap = 300 bps * 2 slots = 6% of P0
     let mut w = world(STEP_BPS, MAX_DT, BIG);
     let cap = P0 * STEP_BPS * MAX_DT / 10_000;
-    assert_eq!(w.try_jump(MAX_DT, P0 + cap + 1), Err(V16Error::RecoveryRequired));
+    assert_eq!(
+        w.try_jump(MAX_DT, P0 + cap + 1),
+        Err(V16Error::RecoveryRequired)
+    );
     w.jump(MAX_DT, P0 + cap);
     assert_eq!(w.price(), P0 + cap);
     w.assert_sound();
@@ -215,7 +245,10 @@ fn jump_exactly_at_the_cap_passes_and_one_atom_past_is_refused() {
 fn jump_exactly_at_the_cap_down_passes_and_one_atom_past_is_refused() {
     let mut w = world(STEP_BPS, MAX_DT, BIG);
     let cap = P0 * STEP_BPS * MAX_DT / 10_000;
-    assert_eq!(w.try_jump(MAX_DT, P0 - cap - 1), Err(V16Error::RecoveryRequired));
+    assert_eq!(
+        w.try_jump(MAX_DT, P0 - cap - 1),
+        Err(V16Error::RecoveryRequired)
+    );
     w.jump(MAX_DT, P0 - cap);
     assert_eq!(w.price(), P0 - cap);
 }
@@ -248,7 +281,9 @@ fn jump_gap_one_past_max_dt_does_not_widen_the_cap() {
     let mut w = world(STEP_BPS, MAX_DT, BIG);
     let cap = P0 * STEP_BPS * MAX_DT / 10_000;
     // dt = MAX_DT + 1: the move allowed is still capped by MAX_DT, or the call is refused
-    if w.try_jump(MAX_DT + 1, P0 + cap + P0 * STEP_BPS / 10_000).is_ok() {
+    if w.try_jump(MAX_DT + 1, P0 + cap + P0 * STEP_BPS / 10_000)
+        .is_ok()
+    {
         panic!("dt past max_accrual_dt_slots widened the price cap");
     }
     assert_eq!(w.price(), P0);
@@ -306,7 +341,10 @@ fn jump_up_then_down_back_to_start_returns_to_start_equity() {
     // round trip: rounding may cost at most a few atoms per leg, and never mints value
     let (l, s) = (World::eq(&w.long), World::eq(&w.short));
     assert!(l + s <= 2 * BIG as i128, "minted value: {l} + {s}");
-    assert!((l - BIG as i128).abs() <= 8 && (s - BIG as i128).abs() <= 8, "{l} {s}");
+    assert!(
+        (l - BIG as i128).abs() <= 8 && (s - BIG as i128).abs() <= 8,
+        "{l} {s}"
+    );
     w.assert_sound();
 }
 
@@ -320,7 +358,10 @@ fn jump_oscillation_repeated_does_not_leak_or_mint_value() {
     }
     let after = w.total();
     assert!(after <= before, "minted: {before} -> {after}");
-    assert!(before - after <= 400, "rounding leak too large: {before} -> {after}");
+    assert!(
+        before - after <= 400,
+        "rounding leak too large: {before} -> {after}"
+    );
     w.assert_sound();
 }
 
@@ -374,7 +415,10 @@ fn jump_winner_cannot_withdraw_more_than_the_loser_could_fund() {
     w.refresh_both();
     let eq_l = World::eq(&w.long);
     let backing = w.vault() as i128 - w.ins() as i128;
-    assert!(eq_l <= backing + 1, "long equity {eq_l} exceeds vault minus insurance {backing}");
+    assert!(
+        eq_l <= backing + 1,
+        "long equity {eq_l} exceeds vault minus insurance {backing}"
+    );
 }
 
 #[test]
@@ -398,7 +442,10 @@ fn jump_insurance_spend_stays_inside_the_winners_domain() {
     w.walk(P0 / 100);
     w.try_liq_long().unwrap();
     // a long's bankruptcy is paid only by domain 1 (5_000_000), never by both domains
-    assert!(ins0 - w.ins() <= 5_000_000, "spent more than one domain holds");
+    assert!(
+        ins0 - w.ins() <= 5_000_000,
+        "spent more than one domain holds"
+    );
     assert_eq!(w.dom(0).unwrap(), 5_000_000);
     w.assert_sound();
 }
@@ -407,7 +454,11 @@ fn jump_insurance_spend_stays_inside_the_winners_domain() {
 fn jump_one_step_flips_a_healthy_account_to_liquidatable() {
     // 10% IM, deposit 1.2x IM = 12% of notional. One 6% two-slot step crosses maintenance (about 2% is enough).
     let mut w = world(STEP_BPS, MAX_DT, 1_200_000);
-    assert_eq!(w.try_liq_long(), Err(V16Error::NonProgress), "healthy at start");
+    assert_eq!(
+        w.try_liq_long(),
+        Err(V16Error::NonProgress),
+        "healthy at start"
+    );
     w.jump(MAX_DT, P0 - P0 * 6 / 100);
     let r = w.try_liq_long();
     assert!(r.is_ok(), "{r:?}");
@@ -437,10 +488,17 @@ fn jump_trade_after_a_huge_move_is_priced_at_the_new_mark() {
         g.deposit_not_atomic(&mut av, BIG).unwrap();
         g.deposit_not_atomic(&mut bv, BIG).unwrap();
         g.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-            &mut av, &mut bv,
-            TradeRequestV16 { asset_index: 0, size_q: Q, exec_price: p, fee_bps: 0 },
+            &mut av,
+            &mut bv,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: Q,
+                exec_price: p,
+                fee_bps: 0,
+            },
             true,
-        ).unwrap();
+        )
+        .unwrap();
         g.full_account_refresh_not_atomic(&mut av).unwrap();
         g.full_account_refresh_not_atomic(&mut bv).unwrap();
     }

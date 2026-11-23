@@ -25,7 +25,9 @@ const MOVE_CAP_BPS: u64 = 200;
 // v2.2 combination: the whole adversarial harness can run with holding-fee rent > 0
 // (Wave B). Thread-local so the rent test cannot leak into the rent-off sweeps.
 thread_local! { static RENT_E9: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
-fn rent_e9() -> u64 { RENT_E9.with(|c| c.get()) }
+fn rent_e9() -> u64 {
+    RENT_E9.with(|c| c.get())
+}
 
 #[derive(Clone)]
 struct World {
@@ -53,7 +55,13 @@ impl World {
     fn new_pairs(pairs: &[(u128, u128, u128)], ins_long: u128, ins_short: u128) -> Self {
         Self::new_pairs_at(pairs, ins_long, ins_short, PRICE, RATE_E9 as u64)
     }
-    fn new_pairs_at(pairs: &[(u128, u128, u128)], ins_long: u128, ins_short: u128, px: u64, cap: u64) -> Self {
+    fn new_pairs_at(
+        pairs: &[(u128, u128, u128)],
+        ins_long: u128,
+        ins_short: u128,
+        px: u64,
+        cap: u64,
+    ) -> Self {
         let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
         cfg.max_abs_funding_e9_per_slot = cap;
         cfg.rent_max_e9_per_slot = rent_e9();
@@ -68,7 +76,13 @@ impl World {
         header
             .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, px, 1)
             .unwrap();
-        let mut w = World { header, markets, maker: account(0), traders: Vec::new(), slot: 1 };
+        let mut w = World {
+            header,
+            markets,
+            maker: account(0),
+            traders: Vec::new(),
+            slot: 1,
+        };
         let mut maker = w.maker;
         w.deposit(&mut maker, 1_000_000_000_000_000);
         w.maker = maker;
@@ -77,7 +91,8 @@ impl World {
             let mut s = account(2 + 2 * i as u32);
             w.deposit(&mut l, cl);
             w.deposit(&mut s, cs);
-            w.trade(&mut l, &mut s, units * POS_SCALE).expect("fresh pair opens");
+            w.trade(&mut l, &mut s, units * POS_SCALE)
+                .expect("fresh pair opens");
             w.traders.push(l);
             w.traders.push(s);
         }
@@ -96,7 +111,11 @@ impl World {
     fn deposit(&mut self, acct: &mut PortfolioAccountV16Account, amount: u128) {
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         let a0 = *acct;
-        if m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(acct), amount).is_err() { *acct = a0; }
+        if m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(acct), amount)
+            .is_err()
+        {
+            *acct = a0;
+        }
     }
 
     fn price(&self) -> u64 {
@@ -153,7 +172,17 @@ impl World {
         let slot = self.slot + 1;
         let (h, mk) = (self.header, self.markets.clone());
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-        if m.accrue_asset_to_with_rent_not_atomic(0, slot, new, rate, rent_e9(), rent_e9() / 2, true).is_err() {
+        if m.accrue_asset_to_with_rent_not_atomic(
+            0,
+            slot,
+            new,
+            rate,
+            rent_e9(),
+            rent_e9() / 2,
+            true,
+        )
+        .is_err()
+        {
             self.header = h;
             self.markets = mk;
             return false;
@@ -170,14 +199,25 @@ impl World {
         let a = self.asset();
         let cur = a.effective_price;
         let target = (cur as i128 + cur as i128 * dp_bps as i128 / 10_000).max(1) as u64;
-        let anchor = if a.raw_oracle_target_price != target { a.effective_price } else { a.fund_px_last };
+        let anchor = if a.raw_oracle_target_price != target {
+            a.effective_price
+        } else {
+            a.fund_px_last
+        };
         let exposed = a.oi_eff_long_q != 0 || a.oi_eff_short_q != 0;
         let n = n.clamp(1, 2) as u64;
         let mut price = cur;
         let mut rem = 0u16;
         let mut steps = Vec::new();
         for i in 0..n {
-            let Ok((p, r)) = percolator::canonical_accrual_price_step_v16(price, target, anchor, MOVE_CAP_BPS, exposed, rem) else {
+            let Ok((p, r)) = percolator::canonical_accrual_price_step_v16(
+                price,
+                target,
+                anchor,
+                MOVE_CAP_BPS,
+                exposed,
+                rem,
+            ) else {
                 return false;
             };
             steps.push(percolator::AccrualStepV16 {
@@ -192,7 +232,17 @@ impl World {
         let now = self.slot + n;
         let (h, mk) = (self.header, self.markets.clone());
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-        if m.accrue_asset_path_with_rent_to_not_atomic(0, now, target, &steps, rent_e9(), rent_e9() / 2, true).is_err() {
+        if m.accrue_asset_path_with_rent_to_not_atomic(
+            0,
+            now,
+            target,
+            &steps,
+            rent_e9(),
+            rent_e9() / 2,
+            true,
+        )
+        .is_err()
+        {
             self.header = h;
             self.markets = mk;
             return false;
@@ -221,7 +271,17 @@ impl World {
         let now = self.slot + n;
         let (h, mk) = (self.header, self.markets.clone());
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-        if m.accrue_asset_path_with_rent_to_not_atomic(0, now, price, &steps, rent_e9(), rent_e9() / 2, true).is_err() {
+        if m.accrue_asset_path_with_rent_to_not_atomic(
+            0,
+            now,
+            price,
+            &steps,
+            rent_e9(),
+            rent_e9() / 2,
+            true,
+        )
+        .is_err()
+        {
             self.header = h;
             self.markets = mk;
             return false;
@@ -290,7 +350,10 @@ impl World {
         }
         let vault = self.header.vault.get();
         let senior = self.header.c_tot.get() + self.header.insurance.get();
-        assert!(vault >= senior, "P4: vault {vault} < c_tot + insurance {senior}");
+        assert!(
+            vault >= senior,
+            "P4: vault {vault} < c_tot + insurance {senior}"
+        );
     }
 
     /// Crank every account at the current slot until nothing makes progress.
@@ -344,7 +407,10 @@ fn floor_div(n: i128, d: i128) -> i128 {
 }
 
 /// Exact K/F loss a stale leg would recognize at settlement (the engine's floor formula).
-fn stale_leg_loss(asset: &percolator::AssetStateV16, a: &PortfolioAccountV16Account) -> Option<(SideV16, u128)> {
+fn stale_leg_loss(
+    asset: &percolator::AssetStateV16,
+    a: &PortfolioAccountV16Account,
+) -> Option<(SideV16, u128)> {
     let bitmap = a.active_bitmap[0].get();
     if bitmap & 1 == 0 {
         return None;
@@ -369,19 +435,32 @@ fn stale_leg_loss(asset: &percolator::AssetStateV16, a: &PortfolioAccountV16Acco
 fn bound(w: &World, side: SideV16) -> u128 {
     let asset = w.asset();
     let (stale, d) = match side {
-        SideV16::Long => (asset.stale_account_count_long, w.markets[0].engine.kf_drift_long.to_runtime()),
-        SideV16::Short => (asset.stale_account_count_short, w.markets[0].engine.kf_drift_short.to_runtime()),
+        SideV16::Long => (
+            asset.stale_account_count_long,
+            w.markets[0].engine.kf_drift_long.to_runtime(),
+        ),
+        SideV16::Short => (
+            asset.stale_account_count_short,
+            w.markets[0].engine.kf_drift_short.to_runtime(),
+        ),
     };
     if stale == 0 {
         return 0;
     }
     let den = SOCIAL_WEIGHT_SCALE * POS_SCALE;
     // weights <= 1e21; drift here stays far below 1e17, so u128 products are exact.
-    let g = d.stale_weight.checked_mul(d.drift_gen).expect("test worlds stay in u128").div_ceil(den);
+    let g = d
+        .stale_weight
+        .checked_mul(d.drift_gen)
+        .expect("test worlds stay in u128")
+        .div_ceil(den);
     let p = if d.laggard_count == 0 {
         0
     } else {
-        d.laggard_weight.checked_mul(d.drift_prior).expect("test worlds stay in u128").div_ceil(den)
+        d.laggard_weight
+            .checked_mul(d.drift_prior)
+            .expect("test worlds stay in u128")
+            .div_ceil(den)
     };
     g + p + 2 * u128::from(stale)
 }
@@ -395,42 +474,89 @@ fn domain_available(w: &World, domain: usize) -> u128 {
         .min(w.header.insurance.get())
 }
 
-
-
-fn all_accounts<'a>(w: &'a World, extra: &'a [PortfolioAccountV16Account]) -> Vec<&'a PortfolioAccountV16Account> {
-    w.traders.iter().chain(core::iter::once(&w.maker)).chain(extra.iter()).collect()
+fn all_accounts<'a>(
+    w: &'a World,
+    extra: &'a [PortfolioAccountV16Account],
+) -> Vec<&'a PortfolioAccountV16Account> {
+    w.traders
+        .iter()
+        .chain(core::iter::once(&w.maker))
+        .chain(extra.iter())
+        .collect()
 }
 
 /// Exact bookkeeping + bound check, per side, over every account.
 fn check_state(w: &World, extra: &[PortfolioAccountV16Account], tag: &str) -> Result<(), String> {
     let asset = w.asset();
-    if asset.mode_long != percolator::SideModeV16::Normal || asset.mode_short != percolator::SideModeV16::Normal {
+    if asset.mode_long != percolator::SideModeV16::Normal
+        || asset.mode_short != percolator::SideModeV16::Normal
+    {
         return Ok(());
     }
     for side in [SideV16::Long, SideV16::Short] {
         let (epoch, stale, d) = match side {
-            SideV16::Long => (asset.kf_epoch_long, asset.stale_account_count_long, w.markets[0].engine.kf_drift_long.to_runtime()),
-            SideV16::Short => (asset.kf_epoch_short, asset.stale_account_count_short, w.markets[0].engine.kf_drift_short.to_runtime()),
+            SideV16::Long => (
+                asset.kf_epoch_long,
+                asset.stale_account_count_long,
+                w.markets[0].engine.kf_drift_long.to_runtime(),
+            ),
+            SideV16::Short => (
+                asset.kf_epoch_short,
+                asset.stale_account_count_short,
+                w.markets[0].engine.kf_drift_short.to_runtime(),
+            ),
         };
         let (mut sw, mut lc, mut lw, mut real) = (0u128, 0u64, 0u128, 0u128);
         let mut n_stale = 0u64;
         for a in all_accounts(w, extra) {
-            if a.active_bitmap[0].get() & 1 == 0 { continue; }
+            if a.active_bitmap[0].get() & 1 == 0 {
+                continue;
+            }
             let leg = a.legs[0].try_to_runtime().unwrap();
-            if leg.side != side || leg.kf_epoch_snap >= epoch { continue; }
+            if leg.side != side || leg.kf_epoch_snap >= epoch {
+                continue;
+            }
             n_stale += 1;
             sw += leg.loss_weight;
-            if leg.kf_epoch_snap < d.gen_epoch { lc += 1; lw += leg.loss_weight; }
-            if let Some((_, l)) = stale_leg_loss(&asset, a) { real += l; }
+            if leg.kf_epoch_snap < d.gen_epoch {
+                lc += 1;
+                lw += leg.loss_weight;
+            }
+            if let Some((_, l)) = stale_leg_loss(&asset, a) {
+                real += l;
+            }
         }
-        if n_stale != stale { return Err(format!("{tag}: {side:?} stale count {stale} != actual {n_stale}")); }
+        if n_stale != stale {
+            return Err(format!(
+                "{tag}: {side:?} stale count {stale} != actual {n_stale}"
+            ));
+        }
         if stale > 0 {
-            if sw != d.stale_weight { return Err(format!("{tag}: {side:?} stale_weight {} != exact {sw}", d.stale_weight)); }
-            if lc != d.laggard_count { return Err(format!("{tag}: {side:?} laggard_count {} != exact {lc}", d.laggard_count)); }
-            if lw != d.laggard_weight { return Err(format!("{tag}: {side:?} laggard_weight {} != exact {lw}", d.laggard_weight)); }
+            if sw != d.stale_weight {
+                return Err(format!(
+                    "{tag}: {side:?} stale_weight {} != exact {sw}",
+                    d.stale_weight
+                ));
+            }
+            if lc != d.laggard_count {
+                return Err(format!(
+                    "{tag}: {side:?} laggard_count {} != exact {lc}",
+                    d.laggard_count
+                ));
+            }
+            if lw != d.laggard_weight {
+                return Err(format!(
+                    "{tag}: {side:?} laggard_weight {} != exact {lw}",
+                    d.laggard_weight
+                ));
+            }
         }
         let b = bound(w, side);
-        if real > b { return Err(format!("{tag}: {side:?} REAL hidden loss {real} > bound {b}")); }
+        if real > b {
+            return Err(format!(
+                "{tag}: {side:?} REAL hidden loss {real} > bound {b}"
+            ));
+        }
     }
     Ok(())
 }
@@ -438,10 +564,10 @@ fn check_state(w: &World, extra: &[PortfolioAccountV16Account], tag: &str) -> Re
 #[derive(Clone, Debug)]
 enum Op2 {
     Accrue(i64, i128),
-    Zig(i64, u8),          // oscillation: up/down n times with funding sign flips
+    Zig(i64, u8), // oscillation: up/down n times with funding sign flips
     Refresh(usize),
     Crank(usize),
-    Reduce(usize, u8),     // partial close of account i vs rich maker (percent)
+    Reduce(usize, u8), // partial close of account i vs rich maker (percent)
     Open(bool, u128),
     AddEntrant(usize, u128),
     CrankAll,
@@ -466,16 +592,31 @@ fn op2() -> impl Strategy<Value = Op2> {
 }
 
 #[derive(Default, Debug)]
-struct Stats2 { admissions: u64, p3: u64, hidden_def: u64, reduces: u64, rotations_seen: u64, negpnl_skip: u64, paths: u64 }
+struct Stats2 {
+    admissions: u64,
+    p3: u64,
+    hidden_def: u64,
+    reduces: u64,
+    rotations_seen: u64,
+    negpnl_skip: u64,
+    paths: u64,
+}
 
-fn run2(pairs: Vec<(u128, u128, u128)>, ins: (u128, u128), ops: Vec<Op2>, st: &mut Stats2) -> Result<(), String> {
+fn run2(
+    pairs: Vec<(u128, u128, u128)>,
+    ins: (u128, u128),
+    ops: Vec<Op2>,
+    st: &mut Stats2,
+) -> Result<(), String> {
     let mut w = World::new_pairs(&pairs, ins.0, ins.1);
     let mut entrants: Vec<PortfolioAccountV16Account> = Vec::new();
     let mut seed = 10_000u32;
     for (step, op) in ops.into_iter().enumerate() {
         let tag = format!("step {step} {op:?}");
         match op {
-            Op2::Accrue(d, r) => { w.accrue(d, r); }
+            Op2::Accrue(d, r) => {
+                w.accrue(d, r);
+            }
             Op2::Zig(d, n) => {
                 for k in 0..(2 * n as usize) {
                     let up = k % 2 == 0;
@@ -494,11 +635,21 @@ fn run2(pairs: Vec<(u128, u128, u128)>, ins: (u128, u128), ops: Vec<Op2>, st: &m
                 w.crank(&mut t);
                 w.traders[i % n] = t;
             }
-            Op2::CrankAll => { w.cascade(&mut entrants); }
-            Op2::Path(d, n, flip) => { if w.accrue_path(d, n, RATE_E9, flip) { st.paths += 1; } }
+            Op2::CrankAll => {
+                w.cascade(&mut entrants);
+            }
+            Op2::Path(d, n, flip) => {
+                if w.accrue_path(d, n, RATE_E9, flip) {
+                    st.paths += 1;
+                }
+            }
             Op2::Slide(up, n) => {
                 for _ in 0..n {
-                    if up { w.accrue(MOVE_CAP_BPS as i64, -RATE_E9); } else { w.accrue(-(MOVE_CAP_BPS as i64), RATE_E9); }
+                    if up {
+                        w.accrue(MOVE_CAP_BPS as i64, -RATE_E9);
+                    } else {
+                        w.accrue(-(MOVE_CAP_BPS as i64), RATE_E9);
+                    }
                 }
             }
             Op2::Reduce(i, pct) => {
@@ -510,18 +661,32 @@ fn run2(pairs: Vec<(u128, u128, u128)>, ins: (u128, u128), ops: Vec<Op2>, st: &m
                     let sz = (q * pct as u128 / 100).max(POS_SCALE / 1000);
                     if sz < q {
                         let mut maker = w.maker;
-                        let ok = if leg.side == SideV16::Long { w.trade(&mut maker, &mut t, sz) } else { w.trade(&mut t, &mut maker, sz) }.is_ok();
-                        if ok { w.maker = maker; st.reduces += 1; }
+                        let ok = if leg.side == SideV16::Long {
+                            w.trade(&mut maker, &mut t, sz)
+                        } else {
+                            w.trade(&mut t, &mut maker, sz)
+                        }
+                        .is_ok();
+                        if ok {
+                            w.maker = maker;
+                            st.reduces += 1;
+                        }
                     }
                 }
                 w.traders[i % n] = t;
             }
             Op2::Open(long, units) => {
-                let mut e = account(seed); seed += 1;
+                let mut e = account(seed);
+                seed += 1;
                 w.deposit(&mut e, (units * u128::from(w.price())) / 8 + 1);
                 let mut maker = w.maker;
                 let before = w.clone();
-                let ok = if long { w.trade(&mut e, &mut maker, units * POS_SCALE) } else { w.trade(&mut maker, &mut e, units * POS_SCALE) }.is_ok();
+                let ok = if long {
+                    w.trade(&mut e, &mut maker, units * POS_SCALE)
+                } else {
+                    w.trade(&mut maker, &mut e, units * POS_SCALE)
+                }
+                .is_ok();
                 if ok {
                     w.maker = maker;
                     let a = before.asset();
@@ -533,14 +698,24 @@ fn run2(pairs: Vec<(u128, u128, u128)>, ins: (u128, u128), ops: Vec<Op2>, st: &m
                 }
             }
             Op2::AddEntrant(i, units) => {
-                if entrants.is_empty() { continue; }
+                if entrants.is_empty() {
+                    continue;
+                }
                 let n = entrants.len();
                 let mut e = entrants[i % n];
                 let mut maker = w.maker;
-                let long = e.legs[0].try_to_runtime().map(|l| l.side == SideV16::Long).unwrap_or(true);
+                let long = e.legs[0]
+                    .try_to_runtime()
+                    .map(|l| l.side == SideV16::Long)
+                    .unwrap_or(true);
                 w.deposit(&mut e, (units * u128::from(w.price())) / 8 + 1);
                 let before = w.clone();
-                let ok = if long { w.trade(&mut e, &mut maker, units * POS_SCALE) } else { w.trade(&mut maker, &mut e, units * POS_SCALE) }.is_ok();
+                let ok = if long {
+                    w.trade(&mut e, &mut maker, units * POS_SCALE)
+                } else {
+                    w.trade(&mut maker, &mut e, units * POS_SCALE)
+                }
+                .is_ok();
                 if ok {
                     w.maker = maker;
                     let a = before.asset();
@@ -560,31 +735,58 @@ fn run2(pairs: Vec<(u128, u128, u128)>, ins: (u128, u128), ops: Vec<Op2>, st: &m
 }
 
 fn p3(w: &World, entrant: &PortfolioAccountV16Account, st: &mut Stats2) -> Result<(), String> {
-    if w.header.negative_pnl_account_count.get() != 0 { st.negpnl_skip += 1; return Ok(()); }
+    if w.header.negative_pnl_account_count.get() != 0 {
+        st.negpnl_skip += 1;
+        return Ok(());
+    }
     let asset = w.asset();
     let mut deficit = false;
     for a in w.traders.iter().chain(core::iter::once(&w.maker)) {
-        if let Some((_, loss)) = stale_leg_loss(&asset, a) { deficit |= equity(a) < loss as i128; }
+        if let Some((_, loss)) = stale_leg_loss(&asset, a) {
+            deficit |= equity(a) < loss as i128;
+        }
     }
-    if deficit { st.hidden_def += 1; }
+    if deficit {
+        st.hidden_def += 1;
+    }
     let before = equity(entrant);
     let (b_long, b_short) = (asset.b_long_num, asset.b_short_num);
     let mut w2 = w.clone();
     let mut e2 = [*entrant];
     w2.cascade(&mut e2);
     let a2 = w2.asset();
-    if (a2.b_long_num, a2.b_short_num) != (b_long, b_short) { return Err(format!("P3: B moved {:?}->{:?}", (b_long,b_short),(a2.b_long_num,a2.b_short_num))); }
-    if equity(&e2[0]) != before { return Err(format!("P3: entrant equity {before} -> {}", equity(&e2[0]))); }
+    if (a2.b_long_num, a2.b_short_num) != (b_long, b_short) {
+        return Err(format!(
+            "P3: B moved {:?}->{:?}",
+            (b_long, b_short),
+            (a2.b_long_num, a2.b_short_num)
+        ));
+    }
+    if equity(&e2[0]) != before {
+        return Err(format!("P3: entrant equity {before} -> {}", equity(&e2[0])));
+    }
     st.p3 += 1;
     Ok(())
 }
 
 fn pair() -> impl Strategy<Value = (u128, u128, u128)> {
-    (1u128..=3, 105u128..=400, 105u128..=400).prop_map(|(u, a, b)| (u * u128::from(PRICE) * a / 1_000, u * u128::from(PRICE) * b / 1_000, u))
+    (1u128..=3, 105u128..=400, 105u128..=400).prop_map(|(u, a, b)| {
+        (
+            u * u128::from(PRICE) * a / 1_000,
+            u * u128::from(PRICE) * b / 1_000,
+            u,
+        )
+    })
 }
 
 fn ins() -> impl Strategy<Value = u128> {
-    prop_oneof![Just(0u128), 1u128..2_000, 2_000u128..2_000_000, 2_000_000u128..60_000_000, 60_000_000u128..600_000_000]
+    prop_oneof![
+        Just(0u128),
+        1u128..2_000,
+        2_000u128..2_000_000,
+        2_000_000u128..60_000_000,
+        60_000_000u128..600_000_000
+    ]
 }
 
 proptest! {
@@ -605,33 +807,62 @@ proptest! {
 fn sec_adv_sweep_stats() {
     use proptest::strategy::ValueTree;
     use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-    let seed: u8 = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(11);
-    let n: usize = std::env::var("WORLDS").ok().and_then(|v| v.parse().ok()).unwrap_or(500);
-    let mut runner = TestRunner::new_with_rng(Config::default(), TestRng::from_seed(RngAlgorithm::ChaCha, &[seed; 32]));
-    let strat = (prop::collection::vec(pair(), 3..14), ins(), ins(), prop::collection::vec(op2(), 6..80));
+    let seed: u8 = std::env::var("SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(11);
+    let n: usize = std::env::var("WORLDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500);
+    let mut runner = TestRunner::new_with_rng(
+        Config::default(),
+        TestRng::from_seed(RngAlgorithm::ChaCha, &[seed; 32]),
+    );
+    let strat = (
+        prop::collection::vec(pair(), 3..14),
+        ins(),
+        ins(),
+        prop::collection::vec(op2(), 6..80),
+    );
     let mut st = Stats2::default();
     let mut fails = 0;
     for _ in 0..n {
         let (p, il, is, ops) = strat.new_tree(&mut runner).unwrap().current();
-        if let Err(e) = run2(p, (il, is), ops, &mut st) { fails += 1; eprintln!("FAIL: {e}"); }
+        if let Err(e) = run2(p, (il, is), ops, &mut st) {
+            fails += 1;
+            eprintln!("FAIL: {e}");
+        }
     }
     eprintln!("adv sweep seed {seed}: worlds {n} fails {fails} {st:?}");
     assert_eq!(fails, 0);
     // non-vacuity: both accrual routes, relaxed admissions and real hidden deficits occurred
-    assert!(st.paths > 100 && st.admissions > 50 && st.hidden_def > 10, "{st:?}");
+    assert!(
+        st.paths > 100 && st.admissions > 50 && st.hidden_def > 10,
+        "{st:?}"
+    );
 }
-
 
 /// T6: a stale cohort whose drift tail is zero (slab grown in place from the old layout, or any
 /// path that zeroes `kf_drift_*` while `stale_account_count_*` > 0) makes the bound collapse to
 /// `2*stale`: relaxed admission with almost no cover although hidden bankruptcies exist.
 #[test]
 fn sec_t6_zero_tail_with_live_cohort_undercounts() {
-    let traders: Vec<(u128, u128, u128)> = (0..6).map(|_| (105_000u128, 10_000_000u128, 1u128)).collect();
+    let traders: Vec<(u128, u128, u128)> = (0..6)
+        .map(|_| (105_000u128, 10_000_000u128, 1u128))
+        .collect();
     let mut w = World::new_pairs(&traders, 0, 0);
-    for _ in 0..7 { assert!(w.accrue(-200, RATE_E9)); } // longs slide ~13%, nobody settled
+    for _ in 0..7 {
+        assert!(w.accrue(-200, RATE_E9));
+    } // longs slide ~13%, nobody settled
     let asset = w.asset();
-    let real_long: u128 = w.traders.iter().filter_map(|a| stale_leg_loss(&asset, a)).filter(|(s, _)| *s == SideV16::Long).map(|(_, l)| l).sum();
+    let real_long: u128 = w
+        .traders
+        .iter()
+        .filter_map(|a| stale_leg_loss(&asset, a))
+        .filter(|(s, _)| *s == SideV16::Long)
+        .map(|(_, l)| l)
+        .sum();
     let honest = bound(&w, SideV16::Long);
     eprintln!("T6 real long hidden loss {real_long}, tracked bound {honest}");
     // fund the cover and the counterparties first (so the setup itself is shape-valid), then
@@ -642,13 +873,21 @@ fn sec_t6_zero_tail_with_live_cohort_undercounts() {
         m.deposit_domain_insurance_not_atomic(1, cover).unwrap();
         m.deposit_domain_insurance_not_atomic(0, cover).unwrap();
     }
-    let mut cp = account(50_000); w.deposit(&mut cp, 10_000_000);
-    let mut e = account(50_001); w.deposit(&mut e, 300_000);
+    let mut cp = account(50_000);
+    w.deposit(&mut cp, 10_000_000);
+    let mut e = account(50_001);
+    w.deposit(&mut e, 300_000);
     w.markets[0].engine.kf_drift_long = Default::default();
     w.markets[0].engine.kf_drift_short = Default::default();
     let b = bound(&w, SideV16::Long);
-    eprintln!("T6 bound after tail zeroed {b} (stale count {})", w.asset().stale_account_count_long);
-    assert!(b < real_long, "the unchecked formula collapses below the real hidden loss");
+    eprintln!(
+        "T6 bound after tail zeroed {b} (stale count {})",
+        w.asset().stale_account_count_long
+    );
+    assert!(
+        b < real_long,
+        "the unchecked formula collapses below the real hidden loss"
+    );
     assert!(cover > b, "the cover would satisfy the collapsed bound");
     // S1 shape check: the audit-scan walk rejects the corrupted tracker outright
     if cfg!(feature = "audit-scan") {
@@ -658,7 +897,10 @@ fn sec_t6_zero_tail_with_live_cohort_undercounts() {
         assert_eq!(m.validate_shape(), Err(percolator::V16Error::InvalidConfig));
     }
     let r = w.trade(&mut cp, &mut e, 2 * POS_SCALE);
-    eprintln!("T6 entrant with {cover} atoms of cover vs {real_long} real hidden loss: {:?}", r);
+    eprintln!(
+        "T6 entrant with {cover} atoms of cover vs {real_long} real hidden loss: {:?}",
+        r
+    );
     // Security review S1 regression: the engine must fail CLOSED on a tracker that does not
     // describe the live cohort (stale_weight < stale), whatever the cover.
     assert!(
@@ -670,7 +912,11 @@ fn sec_t6_zero_tail_with_live_cohort_undercounts() {
     let mut header = w.header;
     let mut markets = w.markets.clone();
     let m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    assert_eq!(m.domain_insurance_withdraw_capacity(1).unwrap(), 0, "S1: withdrawal blocked");
+    assert_eq!(
+        m.domain_insurance_withdraw_capacity(1).unwrap(),
+        0,
+        "S1: withdrawal blocked"
+    );
 }
 
 /// Security review S2: outside `Normal` the drift weights can under-count (a drain reset zeroes
@@ -679,12 +925,15 @@ fn sec_t6_zero_tail_with_live_cohort_undercounts() {
 /// stale legs.
 #[test]
 fn sec_s2_withdraw_reservation_blocks_outside_normal_mode() {
-    let traders: Vec<(u128, u128, u128)> = (0..4).map(|_| (900_000u128, 10_000_000u128, 1u128)).collect();
+    let traders: Vec<(u128, u128, u128)> = (0..4)
+        .map(|_| (900_000u128, 10_000_000u128, 1u128))
+        .collect();
     let mut w = World::new_pairs(&traders, 0, 0);
     assert!(w.accrue(-50, RATE_E9));
     {
         let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
-        m.deposit_domain_insurance_not_atomic(1, 50_000_000).unwrap();
+        m.deposit_domain_insurance_not_atomic(1, 50_000_000)
+            .unwrap();
     }
     let asset = w.asset();
     assert!(asset.stale_account_count_long > 0);
@@ -694,7 +943,10 @@ fn sec_s2_withdraw_reservation_blocks_outside_normal_mode() {
         let m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         m.domain_insurance_withdraw_capacity(1).unwrap()
     };
-    assert!(cap_normal > 0, "Normal mode: cover above the bound is withdrawable");
+    assert!(
+        cap_normal > 0,
+        "Normal mode: cover above the bound is withdrawable"
+    );
     // same state with the long side outside Normal (as after a drain reset)
     let mut a = asset;
     a.mode_long = percolator::SideModeV16::ResetPending;
@@ -702,7 +954,11 @@ fn sec_s2_withdraw_reservation_blocks_outside_normal_mode() {
     let mut header = w.header;
     let mut markets = w.markets.clone();
     let m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    assert_eq!(m.domain_insurance_withdraw_capacity(1).unwrap(), 0, "S2: fully reserved outside Normal");
+    assert_eq!(
+        m.domain_insurance_withdraw_capacity(1).unwrap(),
+        0,
+        "S2: fully reserved outside Normal"
+    );
 }
 
 /// F6 regression (security review F6, reproduction inverted). Before: per-accrual funding was
@@ -718,15 +974,28 @@ fn sec_f6_funding_rounding_low_price() {
     let f0 = (w.asset().f_long_num, w.asset().f_short_num);
     let mut l = w.traders[0];
     let le0 = equity(&l);
-    for _ in 0..49 { assert!(w.accrue(0, 111)); }
+    for _ in 0..49 {
+        assert!(w.accrue(0, 111));
+    }
     let a = w.asset();
     let per_slot = 111i128 * px as i128 * (ADL_ONE / 1_000_000_000) as i128; // exact index units
-    assert_eq!(a.f_long_num - f0.0, -49 * per_slot, "longs pay exactly, every slot (no floor to 0)");
-    assert_eq!(a.f_short_num - f0.1, 49 * per_slot, "shorts receive exactly the same");
+    assert_eq!(
+        a.f_long_num - f0.0,
+        -49 * per_slot,
+        "longs pay exactly, every slot (no floor to 0)"
+    );
+    assert_eq!(
+        a.f_short_num - f0.1,
+        49 * per_slot,
+        "shorts receive exactly the same"
+    );
     assert!(w.refresh(&mut l));
     let paid = le0 - equity(&l);
     let intended = 49.0 * 111.0 * 1_000.0 * 30_000.0 / 1e9; // 163.17 atoms
-    assert!((paid as f64 - intended).abs() <= 1.0, "long paid {paid}, intended {intended:.2}");
+    assert!(
+        (paid as f64 - intended).abs() <= 1.0,
+        "long paid {paid}, intended {intended:.2}"
+    );
     // one slot of negative funding: shorts pay ~3.33 atoms, not a full price unit (1,000)
     let mut sh = w.traders[1];
     assert!(w.refresh(&mut sh));
@@ -735,9 +1004,11 @@ fn sec_f6_funding_rounding_low_price() {
     assert!(w.refresh(&mut sh));
     let paid = se0 - equity(&sh);
     let intended1 = 111.0 * 1_000.0 * 30_000.0 / 1e9;
-    assert!((paid as f64 - intended1).abs() <= 1.0, "short paid {paid} in one slot, intended {intended1:.2}");
+    assert!(
+        (paid as f64 - intended1).abs() <= 1.0,
+        "short paid {paid} in one slot, intended {intended1:.2}"
+    );
 }
-
 
 /// v2.2 combination gate: the same exact-bookkeeping + bound-covers-real-loss sweep with
 /// holding-fee rent charged on every accrual (asymmetric: long = R, short = R/2). A rent move
@@ -749,28 +1020,52 @@ fn sec_adv_sweep_stats_rent_positive() {
         RENT_E9.with(|c| c.set(rent));
         use proptest::strategy::ValueTree;
         use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-        let seed: u8 = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(33);
-        let n: usize = std::env::var("WORLDS").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
-        let mut runner = TestRunner::new_with_rng(Config::default(), TestRng::from_seed(RngAlgorithm::ChaCha, &[seed; 32]));
-        let strat = (prop::collection::vec(pair(), 3..14), ins(), ins(), prop::collection::vec(op2(), 6..80));
+        let seed: u8 = std::env::var("SEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(33);
+        let n: usize = std::env::var("WORLDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(400);
+        let mut runner = TestRunner::new_with_rng(
+            Config::default(),
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[seed; 32]),
+        );
+        let strat = (
+            prop::collection::vec(pair(), 3..14),
+            ins(),
+            ins(),
+            prop::collection::vec(op2(), 6..80),
+        );
         let mut st = Stats2::default();
         let mut fails = 0;
         for _ in 0..n {
             let (p, il, is, ops) = strat.new_tree(&mut runner).unwrap().current();
-            if let Err(e) = run2(p, (il, is), ops, &mut st) { fails += 1; eprintln!("FAIL(rent {rent}): {e}"); }
+            if let Err(e) = run2(p, (il, is), ops, &mut st) {
+                fails += 1;
+                eprintln!("FAIL(rent {rent}): {e}");
+            }
         }
         eprintln!("rent {rent} sweep seed {seed}: worlds {n} fails {fails} {st:?}");
         assert_eq!(fails, 0);
-        assert!(st.paths > 50 && st.admissions > 20 && st.hidden_def > 5, "{st:?}");
+        assert!(
+            st.paths > 50 && st.admissions > 20 && st.hidden_def > 5,
+            "{st:?}"
+        );
         // rent actually accrued: a fresh world with rent on shows a non-zero rent index after slides
         let mut w = World::new_pairs(&[(105_000u128, 10_000_000u128, 1u128); 3], 0, 0);
-        for _ in 0..4 { assert!(w.accrue(10, RATE_E9)); }
+        for _ in 0..4 {
+            assert!(w.accrue(10, RATE_E9));
+        }
         let a = w.asset();
-        assert!(a.rent_index_long_num != 0 && a.rent_index_short_num != 0, "rent must accrue (non-vacuity)");
+        assert!(
+            a.rent_index_long_num != 0 && a.rent_index_short_num != 0,
+            "rent must accrue (non-vacuity)"
+        );
     }
     RENT_E9.with(|c| c.set(0));
 }
-
 
 /// Rent-ONLY accrual (no price move, no funding). rentstale (att647 NEW-1): the rent index alone
 /// no longer marks a cohort stale (only K/F do, as upstream); the tracker must stay exact.
@@ -779,7 +1074,9 @@ fn sec_adv_sweep_stats_rent_positive() {
 #[test]
 fn sec_adv_rent_only_accrual_keeps_the_tracker_exact() {
     RENT_E9.with(|c| c.set(5_000));
-    let traders: Vec<(u128, u128, u128)> = (0..5).map(|_| (105_000u128, 10_000_000u128, 1u128)).collect();
+    let traders: Vec<(u128, u128, u128)> = (0..5)
+        .map(|_| (105_000u128, 10_000_000u128, 1u128))
+        .collect();
     let mut w = World::new_pairs(&traders, 0, 0);
     for step in 0..6 {
         assert!(w.accrue(0, 0), "rent-only accrue {step}");
@@ -789,10 +1086,13 @@ fn sec_adv_rent_only_accrual_keeps_the_tracker_exact() {
     }
     let a = w.asset();
     assert!(a.rent_index_long_num != 0, "rent accrued");
-    assert_eq!(a.stale_account_count_long + a.stale_account_count_short, 0, "rentstale: rent alone marks no cohort");
+    assert_eq!(
+        a.stale_account_count_long + a.stale_account_count_short,
+        0,
+        "rentstale: rent alone marks no cohort"
+    );
     RENT_E9.with(|c| c.set(0));
 }
-
 
 /// The PATH-accrual mark site (`accrue_asset_path_with_rent_to_not_atomic`): rent-only steps (same
 /// price, zero funding) must keep the K/F tracker exact. rentstale (att647 NEW-1): the `changed`
@@ -801,14 +1101,23 @@ fn sec_adv_rent_only_accrual_keeps_the_tracker_exact() {
 #[test]
 fn sec_adv_rent_only_path_accrual_keeps_the_tracker_exact() {
     RENT_E9.with(|c| c.set(5_000));
-    let traders: Vec<(u128, u128, u128)> = (0..5).map(|_| (105_000u128, 10_000_000u128, 1u128)).collect();
+    let traders: Vec<(u128, u128, u128)> = (0..5)
+        .map(|_| (105_000u128, 10_000_000u128, 1u128))
+        .collect();
     let mut w = World::new_pairs(&traders, 0, 0);
     for step in 0..6 {
-        assert!(w.accrue_path_rent_only(2), "rent-only path accrue {step} must be accepted (non-vacuity)");
+        assert!(
+            w.accrue_path_rent_only(2),
+            "rent-only path accrue {step} must be accepted (non-vacuity)"
+        );
         check_state(&w, &[], &format!("rent-only path {step}")).unwrap();
     }
     let a = w.asset();
     assert!(a.rent_index_long_num != 0, "rent accrued on the path route");
-    assert_eq!(a.stale_account_count_long + a.stale_account_count_short, 0, "rentstale: rent alone marks no cohort on the path route");
+    assert_eq!(
+        a.stale_account_count_long + a.stale_account_count_short,
+        0,
+        "rentstale: rent alone marks no cohort on the path route"
+    );
     RENT_E9.with(|c| c.set(0));
 }

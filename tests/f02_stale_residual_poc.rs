@@ -21,8 +21,8 @@
 use percolator::{
     EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
     PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
-    ProvenanceHeaderV16Account, SideV16, TradeRequestV16, V16Config, V16PodI128,
-    POS_SCALE, PUBLIC_B_CHUNK_ATOMS,
+    ProvenanceHeaderV16Account, SideV16, TradeRequestV16, V16Config, V16PodI128, POS_SCALE,
+    PUBLIC_B_CHUNK_ATOMS,
 };
 
 fn market_id() -> [u8; 32] {

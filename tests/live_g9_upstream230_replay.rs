@@ -102,7 +102,10 @@ impl World {
     fn on<R>(
         &mut self,
         i: usize,
-        f: impl FnOnce(&mut MarketGroupV16ViewMut<'_, u64>, &mut PortfolioV16ViewMut<'_>) -> V16Result<R>,
+        f: impl FnOnce(
+            &mut MarketGroupV16ViewMut<'_, u64>,
+            &mut PortfolioV16ViewMut<'_>,
+        ) -> V16Result<R>,
     ) -> V16Result<R> {
         self.exec(|market, accounts| f(market, &mut PortfolioV16ViewMut::new(&mut accounts[i])))
     }
@@ -351,7 +354,9 @@ fn expired_bucket_with_open_lien_holder() -> World {
 
     // W's account-local lien is untouched.
     assert_eq!(
-        w.accounts[0].source_domains[0].source_lien_effective_reserved.get(),
+        w.accounts[0].source_domains[0]
+            .source_lien_effective_reserved
+            .get(),
         100
     );
     w
@@ -467,10 +472,12 @@ fn lien_holder_overstates_equity_and_then_cannot_be_settled() {
 
     // Only the resolved close path reconciles the account-local lien.
     w.resolve();
-    assert_eq!(w.close_resolved(0), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    assert_eq!(
+        w.close_resolved(0),
+        Ok(ResolvedCloseOutcomeV16::ProgressOnly)
+    );
     assert!(w.close_resolved(0).is_ok());
 }
-
 
 // ---------------------------------------------------------------------------------------------
 // Fork characterisation (v22kani LIVE): the same world on engine 1c96c22f. The question for G9 is
@@ -489,17 +496,30 @@ fn g9_230_fork_losing_side() {
         let c = w.crank(short, now, 0, 121).map(|x| x.selected);
         eprintln!("230@fork p=121 short={short}: refresh={r:?} liquidate={l:?} crank={c:?}");
     }
-    eprintln!("230@fork p=121 long W refresh={:?}", w.refresh(0).map(|c| (c.certified_equity, c.certified_maintenance_req)));
+    eprintln!(
+        "230@fork p=121 long W refresh={:?}",
+        w.refresh(0)
+            .map(|c| (c.certified_equity, c.certified_maintenance_req))
+    );
     w.move_price(0, 210);
     let now = w.slot();
     let cap1 = w.accounts[1].capital.get();
     let l = w.liquidate(1, 0);
     let c = w.crank(1, now, 0, 210).map(|x| (x.selected, x.outcome));
     eprintln!("230@fork p=210 L: capital={cap1} liquidate={l:?} crank={c:?}");
-    let r = w.refresh(1).map(|c| (c.certified_equity, c.certified_maintenance_req, c.certified_liq_deficit));
+    let r = w.refresh(1).map(|c| {
+        (
+            c.certified_equity,
+            c.certified_maintenance_req,
+            c.certified_liq_deficit,
+        )
+    });
     eprintln!("230@fork p=210 L refresh={r:?}");
     let l2 = w.liquidate(1, 0);
-    eprintln!("230@fork p=210 L liquidate after refresh={l2:?}; legs={}", w.accounts[1].legs.iter().filter(|x| x.active != 0).count());
+    eprintln!(
+        "230@fork p=210 L liquidate after refresh={l2:?}; legs={}",
+        w.accounts[1].legs.iter().filter(|x| x.active != 0).count()
+    );
 }
 
 #[test]
@@ -511,9 +531,23 @@ fn g9_230_fork_lien_holder() {
     let cw = w2.crank(0, now, 0, 110).map(|x| (x.selected, x.outcome));
     eprintln!("230@fork W below maintenance by 100 after the expiry: liquidate={lw:?} then crank={cw:?} legs={}", w2.accounts[0].legs.iter().filter(|x| x.active != 0).count());
     let cert = w.refresh(0);
-    eprintln!("230@fork W cert={:?} capital={}", cert.as_ref().map(|c| (c.certified_equity, c.certified_maintenance_req, c.certified_liq_deficit)), w.accounts[0].capital.get());
+    eprintln!(
+        "230@fork W cert={:?} capital={}",
+        cert.as_ref().map(|c| (
+            c.certified_equity,
+            c.certified_maintenance_req,
+            c.certified_liq_deficit
+        )),
+        w.accounts[0].capital.get()
+    );
     w.move_price(0, 100);
-    let r = w.refresh(0).map(|c| (c.certified_equity, c.certified_maintenance_req, c.certified_liq_deficit));
+    let r = w.refresh(0).map(|c| {
+        (
+            c.certified_equity,
+            c.certified_maintenance_req,
+            c.certified_liq_deficit,
+        )
+    });
     let l = w.liquidate(0, 0);
     eprintln!("230@fork p=100 W refresh={r:?} liquidate={l:?}");
 }
@@ -526,9 +560,15 @@ fn g9_230_fork_lien_holder() {
 fn g9_f_live_2_red_bankrupt_losing_side_account_is_liquidatable() {
     let mut w = expired_bucket_with_open_lien_holder();
     w.move_price(0, 210);
-    assert!(10 * (210 - 110) > w.accounts[1].capital.get(), "precondition: L's loss exceeds its capital");
+    assert!(
+        10 * (210 - 110) > w.accounts[1].capital.get(),
+        "precondition: L's loss exceeds its capital"
+    );
     let r = w.liquidate(1, 0);
-    assert!(r.is_ok(), "bankrupt losing-side account not liquidatable: {r:?}");
+    assert!(
+        r.is_ok(),
+        "bankrupt losing-side account not liquidatable: {r:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -544,7 +584,11 @@ fn g9_f_live_2_red_bankrupt_losing_side_account_is_liquidatable() {
 impl World {
     fn conservation(&self, label: &str) {
         let caps: u128 = self.accounts.iter().map(|a| a.capital.get()).sum();
-        assert_eq!(self.header.c_tot.get(), caps, "{label}: c_tot == sum of account capital");
+        assert_eq!(
+            self.header.c_tot.get(),
+            caps,
+            "{label}: c_tot == sum of account capital"
+        );
         let fresh: u128 = (0..self.markets.len() * 2)
             .map(|d| {
                 let b = self.bucket(d);
@@ -577,12 +621,22 @@ fn mirrored_expired_bucket_with_open_short_lien_holder() -> World {
     // gain's backing is liened to cover the initial margin.
     w.deposit(2, 1_200);
     w.trade(2, 0, 0, 13, 90).unwrap();
-    assert_ne!(w.bucket(0).valid_liened_backing_num, 0, "W liens the long-side backing");
+    assert_ne!(
+        w.bucket(0).valid_liened_backing_num,
+        0,
+        "W liens the long-side backing"
+    );
     let expiry = w.bucket(0).expiry_slot;
     w.tick_to(0, expiry);
     w.expire_lapsed(); // keeper's public expiry entry
     assert_eq!(w.bucket(0).status, BackingBucketStatusV16::Impaired);
-    assert_ne!(w.accounts[0].source_domains[0].source_lien_counterparty_backing_num.get(), 0, "W's account-local lien is untouched");
+    assert_ne!(
+        w.accounts[0].source_domains[0]
+            .source_lien_counterparty_backing_num
+            .get(),
+        0,
+        "W's account-local lien is untouched"
+    );
     w.conservation("after expiry");
     w
 }
@@ -597,7 +651,10 @@ fn g9_livefix_l2_mirrored_losing_long_is_liquidated_by_the_public_crank() {
     let mut liquidated = false;
     for step in 0..6 {
         let r = w.crank(1, now, 0, 75);
-        eprintln!("L2 step {step}: {:?}", r.as_ref().map(|x| (x.selected, x.outcome)));
+        eprintln!(
+            "L2 step {step}: {:?}",
+            r.as_ref().map(|x| (x.selected, x.outcome))
+        );
         let r = r.unwrap_or_else(|e| panic!("public crank refused the losing long: {e:?}"));
         if matches!(r.selected, AutoCrankPlanV16::Liquidate { .. }) {
             liquidated = true;
@@ -607,13 +664,32 @@ fn g9_livefix_l2_mirrored_losing_long_is_liquidated_by_the_public_crank() {
             break;
         }
     }
-    assert!(liquidated, "the below-maintenance losing long was never liquidated");
+    assert!(
+        liquidated,
+        "the below-maintenance losing long was never liquidated"
+    );
     w.conservation("after liquidation");
     // the lien holder W settles (its lien is reconciled into the impaired lane) and is certified
     let cert = w.refresh(0).unwrap();
-    eprintln!("L2 W cert: equity={} mm={} deficit={} bucket0={:?}", cert.certified_equity, cert.certified_maintenance_req, cert.certified_liq_deficit, w.bucket(0).status);
-    assert_eq!(w.accounts[0].source_domains[0].source_lien_counterparty_backing_num.get(), 0, "W's lien was reconciled");
-    assert_ne!(w.bucket(0).status, BackingBucketStatusV16::Impaired, "the last holder reconciled: bucket no longer Impaired");
+    eprintln!(
+        "L2 W cert: equity={} mm={} deficit={} bucket0={:?}",
+        cert.certified_equity,
+        cert.certified_maintenance_req,
+        cert.certified_liq_deficit,
+        w.bucket(0).status
+    );
+    assert_eq!(
+        w.accounts[0].source_domains[0]
+            .source_lien_counterparty_backing_num
+            .get(),
+        0,
+        "W's lien was reconciled"
+    );
+    assert_ne!(
+        w.bucket(0).status,
+        BackingBucketStatusV16::Impaired,
+        "the last holder reconciled: bucket no longer Impaired"
+    );
     // M settles too (no LockActive anywhere on the formerly Impaired domain). New risk on asset 0
     // is then governed by the ordinary ADL side mode the liquidation left (AdlReduceOnly here),
     // not by the impairment, so it is not asserted.
@@ -639,14 +715,27 @@ fn g9_livefix_l3_lapsed_bucket_without_lien_needs_the_permissionless_expiry() {
     assert_eq!(w.bucket(1).status, BackingBucketStatusV16::Fresh);
     w.move_price(0, 121);
     let now = w.slot();
-    assert_eq!(w.crank(1, now, 0, 121).map(|_| ()), Err(V16Error::LockActive), "lapsed: refused until expired");
+    assert_eq!(
+        w.crank(1, now, 0, 121).map(|_| ()),
+        Err(V16Error::LockActive),
+        "lapsed: refused until expired"
+    );
     w.expire_lapsed(); // keeper: wrapper tag 89 ExpireBackingBucket
-    assert_eq!(w.bucket(1).status, BackingBucketStatusV16::Expired, "no lien: Expired, not Impaired");
+    assert_eq!(
+        w.bucket(1).status,
+        BackingBucketStatusV16::Expired,
+        "no lien: Expired, not Impaired"
+    );
     let mut progressed = false;
     for step in 0..6 {
         let r = w.crank(1, now, 0, 121);
-        eprintln!("L3 step {step}: {:?}", r.as_ref().map(|x| (x.selected, x.outcome)));
-        let r = r.unwrap_or_else(|e| panic!("public crank refused the losing short after expiry: {e:?}"));
+        eprintln!(
+            "L3 step {step}: {:?}",
+            r.as_ref().map(|x| (x.selected, x.outcome))
+        );
+        let r = r.unwrap_or_else(|e| {
+            panic!("public crank refused the losing short after expiry: {e:?}")
+        });
         if matches!(r.selected, AutoCrankPlanV16::Liquidate { .. }) {
             progressed = true;
             break;
@@ -655,6 +744,9 @@ fn g9_livefix_l3_lapsed_bucket_without_lien_needs_the_permissionless_expiry() {
             break;
         }
     }
-    assert!(progressed, "the below-maintenance losing short was never liquidated");
+    assert!(
+        progressed,
+        "the below-maintenance losing short was never liquidated"
+    );
     w.conservation("L3 end");
 }

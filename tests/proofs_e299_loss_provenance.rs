@@ -6,8 +6,8 @@
 
 use percolator::v16::{
     decode_loss_provenance, effective_loss_provenance, encode_loss_provenance,
-    kani_liquidation_residual_charge, kani_loss_provenance_after_pnl,
-    LiquidationResidualChargeV16, LossProvenanceV16,
+    kani_liquidation_residual_charge, kani_loss_provenance_after_pnl, LiquidationResidualChargeV16,
+    LossProvenanceV16,
 };
 
 /// Any record, with the domain drawn from a small symbolic range (domains are opaque indices).
@@ -57,8 +57,14 @@ fn proof_e299_loss_merge_is_order_independent() {
         multi,
     );
     assert_eq!(first, second);
-    kani::cover!(matches!(first, LossProvenanceV16::Domain(_)), "attributed after two losses");
-    kani::cover!(first == LossProvenanceV16::Unattributable && d1 != d2, "two domains merge");
+    kani::cover!(
+        matches!(first, LossProvenanceV16::Domain(_)),
+        "attributed after two losses"
+    );
+    kani::cover!(
+        first == LossProvenanceV16::Unattributable && d1 != d2,
+        "two domains merge"
+    );
 }
 
 /// Req 5: a loss write never makes the record name a domain other than the one that realized it,
@@ -70,7 +76,9 @@ fn proof_e299_record_never_names_a_non_realizing_domain() {
     let p1 = p0 - any_loss();
     let d = kani::any::<u8>() as usize;
     let multi: bool = kani::any();
-    if let LossProvenanceV16::Domain(x) = kani_loss_provenance_after_pnl(old, p0, p1, Some(d), multi) {
+    if let LossProvenanceV16::Domain(x) =
+        kani_loss_provenance_after_pnl(old, p0, p1, Some(d), multi)
+    {
         assert_eq!(x, d);
         kani::cover!(true, "a loss write attributes");
     }
@@ -100,13 +108,23 @@ fn proof_e299_gain_keeps_or_clears_the_record() {
     let p1 = any_pnl();
     kani::assume(p1 >= p0);
     let multi: bool = kani::any();
-    let d = if kani::any() { Some(kani::any::<u8>() as usize) } else { None };
+    let d = if kani::any() {
+        Some(kani::any::<u8>() as usize)
+    } else {
+        None
+    };
     let r = kani_loss_provenance_after_pnl(old, p0, p1, d, multi);
     if p1 >= 0 && !multi {
         assert_eq!(r, LossProvenanceV16::None);
-        kani::cover!(old != LossProvenanceV16::None, "single-leg gain clears a record");
+        kani::cover!(
+            old != LossProvenanceV16::None,
+            "single-leg gain clears a record"
+        );
     } else {
-        kani::cover!(p1 >= 0 && multi && matches!(old, LossProvenanceV16::Domain(_)), "multi-leg gain keeps a record");
+        kani::cover!(
+            p1 >= 0 && multi && matches!(old, LossProvenanceV16::Domain(_)),
+            "multi-leg gain keeps a record"
+        );
         assert_eq!(r, effective_loss_provenance(old, p0));
     }
 }
@@ -139,8 +157,14 @@ fn proof_e299_multi_leg_record_ignores_gain_interleaving() {
     let r3 = f(f(f(old, p0, z1, None), z1, z2, Some(d1)), z2, x3, Some(d2));
     assert_eq!(r1, r2);
     assert_eq!(r1, r3);
-    kani::cover!(matches!(r1, LossProvenanceV16::Domain(_)) && x2 >= 0, "gain crossed zero, still attributed");
-    kani::cover!(r1 == LossProvenanceV16::Unattributable && x2 >= 0 && old == LossProvenanceV16::None, "gain crossed zero, two losers");
+    kani::cover!(
+        matches!(r1, LossProvenanceV16::Domain(_)) && x2 >= 0,
+        "gain crossed zero, still attributed"
+    );
+    kani::cover!(
+        r1 == LossProvenanceV16::Unattributable && x2 >= 0 && old == LossProvenanceV16::None,
+        "gain crossed zero, two losers"
+    );
 }
 
 /// The charge decision. Locked: a charge names exactly the recorded domain, never the closed leg
@@ -166,7 +190,10 @@ fn proof_e299_locked_charge_is_the_record_or_nothing() {
             // b-prime-2: a locked charge happens only at the full close of the recorded domain's own
             // leg with other legs still open; a flat close is `ResolveFlat` instead.
             assert!(c == c1 && full1 && !flat1);
-            kani::cover!(full1 && !flat1, "locked charge at the full close of the recorded domain's leg");
+            kani::cover!(
+                full1 && !flat1,
+                "locked charge at the full close of the recorded domain's leg"
+            );
         }
         _ => {}
     }
@@ -199,8 +226,14 @@ fn proof_gh292_locked_flat_close_never_reduce_only() {
     let full: bool = kani::any();
     let out = kani_liquidation_residual_charge(true, rec, closed_domain, full, true);
     assert_eq!(out, LiquidationResidualChargeV16::ResolveFlat);
-    kani::cover!(matches!(rec, LossProvenanceV16::Domain(_)), "attributed flat close resolves in the live market");
-    kani::cover!(!matches!(rec, LossProvenanceV16::Domain(_)), "unattributable flat close resolves in the live market");
+    kani::cover!(
+        matches!(rec, LossProvenanceV16::Domain(_)),
+        "attributed flat close resolves in the live market"
+    );
+    kani::cover!(
+        !matches!(rec, LossProvenanceV16::Domain(_)),
+        "unattributable flat close resolves in the live market"
+    );
 }
 
 /// The decision has no Recovery arm for any input, ResolveFlat is chosen iff locked and flat, and a
@@ -213,12 +246,18 @@ fn proof_gh292_resolve_flat_iff_locked_and_flat() {
     let full: bool = kani::any();
     let closed_domain = kani::any::<u8>() as usize;
     let out = kani_liquidation_residual_charge(locked, rec, closed_domain, full, flat);
-    assert_eq!(out == LiquidationResidualChargeV16::ResolveFlat, locked && flat);
+    assert_eq!(
+        out == LiquidationResidualChargeV16::ResolveFlat,
+        locked && flat
+    );
     if locked && !flat {
         if let LiquidationResidualChargeV16::Charge(c) = out {
             assert_eq!(rec, LossProvenanceV16::Domain(c));
             assert!(full && c == closed_domain);
         }
     }
-    kani::cover!(out == LiquidationResidualChargeV16::ResolveFlat, "resolve-flat reachable");
+    kani::cover!(
+        out == LiquidationResidualChargeV16::ResolveFlat,
+        "resolve-flat reachable"
+    );
 }

@@ -56,7 +56,13 @@ impl World {
     fn new_pairs(pairs: &[(u128, u128, u128)], ins_long: u128, ins_short: u128) -> Self {
         Self::new_pairs_at(pairs, ins_long, ins_short, PRICE, RATE_E9 as u64)
     }
-    fn new_pairs_at(pairs: &[(u128, u128, u128)], ins_long: u128, ins_short: u128, px: u64, cap: u64) -> Self {
+    fn new_pairs_at(
+        pairs: &[(u128, u128, u128)],
+        ins_long: u128,
+        ins_short: u128,
+        px: u64,
+        cap: u64,
+    ) -> Self {
         let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 100_000);
         cfg.max_abs_funding_e9_per_slot = cap;
         cfg.max_price_move_bps_per_slot = MOVE_CAP_BPS;
@@ -70,7 +76,13 @@ impl World {
         header
             .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, px, 1)
             .unwrap();
-        let mut w = World { header, markets, maker: account(0), traders: Vec::new(), slot: 1 };
+        let mut w = World {
+            header,
+            markets,
+            maker: account(0),
+            traders: Vec::new(),
+            slot: 1,
+        };
         let mut maker = w.maker;
         w.deposit(&mut maker, 1_000_000_000_000_000);
         w.maker = maker;
@@ -79,7 +91,8 @@ impl World {
             let mut s = account(2 + 2 * i as u32);
             w.deposit(&mut l, cl);
             w.deposit(&mut s, cs);
-            w.trade(&mut l, &mut s, units * POS_SCALE).expect("fresh pair opens");
+            w.trade(&mut l, &mut s, units * POS_SCALE)
+                .expect("fresh pair opens");
             w.traders.push(l);
             w.traders.push(s);
         }
@@ -98,7 +111,11 @@ impl World {
     fn deposit(&mut self, acct: &mut PortfolioAccountV16Account, amount: u128) {
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         let a0 = *acct;
-        if m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(acct), amount).is_err() { *acct = a0; }
+        if m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(acct), amount)
+            .is_err()
+        {
+            *acct = a0;
+        }
     }
 
     fn price(&self) -> u64 {
@@ -155,7 +172,9 @@ impl World {
         let slot = self.slot + 1;
         let (h, mk) = (self.header, self.markets.clone());
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-        if m.accrue_asset_to_not_atomic(0, slot, new, rate, true).is_err() {
+        if m.accrue_asset_to_not_atomic(0, slot, new, rate, true)
+            .is_err()
+        {
             self.header = h;
             self.markets = mk;
             return false;
@@ -172,14 +191,25 @@ impl World {
         let a = self.asset();
         let cur = a.effective_price;
         let target = (cur as i128 + cur as i128 * dp_bps as i128 / 10_000).max(1) as u64;
-        let anchor = if a.raw_oracle_target_price != target { a.effective_price } else { a.fund_px_last };
+        let anchor = if a.raw_oracle_target_price != target {
+            a.effective_price
+        } else {
+            a.fund_px_last
+        };
         let exposed = a.oi_eff_long_q != 0 || a.oi_eff_short_q != 0;
         let n = n.clamp(1, 2) as u64;
         let mut price = cur;
         let mut rem = 0u16;
         let mut steps = Vec::new();
         for i in 0..n {
-            let Ok((p, r)) = percolator::canonical_accrual_price_step_v16(price, target, anchor, MOVE_CAP_BPS, exposed, rem) else {
+            let Ok((p, r)) = percolator::canonical_accrual_price_step_v16(
+                price,
+                target,
+                anchor,
+                MOVE_CAP_BPS,
+                exposed,
+                rem,
+            ) else {
                 return false;
             };
             steps.push(percolator::AccrualStepV16 {
@@ -194,7 +224,9 @@ impl World {
         let now = self.slot + n;
         let (h, mk) = (self.header, self.markets.clone());
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-        if m.accrue_asset_path_to_not_atomic(0, now, target, &steps, true).is_err() {
+        if m.accrue_asset_path_to_not_atomic(0, now, target, &steps, true)
+            .is_err()
+        {
             self.header = h;
             self.markets = mk;
             return false;
@@ -209,7 +241,9 @@ impl World {
         let slot = self.slot;
         {
             let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-            for d in 0..2 { let _ = m.expire_source_backing_bucket_not_atomic(d, slot); }
+            for d in 0..2 {
+                let _ = m.expire_source_backing_bucket_not_atomic(d, slot);
+            }
         }
         self.refresh(acct)
     }
@@ -247,10 +281,12 @@ impl World {
         }
         let vault = self.header.vault.get();
         let senior = self.header.c_tot.get() + self.header.insurance.get();
-        assert!(vault >= senior, "P4: vault {vault} < c_tot + insurance {senior}");
+        assert!(
+            vault >= senior,
+            "P4: vault {vault} < c_tot + insurance {senior}"
+        );
     }
 }
-
 
 const INIT: i128 = 2_000_000_000_000_000;
 
@@ -295,12 +331,12 @@ fn scenario(winner_first: bool, up1: i64, steps1: usize, up2: i64, steps2: usize
 }
 
 const SCENARIOS: &[(i64, usize, i64, usize)] = &[
-    (100, 5, 100, 2),  // claim 5.0%, loss 2.0%
-    (100, 5, 150, 3),  // loss exhausts the claim and reaches capital
+    (100, 5, 100, 2), // claim 5.0%, loss 2.0%
+    (100, 5, 150, 3), // loss exhausts the claim and reaches capital
     (100, 10, 100, 4),
     (50, 20, 100, 5),
     (100, 5, 100, 5),
-    (50, 2, 50, 2),    // 1% / 1%
+    (50, 2, 50, 2), // 1% / 1%
 ];
 
 #[test]
@@ -326,9 +362,14 @@ fn r1_netting_is_independent_of_which_account_is_settled_first() {
 /// loss domain's own claims.
 #[test]
 fn r1_cross_domain_victim_is_order_independent() {
-    for &(up1, s1, dn, s2) in &[(100i64, 5usize, -100i64, 2usize), (100, 5, -150, 3), (50, 10, -100, 5)] {
+    for &(up1, s1, dn, s2) in &[
+        (100i64, 5usize, -100i64, 2usize),
+        (100, 5, -150, 3),
+        (50, 10, -100, 5),
+    ] {
         let run = |winner_first: bool| {
-            let mut w = World::new_pairs(&[(1_000_000_000_000_000, 1_000_000_000_000_000, 3)], 0, 0);
+            let mut w =
+                World::new_pairs(&[(1_000_000_000_000_000, 1_000_000_000_000_000, 3)], 0, 0);
             let mut l = w.traders[0];
             let mut s = w.traders[1];
             for _ in 0..s1 {
@@ -344,12 +385,19 @@ fn r1_cross_domain_victim_is_order_independent() {
             } else {
                 assert!(w.settle(&mut l) && w.settle(&mut s));
             }
-            let (el, es) = (effective_equity(&mut w, &mut l), effective_equity(&mut w, &mut s));
+            let (el, es) = (
+                effective_equity(&mut w, &mut l),
+                effective_equity(&mut w, &mut s),
+            );
             (el - 1_000_000_000_000_000, es - 1_000_000_000_000_000)
         };
         let (wf, lf) = (run(true), run(false));
         assert_eq!(wf, lf, "cross-domain case {up1}x{s1} then {dn}x{s2}");
-        assert!((wf.0 + wf.1).abs() <= 4, "cross-domain pair destroyed {}", wf.0 + wf.1);
+        assert!(
+            (wf.0 + wf.1).abs() <= 4,
+            "cross-domain pair destroyed {}",
+            wf.0 + wf.1
+        );
     }
 }
 
@@ -384,7 +432,12 @@ fn gen_ops(seed: u64, n: usize) -> Vec<Op> {
             let sz = 1 + (rng(&mut s) % 4_999_999) as u128 / (1 + rng(&mut s) as u128 % 3);
             match r {
                 0..=3 => Op::Acc(dp, rate),
-                4..=5 => Op::Path(dp, 1 + (rng(&mut s) % 2) as u8, rate, rng(&mut s).is_multiple_of(2)),
+                4..=5 => Op::Path(
+                    dp,
+                    1 + (rng(&mut s) % 2) as u8,
+                    rate,
+                    rng(&mut s).is_multiple_of(2),
+                ),
                 6..=7 => Op::Open(sz),
                 _ => Op::Rev(sz * (1 + rng(&mut s) as u128 % 3)),
             }
@@ -392,7 +445,12 @@ fn gen_ops(seed: u64, n: usize) -> Vec<Op> {
         .collect()
 }
 
-fn settle_pair(w: &mut World, l: &mut PortfolioAccountV16Account, s: &mut PortfolioAccountV16Account, rev: bool) {
+fn settle_pair(
+    w: &mut World,
+    l: &mut PortfolioAccountV16Account,
+    s: &mut PortfolioAccountV16Account,
+    rev: bool,
+) {
     if rev {
         w.settle(s);
         w.settle(l);
@@ -437,7 +495,10 @@ fn run_arm(ops: &[Op], every_slot: bool, rev: bool) -> ArmResult {
     settle_pair(&mut w, &mut l, &mut s, rev);
     w.traders[0] = l;
     w.traders[1] = s;
-    let eq = [effective_equity(&mut w, &mut l) - 1_000_000_000_000_000, effective_equity(&mut w, &mut s) - 1_000_000_000_000_000];
+    let eq = [
+        effective_equity(&mut w, &mut l) - 1_000_000_000_000_000,
+        effective_equity(&mut w, &mut s) - 1_000_000_000_000_000,
+    ];
     let leg = |a: &PortfolioAccountV16Account| {
         let r = a.legs[0].try_to_runtime().unwrap();
         (r.k_snap, r.f_snap, r.k_rem_num, r.f_rem_num)
@@ -449,7 +510,10 @@ fn run_arm(ops: &[Op], every_slot: bool, rev: bool) -> ArmResult {
 fn seeds_from_env(default: &[u64]) -> Vec<u64> {
     if let Ok(v) = std::env::var("SEEDS") {
         let (a, b) = v.split_once("..").expect("SEEDS must look like a..b");
-        let (a, b): (u64, u64) = (a.trim().parse().expect("SEEDS start"), b.trim().parse().expect("SEEDS end"));
+        let (a, b): (u64, u64) = (
+            a.trim().parse().expect("SEEDS start"),
+            b.trim().parse().expect("SEEDS end"),
+        );
         return (a..=b).collect();
     }
     if let Some(s) = std::env::var("SEED").ok().and_then(|v| v.parse().ok()) {
@@ -460,43 +524,66 @@ fn seeds_from_env(default: &[u64]) -> Vec<u64> {
 
 #[test]
 fn r1_effective_equity_is_cadence_and_order_invariant() {
-    let worlds: u64 = std::env::var("WORLDS").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+    let worlds: u64 = std::env::var("WORLDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400);
     let (mut worst_acct, mut worst_pair, mut worst_seed) = (0i128, 0i128, 0u64);
     for seed0 in seeds_from_env(&[5]) {
-    for i in 0..worlds {
-        let seed = seed0.wrapping_mul(1_000_003).wrapping_add(i);
-        let ops = gen_ops(seed, 60);
-        let arms = [run_arm(&ops, true, false), run_arm(&ops, false, false), run_arm(&ops, true, true), run_arm(&ops, false, true)];
-        for a in &arms[1..] {
-            assert_eq!(arms[0].1, a.1, "seed {seed}: legs must be bit-identical across cadence and order");
-        }
-        for (k, a) in arms.iter().enumerate() {
-            let pair = a.0[0] + a.0[1];
-            // never a gain, and the pair loses only the floor atoms of the settlements
-            assert!(pair <= 0, "seed {seed} arm {k}: pair gained {pair}");
-            if pair < worst_pair {
-                worst_pair = pair;
-                worst_seed = seed;
+        for i in 0..worlds {
+            let seed = seed0.wrapping_mul(1_000_003).wrapping_add(i);
+            let ops = gen_ops(seed, 60);
+            let arms = [
+                run_arm(&ops, true, false),
+                run_arm(&ops, false, false),
+                run_arm(&ops, true, true),
+                run_arm(&ops, false, true),
+            ];
+            for a in &arms[1..] {
+                assert_eq!(
+                    arms[0].1, a.1,
+                    "seed {seed}: legs must be bit-identical across cadence and order"
+                );
             }
-            for acct in 0..2 {
-                let d = (a.0[acct] - arms[0].0[acct]).abs();
-                if d > worst_acct {
-                    worst_acct = d;
+            for (k, a) in arms.iter().enumerate() {
+                let pair = a.0[0] + a.0[1];
+                // never a gain, and the pair loses only the floor atoms of the settlements
+                assert!(pair <= 0, "seed {seed} arm {k}: pair gained {pair}");
+                if pair < worst_pair {
+                    worst_pair = pair;
+                    worst_seed = seed;
+                }
+                for acct in 0..2 {
+                    let d = (a.0[acct] - arms[0].0[acct]).abs();
+                    if d > worst_acct {
+                        worst_acct = d;
+                    }
                 }
             }
         }
     }
-    }
     eprintln!("R1DIFF worlds {worlds}: worst per-account equity gap across arms {worst_acct}, worst pair deficit {worst_pair} (seed {worst_seed})");
-    assert!(worst_acct <= 8, "effective equity differs by cadence/order by up to {worst_acct} atoms");
-    assert!(worst_pair >= -64, "pair deficit {worst_pair} atoms exceeds the floor budget");
+    assert!(
+        worst_acct <= 8,
+        "effective equity differs by cadence/order by up to {worst_acct} atoms"
+    );
+    assert!(
+        worst_pair >= -64,
+        "pair deficit {worst_pair} atoms exceeds the floor budget"
+    );
 }
 
 /// S2: a victim whose claim is partly LIENED (the lien backs margin for its flipped, larger
 /// position; reached through the public trade flow with a poor account). The liened part cannot
 /// be consumed, so the tail of the loss eats retained face 1:1 and is not booked as support.
 /// Returns (victim, winner) effective equity and the victim's liened claim num after the flip.
-fn liened_scenario(winner_first: bool, cap: u128, sell: u128, up2: i64, steps2: usize) -> (i128, i128, u128) {
+fn liened_scenario(
+    winner_first: bool,
+    cap: u128,
+    sell: u128,
+    up2: i64,
+    steps2: usize,
+) -> (i128, i128, u128) {
     let mut w = World::new_pairs(&[(cap, 1_000_000_000_000_000, 3)], 0, 0);
     let mut l = w.traders[0];
     let mut s = w.traders[1];
@@ -505,15 +592,34 @@ fn liened_scenario(winner_first: bool, cap: u128, sell: u128, up2: i64, steps2: 
         assert!(w.settle(&mut l) && w.settle(&mut s));
     }
     w.trade(&mut s, &mut l, sell * POS_SCALE).expect("flip");
-    let liened: u128 = l.source_domains.iter().map(|d| d.source_claim_liened_num.get()).sum();
+    let liened: u128 = l
+        .source_domains
+        .iter()
+        .map(|d| d.source_claim_liened_num.get())
+        .sum();
     for _ in 0..steps2 {
         assert!(w.accrue(up2, 0));
     }
     let show = |tag: &str, a: &PortfolioAccountV16Account| {
         if std::env::var("LDBG").is_ok() {
-            let bound: u128 = a.source_domains.iter().map(|d| d.source_claim_bound_num.get()).sum();
-            let li: u128 = a.source_domains.iter().map(|d| d.source_claim_liened_num.get()).sum();
-            eprintln!("  {tag}: cap {} pnl {} reserved {} bound {} liened {}", a.capital.get() as i128 - cap as i128, a.pnl.get(), a.reserved_pnl.get(), bound / 1_000_000_000_000, li / 1_000_000_000_000);
+            let bound: u128 = a
+                .source_domains
+                .iter()
+                .map(|d| d.source_claim_bound_num.get())
+                .sum();
+            let li: u128 = a
+                .source_domains
+                .iter()
+                .map(|d| d.source_claim_liened_num.get())
+                .sum();
+            eprintln!(
+                "  {tag}: cap {} pnl {} reserved {} bound {} liened {}",
+                a.capital.get() as i128 - cap as i128,
+                a.pnl.get(),
+                a.reserved_pnl.get(),
+                bound / 1_000_000_000_000,
+                li / 1_000_000_000_000
+            );
         }
     };
     show("pre-settle victim", &l);
@@ -537,7 +643,14 @@ fn liened_scenario(winner_first: bool, cap: u128, sell: u128, up2: i64, steps2: 
 fn r1_liened_victim_is_order_independent_and_pinned() {
     let mut saw_lien = 0;
     let mut order_dep = vec![];
-    for &(cap, sell, up2, st2) in &[(330_000u128, 7u128, 100i64, 1usize), (330_000, 7, 100, 2), (330_000, 7, 50, 3), (300_000, 7, 100, 2), (400_000, 8, 100, 2), (400_000, 7, 150, 2)] {
+    for &(cap, sell, up2, st2) in &[
+        (330_000u128, 7u128, 100i64, 1usize),
+        (330_000, 7, 100, 2),
+        (330_000, 7, 50, 3),
+        (300_000, 7, 100, 2),
+        (400_000, 8, 100, 2),
+        (400_000, 7, 150, 2),
+    ] {
         let wf = liened_scenario(true, cap, sell, up2, st2);
         let lf = liened_scenario(false, cap, sell, up2, st2);
         if wf.2 > 0 {
@@ -550,10 +663,17 @@ fn r1_liened_victim_is_order_independent_and_pinned() {
         if wf != lf {
             order_dep.push((cap, sell, up2, st2));
         }
-        let idx = [(330_000u128, 7u128, 100i64, 1usize), (330_000, 7, 100, 2), (330_000, 7, 50, 3), (300_000, 7, 100, 2), (400_000, 8, 100, 2), (400_000, 7, 150, 2)]
-            .iter()
-            .position(|x| *x == (cap, sell, up2, st2))
-            .unwrap();
+        let idx = [
+            (330_000u128, 7u128, 100i64, 1usize),
+            (330_000, 7, 100, 2),
+            (330_000, 7, 50, 3),
+            (300_000, 7, 100, 2),
+            (400_000, 8, 100, 2),
+            (400_000, 7, 150, 2),
+        ]
+        .iter()
+        .position(|x| *x == (cap, sell, up2, st2))
+        .unwrap();
         // S5 (option B, protect the counterparty): equal to the pre-R1 engine's LOSER-FIRST result,
         // which is the base's WORST order for the counterparty in all six scenarios.
         const PINNED: [(i128, i128); 6] = [
@@ -565,15 +685,32 @@ fn r1_liened_victim_is_order_independent_and_pinned() {
             (8_282, -25_966),
         ];
         // the pre-R1 engine's worst counterparty equity over both orders (874fe33a)
-        const BASE_WORST_COUNTERPARTY: [i128; 6] = [-124_395, -68_530, -98_213, -79_939, -49_238, -25_966];
-        assert!(wf.1 >= BASE_WORST_COUNTERPARTY[idx], "counterparty below the pre-R1 worst order");
-        assert_eq!((wf.0, wf.1), PINNED[idx], "liened victim: pinned result moved");
+        const BASE_WORST_COUNTERPARTY: [i128; 6] =
+            [-124_395, -68_530, -98_213, -79_939, -49_238, -25_966];
+        assert!(
+            wf.1 >= BASE_WORST_COUNTERPARTY[idx],
+            "counterparty below the pre-R1 worst order"
+        );
+        assert_eq!(
+            (wf.0, wf.1),
+            PINNED[idx],
+            "liened victim: pinned result moved"
+        );
     }
-    assert!(order_dep.is_empty(), "liened victim: settle order changes effective equity in {order_dep:?}");
+    assert!(
+        order_dep.is_empty(),
+        "liened victim: settle order changes effective equity in {order_dep:?}"
+    );
     assert!(saw_lien >= 3, "the scenarios must actually carry a lien");
 }
 
-fn liened_scenario_try(winner_first: bool, cap: u128, sell: u128, up2: i64, steps2: usize) -> Option<(i128, i128)> {
+fn liened_scenario_try(
+    winner_first: bool,
+    cap: u128,
+    sell: u128,
+    up2: i64,
+    steps2: usize,
+) -> Option<(i128, i128)> {
     let mut w = World::new_pairs(&[(cap, 1_000_000_000_000_000, 3)], 0, 0);
     let mut l = w.traders[0];
     let mut s = w.traders[1];
@@ -583,10 +720,18 @@ fn liened_scenario_try(winner_first: bool, cap: u128, sell: u128, up2: i64, step
     }
     w.trade(&mut s, &mut l, sell * POS_SCALE).ok()?;
     for _ in 0..steps2 {
-        if !w.accrue(up2, 0) { return None; }
+        if !w.accrue(up2, 0) {
+            return None;
+        }
     }
-    let ok = if winner_first { w.settle(&mut s) && w.settle(&mut l) } else { w.settle(&mut l) && w.settle(&mut s) };
-    if !ok { return None; }
+    let ok = if winner_first {
+        w.settle(&mut s) && w.settle(&mut l)
+    } else {
+        w.settle(&mut l) && w.settle(&mut s)
+    };
+    if !ok {
+        return None;
+    }
     let el = effective_equity(&mut w, &mut l) - cap as i128;
     let es = effective_equity(&mut w, &mut s) - 1_000_000_000_000_000;
     Some((el, es))
@@ -606,11 +751,23 @@ fn r1_bankrupt_victim_is_order_independent_and_not_over_credited() {
         (-771_596, 399_999),
         (-1_279_126, 399_999),
     ];
-    for (n, &(cap, sell, up2, st2)) in [(330_000u128, 7u128, 200i64, 6usize), (330_000, 7, 200, 8), (330_000, 7, 200, 10), (400_000, 8, 200, 8), (400_000, 8, 200, 12)].iter().enumerate() {
+    for (n, &(cap, sell, up2, st2)) in [
+        (330_000u128, 7u128, 200i64, 6usize),
+        (330_000, 7, 200, 8),
+        (330_000, 7, 200, 10),
+        (400_000, 8, 200, 8),
+        (400_000, 8, 200, 12),
+    ]
+    .iter()
+    .enumerate()
+    {
         let wf = liened_scenario_try(true, cap, sell, up2, st2).expect("scenario runs");
         let lf = liened_scenario_try(false, cap, sell, up2, st2).expect("scenario runs");
         eprintln!("R1BANKRUPT cap {cap} sell {sell} {up2}x{st2}: {wf:?} {lf:?}");
-        assert_eq!(wf, lf, "bankrupt victim: settle order changes effective equity");
+        assert_eq!(
+            wf, lf,
+            "bankrupt victim: settle order changes effective equity"
+        );
         assert_eq!(wf, PINNED[n], "bankrupt victim: pinned result moved");
         assert!(wf.0 + wf.1 <= 4, "pair gained {}", wf.0 + wf.1);
     }
@@ -687,16 +844,36 @@ fn r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1() {
     // risk-increasing (spec), the lien is now created, and the case belongs to the liened class:
     // see `r1_equal_size_flip_victim_is_liened_and_order_independent` below.
     const CASES: [((u128, u128, i64, usize), (i128, i128, i128, i128)); 3] = [
-        ((330_000, 5, 200, 14), (-553_486, -518_502, -643_128, -518_502)),
-        ((330_000, 5, 200, 18), (-807_740, -747_130, -877_922, -747_130)),
-        ((330_000, 5, 200, 12), (-428_054, -410_804, -531_165, -410_804)),
+        (
+            (330_000, 5, 200, 14),
+            (-553_486, -518_502, -643_128, -518_502),
+        ),
+        (
+            (330_000, 5, 200, 18),
+            (-807_740, -747_130, -877_922, -747_130),
+        ),
+        (
+            (330_000, 5, 200, 12),
+            (-428_054, -410_804, -531_165, -410_804),
+        ),
     ];
     for &((cap, sell, up2, st2), (fwf, flf, bwf, blf)) in &CASES {
         let wf = liened_scenario_try(true, cap, sell, up2, st2).expect("scenario runs");
         let lf = liened_scenario_try(false, cap, sell, up2, st2).expect("scenario runs");
-        assert_eq!((wf.0, lf.0), (fwf, flf), "pinned neutral-rate result moved: {cap} {sell} {up2}x{st2}");
-        assert!(wf.0 >= bwf && lf.0 >= blf, "victim worse than the pre-R1 engine");
-        assert_eq!((wf.1, lf.1), (cap as i128 - 1, cap as i128 - 1), "the counterparty is untouched");
+        assert_eq!(
+            (wf.0, lf.0),
+            (fwf, flf),
+            "pinned neutral-rate result moved: {cap} {sell} {up2}x{st2}"
+        );
+        assert!(
+            wf.0 >= bwf && lf.0 >= blf,
+            "victim worse than the pre-R1 engine"
+        );
+        assert_eq!(
+            (wf.1, lf.1),
+            (cap as i128 - 1, cap as i128 - 1),
+            "the counterparty is untouched"
+        );
     }
 }
 
@@ -710,6 +887,9 @@ fn r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1() {
 fn r1_equal_size_flip_victim_is_liened_and_order_independent() {
     let wf = liened_scenario_try(true, 300_000, 6, 200, 10).expect("scenario runs");
     let lf = liened_scenario_try(false, 300_000, 6, 200, 10).expect("scenario runs");
-    assert_eq!(wf, lf, "a liened victim's settle order must not change effective equity");
+    assert_eq!(
+        wf, lf,
+        "a liened victim's settle order must not change effective equity"
+    );
     assert_eq!(wf, (-551_220, 299_999), "pinned (side-flip fix)");
 }

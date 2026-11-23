@@ -37,7 +37,8 @@ fn account(seed: u32) -> PortfolioAccountV16Account {
     let mut key = [0u8; 32];
     key[..4].copy_from_slice(&seed.to_le_bytes());
     key[31] = 0x77;
-    let h = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], key, [3; 32]));
+    let h =
+        ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], key, [3; 32]));
     let mut a = PortfolioAccountV16Account::default();
     a.init_empty_in_place(h).unwrap();
     a
@@ -75,7 +76,8 @@ fn run(price: u64, rate: i128, units: u128, slots: u64) -> (i128, i128, i128, i1
     let (l0, s0) = (equity(&long), equity(&short));
     for slot in 2..2 + slots {
         let mut m = MarketGroupV16ViewMut::new(&mut s.0, &mut s.1);
-        m.accrue_asset_to_not_atomic(0, slot, price, rate, true).unwrap();
+        m.accrue_asset_to_not_atomic(0, slot, price, rate, true)
+            .unwrap();
         m.markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(price);
     }
     {
@@ -87,7 +89,12 @@ fn run(price: u64, rate: i128, units: u128, slots: u64) -> (i128, i128, i128, i1
         m.validate_shape().unwrap();
     }
     let a = s.1[0].engine.asset.try_to_runtime().unwrap();
-    (equity(&long) - l0, equity(&short) - s0, a.f_long_num, a.f_short_num)
+    (
+        equity(&long) - l0,
+        equity(&short) - s0,
+        a.f_long_num,
+        a.f_short_num,
+    )
 }
 
 /// Intended funding in quote atoms for `units` over `slots` at `rate`, `price`: units * rate *
@@ -97,7 +104,13 @@ fn intended(price: u64, rate: i128, units: u128, slots: u64) -> f64 {
 }
 
 /// The assertions a correct engine must pass for one scenario.
-fn check(price: u64, rate: i128, units: u128, slots: u64, got: (i128, i128, i128, i128)) -> Result<(), String> {
+fn check(
+    price: u64,
+    rate: i128,
+    units: u128,
+    slots: u64,
+    got: (i128, i128, i128, i128),
+) -> Result<(), String> {
     let (dl, ds, fl, fs) = got;
     let want = intended(price, rate, units, slots);
     // Equal and opposite index on a balanced book.
@@ -151,7 +164,12 @@ fn v21_funding_parity_with_lot_exp_prices() {
                 check(px, rate, units, slots, got)
                     .unwrap_or_else(|e| panic!("price {px} (lot_exp {lot_exp}) rate {rate}: {e}"));
                 // parity: |long paid| and |short received| differ by at most the two settlement floors
-                assert!((got.0 + got.1).abs() <= 2, "parity at {px}: {} vs {}", got.0, got.1);
+                assert!(
+                    (got.0 + got.1).abs() <= 2,
+                    "parity at {px}: {} vs {}",
+                    got.0,
+                    got.1
+                );
             }
         }
     }
@@ -162,7 +180,11 @@ fn v21_funding_sign_mirrors_exactly() {
     for &price in &[3_086u64, 1_000_000] {
         let pos = run(price, 111, 1_000, 50);
         let neg = run(price, -111, 1_000, 50);
-        assert_eq!((pos.0, pos.1), (neg.1, neg.0), "price {price}: long under +r == short under -r");
+        assert_eq!(
+            (pos.0, pos.1),
+            (neg.1, neg.0),
+            "price {price}: long under +r == short under -r"
+        );
         assert_eq!((pos.2, pos.3), (neg.3, neg.2), "price {price}: F mirrors");
     }
 }
@@ -175,7 +197,9 @@ fn v21_negative_control_old_formula_fails_the_same_checks() {
     for &rate in &[111i128, -111] {
         let (fl, fs) = old_f_after(price, rate, slots);
         // settle one long/short leg of `units` against the old F (a_basis = ADL_ONE)
-        let settle = |f: i128| (units as i128 * POS_SCALE as i128 * f).div_euclid(ADL_ONE as i128 * POS_SCALE as i128);
+        let settle = |f: i128| {
+            (units as i128 * POS_SCALE as i128 * f).div_euclid(ADL_ONE as i128 * POS_SCALE as i128)
+        };
         let got = (settle(fl), settle(fs), fl, fs);
         assert!(
             check(price, rate, units, slots, got).is_err(),

@@ -20,8 +20,9 @@
 #![cfg(kani)]
 
 use percolator::{
-    kani_active_bitmap_set as active_bitmap_set, kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
-    kani_flat_deficit_route, kani_flat_locked_deficit_is_writable_off,
+    kani_active_bitmap_set as active_bitmap_set, kani_flat_deficit_route,
+    kani_flat_locked_deficit_is_writable_off,
+    kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_unattributed_loss_lock_after_pnl, FlatDeficitRouteV16, LossProvenanceV16,
     V16_EMPTY_ACTIVE_BITMAP,
 };
@@ -42,7 +43,10 @@ fn proof_gh292_locked_flat_close_is_not_flagged_by_any_escalation_predicate() {
     )
     .unwrap();
     assert!(!flagged);
-    kani::cover!(capital == 0, "zero capital, pnl < 0, flat after the close: deficit stranded");
+    kani::cover!(
+        capital == 0,
+        "zero capital, pnl < 0, flat after the close: deficit stranded"
+    );
 }
 
 #[kani::proof]
@@ -52,7 +56,10 @@ fn proof_gh292_lock_is_held_on_a_flat_deficit_and_released_only_by_repayment() {
     let flat = V16_EMPTY_ACTIVE_BITMAP;
     let locked_after = kani_unattributed_loss_lock_after_pnl(true, flat, new_pnl);
     assert_eq!(locked_after, new_pnl < 0);
-    kani::cover!(new_pnl < 0 && locked_after, "flat locked deficit keeps the lock");
+    kani::cover!(
+        new_pnl < 0 && locked_after,
+        "flat locked deficit keeps the lock"
+    );
     kani::cover!(new_pnl >= 0 && !locked_after, "repayment releases it");
 }
 
@@ -65,7 +72,9 @@ fn proof_gh292_writeoff_covers_every_stuck_state_and_releases_the_lock() {
     let pnl: i128 = kani::any();
     kani::assume(pnl < 0);
     let flat = V16_EMPTY_ACTIVE_BITMAP;
-    assert!(kani_flat_locked_deficit_is_writable_off(true, pnl, 0, true, true, false));
+    assert!(kani_flat_locked_deficit_is_writable_off(
+        true, pnl, 0, true, true, false
+    ));
     assert!(!kani_unattributed_loss_lock_after_pnl(true, flat, 0));
     // guard safety: each conjunct is necessary
     let live: bool = kani::any();
@@ -79,7 +88,10 @@ fn proof_gh292_writeoff_covers_every_stuck_state_and_releases_the_lock() {
     }
     let mut one_leg = V16_EMPTY_ACTIVE_BITMAP;
     active_bitmap_set(&mut one_leg, 0).unwrap();
-    kani::cover!(any_pnl < 0 && capital == 0 && locked && is_flat && live && !pending, "fires");
+    kani::cover!(
+        any_pnl < 0 && capital == 0 && locked && is_flat && live && !pending,
+        "fires"
+    );
 }
 
 /// b-prime-2: the flat-deficit route charges ONLY the recorded domain (never one the caller picks),
@@ -105,6 +117,12 @@ fn proof_gh292_bprime2_flat_route_charges_only_the_recorded_live_domain() {
             assert!(!live || !matches!(rec, LossProvenanceV16::Domain(_)));
         }
     }
-    kani::cover!(matches!(out, FlatDeficitRouteV16::ChargeDomain(_)), "attributed and live is charged");
-    kani::cover!(out == FlatDeficitRouteV16::WriteOff && live, "unattributable is written off even if live");
+    kani::cover!(
+        matches!(out, FlatDeficitRouteV16::ChargeDomain(_)),
+        "attributed and live is charged"
+    );
+    kani::cover!(
+        out == FlatDeficitRouteV16::WriteOff && live,
+        "unattributable is written off even if live"
+    );
 }

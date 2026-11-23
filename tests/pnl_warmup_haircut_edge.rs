@@ -42,7 +42,11 @@ impl W {
         header
             .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, PRICE, 1)
             .unwrap();
-        W { header, markets, slot: 1 }
+        W {
+            header,
+            markets,
+            slot: 1,
+        }
     }
     fn view(&mut self) -> MarketGroupV16ViewMut<'_, u64> {
         MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets)
@@ -52,7 +56,8 @@ impl W {
     }
     fn deposit(&mut self, a: &mut PortfolioAccountV16Account, amt: u128) {
         let mut m = self.view();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt).unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt)
+            .unwrap();
     }
     fn trade(
         &mut self,
@@ -65,7 +70,12 @@ impl W {
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
             &mut PortfolioV16ViewMut::new(long),
             &mut PortfolioV16ViewMut::new(short),
-            TradeRequestV16 { asset_index: 0, size_q: size, exec_price: p, fee_bps: 0 },
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: size,
+                exec_price: p,
+                fee_bps: 0,
+            },
             true,
         )
         .unwrap();
@@ -80,15 +90,19 @@ impl W {
             let new = (old + old * d as i128 / 10_000) as u64;
             let slot = self.slot;
             let mut m = self.view();
-            m.accrue_asset_to_not_atomic(0, slot, new, 0, true).expect("accrue");
+            m.accrue_asset_to_not_atomic(0, slot, new, 0, true)
+                .expect("accrue");
             m.markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(new);
         }
     }
     fn refresh(&mut self, a: &mut PortfolioAccountV16Account) {
         let mut m = self.view();
         let mut budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
-        m.full_account_refresh_with_s10_budget_not_atomic(&mut PortfolioV16ViewMut::new(a), &mut budget)
-            .expect("refresh");
+        m.full_account_refresh_with_s10_budget_not_atomic(
+            &mut PortfolioV16ViewMut::new(a),
+            &mut budget,
+        )
+        .expect("refresh");
     }
     /// refresh first (conversion needs a valid health cert), then convert
     fn convert(&mut self, a: &mut PortfolioAccountV16Account) -> Result<u128, V16Error> {
@@ -140,7 +154,12 @@ impl W {
         panic!("refresh did not converge");
     }
     /// close `size` of a's long against b, then refresh both
-    fn close_flat(&mut self, a: &mut PortfolioAccountV16Account, b: &mut PortfolioAccountV16Account, size: i128) {
+    fn close_flat(
+        &mut self,
+        a: &mut PortfolioAccountV16Account,
+        b: &mut PortfolioAccountV16Account,
+        size: i128,
+    ) {
         self.refresh(a);
         self.refresh(b);
         self.trade(b, a, size);
@@ -159,7 +178,10 @@ impl W {
 }
 
 /// winner `a` (long 10 units, +bps), loser `b`, both settled and flat. Returns the world.
-fn settled_winner(a_dep: u128, bps: i64) -> (W, PortfolioAccountV16Account, PortfolioAccountV16Account) {
+fn settled_winner(
+    a_dep: u128,
+    bps: i64,
+) -> (W, PortfolioAccountV16Account, PortfolioAccountV16Account) {
     let mut w = W::new();
     let (mut a, mut b) = (account(1), account(2));
     w.deposit(&mut a, a_dep);
@@ -179,7 +201,10 @@ fn convert_zero_pnl_is_a_noop() {
     w.deposit(&mut a, DEP);
     let (v, c) = (w.vault(), w.c_tot());
     assert_eq!(w.convert(&mut a), Ok(0));
-    assert_eq!((a.capital.get(), a.pnl.get(), w.vault(), w.c_tot()), (DEP, 0, v, c));
+    assert_eq!(
+        (a.capital.get(), a.pnl.get(), w.vault(), w.c_tot()),
+        (DEP, 0, v, c)
+    );
 }
 
 #[test]
@@ -213,7 +238,11 @@ fn convert_conserves_vault_and_moves_c_tot_by_exactly_the_converted_amount() {
     let got = w.convert(&mut a).unwrap();
     assert_eq!(w.vault(), v0, "conversion moves no tokens");
     assert_eq!(w.c_tot(), c0 + got);
-    assert_eq!(w.insurance(), i0, "insurance untouched by a fully backed conversion");
+    assert_eq!(
+        w.insurance(),
+        i0,
+        "insurance untouched by a fully backed conversion"
+    );
     assert!(w.c_tot() + w.insurance() <= w.vault());
 }
 
@@ -238,7 +267,11 @@ fn convert_total_value_is_conserved_across_both_sides() {
     let before = total(&a, &b);
     w.convert(&mut a).unwrap();
     w.convert(&mut b).unwrap();
-    assert_eq!(total(&a, &b), before, "conversion only relabels pnl as capital");
+    assert_eq!(
+        total(&a, &b),
+        before,
+        "conversion only relabels pnl as capital"
+    );
 }
 
 #[test]
@@ -286,7 +319,11 @@ fn convert_refused_while_position_is_open_and_unsettled() {
     // pnl is positive but the leg is still open: the conversion is gated
     assert!(a.pnl.get() > 0);
     assert!(w.convert_raw(&mut a).is_err());
-    assert_eq!(a.capital.get(), DEP, "no capital created by a refused conversion");
+    assert_eq!(
+        a.capital.get(),
+        DEP,
+        "no capital created by a refused conversion"
+    );
 }
 
 #[test]
@@ -340,5 +377,9 @@ fn convert_without_fresh_cert_is_refused_stale_after_a_conversion() {
     let (mut w, mut a, _b) = settled_winner(DEP, 300);
     assert!(w.convert(&mut a).unwrap() > 0);
     assert_eq!(w.convert_raw(&mut a), Err(V16Error::Stale));
-    assert_eq!(w.convert(&mut a), Ok(0), "after a refresh it is a clean zero");
+    assert_eq!(
+        w.convert(&mut a),
+        Ok(0),
+        "after a refresh it is a clean zero"
+    );
 }

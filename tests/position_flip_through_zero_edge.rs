@@ -9,8 +9,8 @@
 use percolator::POS_SCALE;
 use percolator::{
     EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
-    PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
-    TradeRequestV16, V16Config, V16Error, V16PodU64,
+    PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
+    ProvenanceHeaderV16Account, TradeRequestV16, V16Config, V16Error, V16PodU64,
 };
 
 const PRICE: u64 = 1_000_000;
@@ -21,7 +21,8 @@ fn account(seed: u32) -> PortfolioAccountV16Account {
     let mut key = [0u8; 32];
     key[..4].copy_from_slice(&seed.to_le_bytes());
     key[31] = 0x5A;
-    let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], key, [3; 32]));
+    let header =
+        ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], key, [3; 32]));
     let mut a = PortfolioAccountV16Account::default();
     a.init_empty_in_place(header).unwrap();
     a
@@ -45,16 +46,25 @@ impl W {
         cfg.min_funding_lifetime_slots = 10_000_000;
         let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 1, 0).unwrap();
         let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
-        header.activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, PRICE, 1).unwrap();
-        W { header, markets, slot: 1 }
+        header
+            .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, PRICE, 1)
+            .unwrap();
+        W {
+            header,
+            markets,
+            slot: 1,
+        }
     }
     fn view(&mut self) -> MarketGroupV16ViewMut<'_, u64> {
         MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets)
     }
-    fn price(&self) -> u64 { self.markets[0].engine.asset.effective_price.get() }
+    fn price(&self) -> u64 {
+        self.markets[0].engine.asset.effective_price.get()
+    }
     fn deposit(&mut self, a: &mut PortfolioAccountV16Account, amt: u128) {
         let mut m = self.view();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt).unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt)
+            .unwrap();
     }
     /// `long` gets +size (negative: `long` goes short). `long` is the taker and pays the fee.
     fn try_trade(
@@ -64,7 +74,12 @@ impl W {
         size: i128,
         fee_bps: u64,
     ) -> Result<percolator::BatchTradeOutcomeV16, V16Error> {
-        let r = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: self.price(), fee_bps };
+        let r = TradeRequestV16 {
+            asset_index: 0,
+            size_q: size,
+            exec_price: self.price(),
+            fee_bps,
+        };
         let mut m = self.view();
         m.execute_batch_with_fee_loss_stale_scoped_not_atomic(
             &mut PortfolioV16ViewMut::new(long),
@@ -73,7 +88,12 @@ impl W {
             true,
         )
     }
-    fn trade(&mut self, long: &mut PortfolioAccountV16Account, short: &mut PortfolioAccountV16Account, size: i128) {
+    fn trade(
+        &mut self,
+        long: &mut PortfolioAccountV16Account,
+        short: &mut PortfolioAccountV16Account,
+        size: i128,
+    ) {
         self.try_trade(long, short, size, 0).expect("trade");
     }
     /// one slot of accrual at `bps` price move and funding `rate` (e9 per slot)
@@ -83,13 +103,18 @@ impl W {
         let new = (old + old * bps as i128 / 10_000) as u64;
         let slot = self.slot;
         let mut m = self.view();
-        m.accrue_asset_to_not_atomic(0, slot, new, rate, true).expect("accrue");
+        m.accrue_asset_to_not_atomic(0, slot, new, rate, true)
+            .expect("accrue");
         m.markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(new);
     }
     fn refresh(&mut self, a: &mut PortfolioAccountV16Account) {
         let mut m = self.view();
         let mut budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
-        m.full_account_refresh_with_s10_budget_not_atomic(&mut PortfolioV16ViewMut::new(a), &mut budget).expect("refresh");
+        m.full_account_refresh_with_s10_budget_not_atomic(
+            &mut PortfolioV16ViewMut::new(a),
+            &mut budget,
+        )
+        .expect("refresh");
     }
     fn oi(&self) -> (u128, u128) {
         let a = &self.markets[0].engine.asset;
@@ -97,7 +122,10 @@ impl W {
     }
     fn counts(&self) -> (u64, u64) {
         let a = &self.markets[0].engine.asset;
-        (a.stored_pos_count_long.get(), a.stored_pos_count_short.get())
+        (
+            a.stored_pos_count_long.get(),
+            a.stored_pos_count_short.get(),
+        )
     }
 }
 
@@ -109,8 +137,12 @@ fn pos(a: &PortfolioAccountV16Account) -> i128 {
     }
     0
 }
-fn n_legs(a: &PortfolioAccountV16Account) -> usize { a.legs.iter().filter(|l| l.active != 0).count() }
-fn value(a: &PortfolioAccountV16Account) -> i128 { a.capital.get() as i128 + a.pnl.get() }
+fn n_legs(a: &PortfolioAccountV16Account) -> usize {
+    a.legs.iter().filter(|l| l.active != 0).count()
+}
+fn value(a: &PortfolioAccountV16Account) -> i128 {
+    a.capital.get() as i128 + a.pnl.get()
+}
 
 fn pair(fee_cap: u64) -> (W, PortfolioAccountV16Account, PortfolioAccountV16Account) {
     let mut w = W::new(fee_cap);
@@ -121,7 +153,11 @@ fn pair(fee_cap: u64) -> (W, PortfolioAccountV16Account, PortfolioAccountV16Acco
 }
 
 /// refresh both, return the pair's total settled value
-fn total(w: &mut W, a: &mut PortfolioAccountV16Account, b: &mut PortfolioAccountV16Account) -> i128 {
+fn total(
+    w: &mut W,
+    a: &mut PortfolioAccountV16Account,
+    b: &mut PortfolioAccountV16Account,
+) -> i128 {
     w.refresh(a);
     w.refresh(b);
     value(a) + value(b)
@@ -186,10 +222,22 @@ fn flip_from_a_one_atom_position_to_a_large_opposite_one() {
 fn rejected_flip_leaves_state_untouched() {
     let (mut w, mut a, mut b) = pair(0);
     w.trade(&mut a, &mut b, 3 * U);
-    let snap = (pos(&a), pos(&b), a.capital.get(), b.capital.get(), w.oi(), w.counts());
+    let snap = (
+        pos(&a),
+        pos(&b),
+        a.capital.get(),
+        b.capital.get(),
+        w.oi(),
+        w.counts(),
+    );
     // zero-size and zero-price flips are refused
     assert!(w.try_trade(&mut b, &mut a, 0, 0).is_err());
-    let r = TradeRequestV16 { asset_index: 0, size_q: 5 * U, exec_price: 0, fee_bps: 0 };
+    let r = TradeRequestV16 {
+        asset_index: 0,
+        size_q: 5 * U,
+        exec_price: 0,
+        fee_bps: 0,
+    };
     let mut m = w.view();
     assert!(m
         .execute_batch_with_fee_loss_stale_scoped_not_atomic(
@@ -199,7 +247,17 @@ fn rejected_flip_leaves_state_untouched() {
             true
         )
         .is_err());
-    assert_eq!(snap, (pos(&a), pos(&b), a.capital.get(), b.capital.get(), w.oi(), w.counts()));
+    assert_eq!(
+        snap,
+        (
+            pos(&a),
+            pos(&b),
+            a.capital.get(),
+            b.capital.get(),
+            w.oi(),
+            w.counts()
+        )
+    );
 }
 
 // ---------- partial sizes ----------
@@ -222,8 +280,16 @@ fn flip_in_two_partial_trades_equals_one_flip() {
     };
     let one = run(&[10 * U]);
     assert_eq!(run(&[4 * U, 6 * U]), one, "4 then 6");
-    assert_eq!(run(&[6 * U, 3 * U, 1 * U]), one, "exactly flat, then open in two");
-    assert_eq!(run(&[5 * U + 7, 5 * U - 7]), one, "odd split across the zero crossing");
+    assert_eq!(
+        run(&[6 * U, 3 * U, 1 * U]),
+        one,
+        "exactly flat, then open in two"
+    );
+    assert_eq!(
+        run(&[5 * U + 7, 5 * U - 7]),
+        one,
+        "odd split across the zero crossing"
+    );
 }
 
 // ---------- fees at the flip ----------
@@ -234,7 +300,9 @@ fn fee_at_a_flip_is_charged_on_the_whole_trade_notional() {
     w.trade(&mut a, &mut b, 3 * U);
     // a (taker) sells 8: closes 3, opens short 5. 10 bps of 8 * PRICE = 8_000.
     let before = (a.capital.get(), b.capital.get());
-    let out = w.try_trade(&mut a, &mut b, -8 * U, 10).expect("flip with fee");
+    let out = w
+        .try_trade(&mut a, &mut b, -8 * U, 10)
+        .expect("flip with fee");
     assert_eq!(out.notional, 8 * PRICE as u128);
     assert_eq!((out.fee_a, out.fee_b), (8_000, 0));
     assert_eq!(before.0 - a.capital.get(), 8_000);
@@ -246,7 +314,9 @@ fn fee_at_a_flip_is_charged_on_the_whole_trade_notional() {
 fn fee_at_an_exactly_flat_close_is_charged_on_the_closed_size() {
     let (mut w, mut a, mut b) = pair(100);
     w.trade(&mut a, &mut b, 3 * U);
-    let out = w.try_trade(&mut a, &mut b, -3 * U, 10).expect("close with fee");
+    let out = w
+        .try_trade(&mut a, &mut b, -3 * U, 10)
+        .expect("close with fee");
     assert_eq!(out.fee_a, 3_000);
     assert_eq!(n_legs(&a), 0);
 }
@@ -268,7 +338,9 @@ fn fees_over_repeated_flips_only_move_value_out_of_the_pair() {
     let (mut w, mut a, mut b) = pair(100);
     let v0 = value(&a) + value(&b);
     let mut fees: i128 = 0;
-    w.try_trade(&mut a, &mut b, 4 * U, 10).map(|o| fees += o.fee_a as i128 + o.fee_b as i128).unwrap();
+    w.try_trade(&mut a, &mut b, 4 * U, 10)
+        .map(|o| fees += o.fee_a as i128 + o.fee_b as i128)
+        .unwrap();
     for _ in 0..6 {
         // alternate long -> short -> long, each a through-zero flip by 8
         let o = w.try_trade(&mut b, &mut a, 8 * U, 10).unwrap();
@@ -301,7 +373,11 @@ fn flip_after_a_gain_banks_the_gain_and_opens_the_remainder_flat() {
     assert_eq!(value(&a), va);
     assert!(va > BIG as i128, "a booked a gain from the long");
     assert!(vb < BIG as i128, "b booked the matching loss");
-    assert_eq!(va - BIG as i128, BIG as i128 - vb, "gain equals loss exactly");
+    assert_eq!(
+        va - BIG as i128,
+        BIG as i128 - vb,
+        "gain equals loss exactly"
+    );
     let _ = p;
 }
 
@@ -352,7 +428,11 @@ fn funding_accrued_before_a_flip_is_charged_to_the_old_side() {
     w.trade(&mut b, &mut a, 100 * U);
     w.refresh(&mut a);
     w.refresh(&mut b);
-    assert_eq!(value(&a) + value(&b), v0, "funding is a transfer inside the pair");
+    assert_eq!(
+        value(&a) + value(&b),
+        v0,
+        "funding is a transfer inside the pair"
+    );
     assert_eq!(pos(&a), -50 * U);
     // old long paid, old short received
     assert!(value(&a) < BIG as i128);

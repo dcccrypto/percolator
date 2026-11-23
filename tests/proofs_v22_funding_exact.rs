@@ -67,7 +67,10 @@ fn proof_v22_funding_unit_a_is_exact_and_sign_symmetric() {
     kani::cover!(n > 0, "longs pay");
     kani::cover!(n < 0, "shorts pay");
     kani::cover!(n == 0, "zero funding");
-    kani::cover!(n.unsigned_abs() == MAG_BOUND - 1, "the bound itself is reachable");
+    kani::cover!(
+        n.unsigned_abs() == MAG_BOUND - 1,
+        "the bound itself is reachable"
+    );
 }
 
 /// L. The divider's contract, proven on the real function: for p < 2^114,
@@ -100,7 +103,10 @@ fn funding_div_rem_model(p: u128) -> (u128, u128) {
 
 /// Under the H2 bound `mag.checked_mul(a)` cannot overflow, so the U256 fallback is dead.
 fn u256_fallback_unreachable(_a: U256, _b: U256, _d: U256) -> (U256, U256) {
-    assert!(false, "U256 fallback reached with |funding_num| < 2^64 and a <= ADL_ONE");
+    assert!(
+        false,
+        "U256 fallback reached with |funding_num| < 2^64 and a <= ADL_ONE"
+    );
     (U256::from_u128(0), U256::from_u128(0))
 }
 
@@ -113,7 +119,10 @@ fn u256_fallback_unreachable(_a: U256, _b: U256, _d: U256) -> (U256, U256) {
 ///   it never errors.
 #[kani::proof]
 #[kani::stub(percolator::v16::funding_div_rem, funding_div_rem_model)]
-#[kani::stub(percolator::wide_math::mul_div_floor_u256_with_rem, u256_fallback_unreachable)]
+#[kani::stub(
+    percolator::wide_math::mul_div_floor_u256_with_rem,
+    u256_fallback_unreachable
+)]
 #[kani::solver(cadical)]
 fn proof_v22_funding_shrunk_a_rounds_against_the_payer_bounded() {
     let mag: u128 = kani::any();
@@ -124,7 +133,11 @@ fn proof_v22_funding_shrunk_a_rounds_against_the_payer_bounded() {
     kani::assume(a_long > 0 && a_long <= ADL_ONE);
     kani::assume(a_short > 0 && a_short <= ADL_ONE);
     kani::assume(a_long < ADL_ONE || a_short < ADL_ONE);
-    let n = if longs_pay { mag as i128 } else { -(mag as i128) };
+    let n = if longs_pay {
+        mag as i128
+    } else {
+        -(mag as i128)
+    };
 
     let r = kani_funding_index_deltas(n, a_long, a_short);
     assert!(r.is_ok());
@@ -151,8 +164,17 @@ fn proof_v22_funding_shrunk_a_rounds_against_the_payer_bounded() {
 
     kani::cover!(longs_pay && a_long < ADL_ONE, "shrunk payer (long)");
     kani::cover!(!longs_pay && a_short < ADL_ONE, "shrunk payer (short)");
-    kani::cover!(a_pay == ADL_ONE && a_recv < ADL_ONE, "fast-path payer, rounded receiver");
-    kani::cover!(a_pay == a_recv && pay == recv + 1, "rounding gap of one index unit");
+    kani::cover!(
+        a_pay == ADL_ONE && a_recv < ADL_ONE,
+        "fast-path payer, rounded receiver"
+    );
+    kani::cover!(
+        a_pay == a_recv && pay == recv + 1,
+        "rounding gap of one index unit"
+    );
     kani::cover!(a_pay == a_recv && pay == recv, "shrunk A dividing exactly");
-    kani::cover!(mag == MAG_BOUND - 1 && a_pay == ADL_ONE - 1, "top of the bounded range");
+    kani::cover!(
+        mag == MAG_BOUND - 1 && a_pay == ADL_ONE - 1,
+        "top of the bounded range"
+    );
 }

@@ -43,10 +43,19 @@ fn proof_v22_livefix_liquidation_slot_prefers_unblocked_and_is_total() {
         Some(p) => assert_eq!(r, Some(p)),
         None => assert_eq!(r, first_liq),
     }
-    kani::cover!(first_pref.is_some() && first_pref != first_liq, "fix case: skips a blocked first leg");
-    kani::cover!(first_pref.is_none() && first_liq.is_some(), "all blocked: falls back to the first leg");
+    kani::cover!(
+        first_pref.is_some() && first_pref != first_liq,
+        "fix case: skips a blocked first leg"
+    );
+    kani::cover!(
+        first_pref.is_none() && first_liq.is_some(),
+        "all blocked: falls back to the first leg"
+    );
     kani::cover!(first_liq.is_none(), "nothing liquidatable");
-    kani::cover!((0..N).any(|j| unblocked[j] && !liquidatable[j]) && r.is_some(), "unblocked not a subset");
+    kani::cover!(
+        (0..N).any(|j| unblocked[j] && !liquidatable[j]) && r.is_some(),
+        "unblocked not a subset"
+    );
 }
 
 /// Upstream #176 merged with F-LIVE-1, for every flag vector and every risk vector
@@ -109,10 +118,22 @@ fn proof_v22_livefix_liquidation_slot_riskiest_unblocked_reducible_leg() {
             None => assert_eq!(r, first_liq),
         }
     }
-    kani::cover!(any_candidate && r != first_pref, "#176: a riskier later leg beats the first unblocked leg");
-    kani::cover!(any_candidate && r == first_pref, "#176: the first unblocked leg is also the riskiest");
-    kani::cover!(!any_candidate && first_pref.is_some(), "no reducible leg: F-LIVE-1 first unblocked");
-    kani::cover!(first_pref.is_none() && first_liq.is_some(), "all blocked: falls back to the first leg");
+    kani::cover!(
+        any_candidate && r != first_pref,
+        "#176: a riskier later leg beats the first unblocked leg"
+    );
+    kani::cover!(
+        any_candidate && r == first_pref,
+        "#176: the first unblocked leg is also the riskiest"
+    );
+    kani::cover!(
+        !any_candidate && first_pref.is_some(),
+        "no reducible leg: F-LIVE-1 first unblocked"
+    );
+    kani::cover!(
+        first_pref.is_none() && first_liq.is_some(),
+        "all blocked: falls back to the first leg"
+    );
     kani::cover!(
         (0..N).any(|j| risk[j].is_some() && !(liquidatable[j] && unblocked[j])) && r.is_some(),
         "risk not masked by the flags"

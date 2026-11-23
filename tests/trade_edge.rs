@@ -8,8 +8,8 @@
 use percolator::POS_SCALE;
 use percolator::{
     EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
-    PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
-    TradeRequestV16, V16Config, V16Error, V16PodU64,
+    PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
+    ProvenanceHeaderV16Account, TradeRequestV16, V16Config, V16Error, V16PodU64,
 };
 
 const PRICE: u64 = 1_000_000;
@@ -20,7 +20,8 @@ fn account(seed: u32) -> PortfolioAccountV16Account {
     let mut key = [0u8; 32];
     key[..4].copy_from_slice(&seed.to_le_bytes());
     key[31] = 0x5A;
-    let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], key, [3; 32]));
+    let header =
+        ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new([1; 32], key, [3; 32]));
     let mut a = PortfolioAccountV16Account::default();
     a.init_empty_in_place(header).unwrap();
     a
@@ -34,9 +35,12 @@ struct W {
 }
 
 impl W {
-    fn new(n: usize) -> Self { W::with_fee_cap(n, 0) }
+    fn new(n: usize) -> Self {
+        W::with_fee_cap(n, 0)
+    }
     fn with_fee_cap(n: usize, fee_cap: u64) -> Self {
-        let mut cfg = V16Config::public_user_fund_with_market_slots(n as u16, n as u32, 0, 6_480_000);
+        let mut cfg =
+            V16Config::public_user_fund_with_market_slots(n as u16, n as u32, 0, 6_480_000);
         cfg.max_abs_funding_e9_per_slot = 10_000;
         cfg.max_price_move_bps_per_slot = 200;
         cfg.initial_margin_bps = 1_000;
@@ -44,20 +48,38 @@ impl W {
         cfg.max_accrual_dt_slots = 2;
         cfg.max_trading_fee_bps = fee_cap;
         cfg.min_funding_lifetime_slots = 10_000_000;
-        let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, n as u32, 0).unwrap();
-        let mut markets: Vec<Market<u64>> = (0..n as u64).map(|i| Market::new(i, EngineAssetSlotV16Account::default())).collect();
+        let mut header =
+            MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, n as u32, 0).unwrap();
+        let mut markets: Vec<Market<u64>> = (0..n as u64)
+            .map(|i| Market::new(i, EngineAssetSlotV16Account::default()))
+            .collect();
         for i in 0..n {
-            header.activate_empty_asset_slot_not_atomic(i as u32, &mut markets[i].engine, PRICE, 1 + 2 * i as u64).unwrap();
+            header
+                .activate_empty_asset_slot_not_atomic(
+                    i as u32,
+                    &mut markets[i].engine,
+                    PRICE,
+                    1 + 2 * i as u64,
+                )
+                .unwrap();
         }
-        W { header, markets, slot: 2 * n as u64 - 1, n }
+        W {
+            header,
+            markets,
+            slot: 2 * n as u64 - 1,
+            n,
+        }
     }
     fn view(&mut self) -> MarketGroupV16ViewMut<'_, u64> {
         MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets)
     }
-    fn price(&self, i: usize) -> u64 { self.markets[i].engine.asset.effective_price.get() }
+    fn price(&self, i: usize) -> u64 {
+        self.markets[i].engine.asset.effective_price.get()
+    }
     fn deposit(&mut self, a: &mut PortfolioAccountV16Account, amt: u128) {
         let mut m = self.view();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt).unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(a), amt)
+            .unwrap();
     }
     fn try_batch(
         &mut self,
@@ -74,14 +96,31 @@ impl W {
         )
     }
     fn req(&self, i: usize, size: i128, fee_bps: u64) -> TradeRequestV16 {
-        TradeRequestV16 { asset_index: i, size_q: size, exec_price: self.price(i), fee_bps }
+        TradeRequestV16 {
+            asset_index: i,
+            size_q: size,
+            exec_price: self.price(i),
+            fee_bps,
+        }
     }
     /// `long` gets +size on asset i (negative: `long` goes short).
-    fn try_trade(&mut self, i: usize, long: &mut PortfolioAccountV16Account, short: &mut PortfolioAccountV16Account, size: i128) -> Result<(), V16Error> {
+    fn try_trade(
+        &mut self,
+        i: usize,
+        long: &mut PortfolioAccountV16Account,
+        short: &mut PortfolioAccountV16Account,
+        size: i128,
+    ) -> Result<(), V16Error> {
         let r = self.req(i, size, 0);
         self.try_batch(long, short, &[r]).map(|_| ())
     }
-    fn trade(&mut self, i: usize, long: &mut PortfolioAccountV16Account, short: &mut PortfolioAccountV16Account, size: i128) {
+    fn trade(
+        &mut self,
+        i: usize,
+        long: &mut PortfolioAccountV16Account,
+        short: &mut PortfolioAccountV16Account,
+        size: i128,
+    ) {
         self.try_trade(i, long, short, size).expect("trade");
     }
     fn move_price(&mut self, i: usize, bps: i64) {
@@ -93,10 +132,15 @@ impl W {
             self.slot += 1;
             for j in 0..self.n {
                 let old = self.price(j) as i128;
-                let new = if j == i { (old + old * d as i128 / 10_000) as u64 } else { old as u64 };
+                let new = if j == i {
+                    (old + old * d as i128 / 10_000) as u64
+                } else {
+                    old as u64
+                };
                 let slot = self.slot;
                 let mut m = self.view();
-                m.accrue_asset_to_not_atomic(j, slot, new, 0, true).expect("accrue");
+                m.accrue_asset_to_not_atomic(j, slot, new, 0, true)
+                    .expect("accrue");
                 m.markets[j].engine.asset.raw_oracle_target_price = V16PodU64::new(new);
             }
         }
@@ -104,7 +148,11 @@ impl W {
     fn refresh(&mut self, a: &mut PortfolioAccountV16Account) {
         let mut m = self.view();
         let mut budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
-        m.full_account_refresh_with_s10_budget_not_atomic(&mut PortfolioV16ViewMut::new(a), &mut budget).expect("refresh");
+        m.full_account_refresh_with_s10_budget_not_atomic(
+            &mut PortfolioV16ViewMut::new(a),
+            &mut budget,
+        )
+        .expect("refresh");
     }
     fn oi(&self, i: usize) -> (u128, u128) {
         let a = &self.markets[i].engine.asset;
@@ -112,7 +160,10 @@ impl W {
     }
     fn pos_counts(&self, i: usize) -> (u64, u64) {
         let a = &self.markets[i].engine.asset;
-        (a.stored_pos_count_long.get(), a.stored_pos_count_short.get())
+        (
+            a.stored_pos_count_long.get(),
+            a.stored_pos_count_short.get(),
+        )
     }
 }
 
@@ -125,12 +176,20 @@ fn pos(a: &PortfolioAccountV16Account, i: usize) -> i128 {
     }
     0
 }
-fn n_legs(a: &PortfolioAccountV16Account) -> usize { a.legs.iter().filter(|l| l.active != 0).count() }
-fn bitmap_ones(a: &PortfolioAccountV16Account) -> u32 { a.active_bitmap.iter().map(|w| w.get().count_ones()).sum() }
+fn n_legs(a: &PortfolioAccountV16Account) -> usize {
+    a.legs.iter().filter(|l| l.active != 0).count()
+}
+fn bitmap_ones(a: &PortfolioAccountV16Account) -> u32 {
+    a.active_bitmap.iter().map(|w| w.get().count_ones()).sum()
+}
 /// settled account value: capital plus recorded pnl
-fn value(a: &PortfolioAccountV16Account) -> i128 { a.capital.get() as i128 + a.pnl.get() }
+fn value(a: &PortfolioAccountV16Account) -> i128 {
+    a.capital.get() as i128 + a.pnl.get()
+}
 
-fn pair() -> (W, PortfolioAccountV16Account, PortfolioAccountV16Account) { pair_n(1) }
+fn pair() -> (W, PortfolioAccountV16Account, PortfolioAccountV16Account) {
+    pair_n(1)
+}
 /// a batch may carry at most `max_portfolio_assets` fills, so batch tests use a wider group
 fn pair_n(n: usize) -> (W, PortfolioAccountV16Account, PortfolioAccountV16Account) {
     let mut w = W::new(n);
@@ -176,28 +235,50 @@ fn open_at_the_oracle_price_moves_no_value() {
 #[test]
 fn zero_size_trade_is_rejected_and_creates_no_leg() {
     let (mut w, mut a, mut b) = pair();
-    assert_eq!(w.try_trade(0, &mut a, &mut b, 0), Err(V16Error::InvalidConfig));
+    assert_eq!(
+        w.try_trade(0, &mut a, &mut b, 0),
+        Err(V16Error::InvalidConfig)
+    );
     assert_eq!(n_legs(&a), 0);
 }
 
 #[test]
 fn zero_exec_price_is_rejected() {
     let (mut w, mut a, mut b) = pair();
-    let r = TradeRequestV16 { asset_index: 0, size_q: U, exec_price: 0, fee_bps: 0 };
-    assert_eq!(w.try_batch(&mut a, &mut b, &[r]).map(|_| ()), Err(V16Error::InvalidConfig));
+    let r = TradeRequestV16 {
+        asset_index: 0,
+        size_q: U,
+        exec_price: 0,
+        fee_bps: 0,
+    };
+    assert_eq!(
+        w.try_batch(&mut a, &mut b, &[r]).map(|_| ()),
+        Err(V16Error::InvalidConfig)
+    );
 }
 
 #[test]
 fn trade_on_a_nonexistent_asset_index_is_rejected() {
     let (mut w, mut a, mut b) = pair();
-    let r = TradeRequestV16 { asset_index: 5, size_q: U, exec_price: PRICE, fee_bps: 0 };
-    assert_eq!(w.try_batch(&mut a, &mut b, &[r]).map(|_| ()), Err(V16Error::InvalidConfig));
+    let r = TradeRequestV16 {
+        asset_index: 5,
+        size_q: U,
+        exec_price: PRICE,
+        fee_bps: 0,
+    };
+    assert_eq!(
+        w.try_batch(&mut a, &mut b, &[r]).map(|_| ()),
+        Err(V16Error::InvalidConfig)
+    );
 }
 
 #[test]
 fn empty_batch_is_rejected_with_non_progress() {
     let (mut w, mut a, mut b) = pair();
-    assert_eq!(w.try_batch(&mut a, &mut b, &[]).map(|_| ()), Err(V16Error::NonProgress));
+    assert_eq!(
+        w.try_batch(&mut a, &mut b, &[]).map(|_| ()),
+        Err(V16Error::NonProgress)
+    );
     assert_eq!(w.oi(0), (0, 0));
 }
 
@@ -210,9 +291,17 @@ fn increase_accumulates_into_one_leg_and_open_interest() {
     w.trade(0, &mut a, &mut b, 4 * U);
     assert_eq!(pos(&a, 0), 7 * U);
     assert_eq!(pos(&b, 0), -7 * U);
-    assert_eq!(n_legs(&a), 1, "an increase must reuse the leg, not add a second one");
+    assert_eq!(
+        n_legs(&a),
+        1,
+        "an increase must reuse the leg, not add a second one"
+    );
     assert_eq!(w.oi(0), (7 * POS_SCALE, 7 * POS_SCALE));
-    assert_eq!(w.pos_counts(0), (1, 1), "stored position count must not double count");
+    assert_eq!(
+        w.pos_counts(0),
+        (1, 1),
+        "stored position count must not double count"
+    );
 }
 
 #[test]
@@ -267,7 +356,9 @@ fn many_small_fills_equal_one_big_fill() {
     let (mut w1, mut a1, mut b1) = pair();
     w1.trade(0, &mut a1, &mut b1, 12 * U);
     let (mut w2, mut a2, mut b2) = pair();
-    for _ in 0..12 { w2.trade(0, &mut a2, &mut b2, U); }
+    for _ in 0..12 {
+        w2.trade(0, &mut a2, &mut b2, U);
+    }
     assert_eq!(pos(&a1, 0), pos(&a2, 0));
     assert_eq!(pos(&b1, 0), pos(&b2, 0));
     assert_eq!(w1.oi(0), w2.oi(0));
@@ -314,7 +405,14 @@ fn flip_equals_close_then_open_same_state() {
         }
         w.refresh(&mut a);
         w.refresh(&mut b);
-        (pos(&a, 0), pos(&b, 0), value(&a), value(&b), w.oi(0), w.pos_counts(0))
+        (
+            pos(&a, 0),
+            pos(&b, 0),
+            value(&a),
+            value(&b),
+            w.oi(0),
+            w.pos_counts(0),
+        )
     };
     assert_eq!(run(true), run(false), "a flip must equal close-then-open");
 }
@@ -358,10 +456,21 @@ fn both_sides_of_a_matched_trade_net_to_zero_after_a_price_move() {
         w.move_price(0, bps);
         w.refresh(&mut a);
         w.refresh(&mut b);
-        assert_eq!(value(&a) + value(&b), 2 * BIG as i128, "bps={bps}: zero-sum before close");
+        assert_eq!(
+            value(&a) + value(&b),
+            2 * BIG as i128,
+            "bps={bps}: zero-sum before close"
+        );
         w.trade(0, &mut b, &mut a, 10 * U);
-        assert_eq!(value(&a) + value(&b), 2 * BIG as i128, "bps={bps}: zero-sum after close");
-        assert!((value(&a) > BIG as i128) == (bps > 0), "bps={bps}: the long wins on a rise");
+        assert_eq!(
+            value(&a) + value(&b),
+            2 * BIG as i128,
+            "bps={bps}: zero-sum after close"
+        );
+        assert!(
+            (value(&a) > BIG as i128) == (bps > 0),
+            "bps={bps}: the long wins on a rise"
+        );
     }
 }
 
@@ -387,7 +496,9 @@ fn realised_pnl_is_path_independent_for_the_same_round_trip() {
         w.move_price(0, 300);
         w.refresh(&mut a);
         w.refresh(&mut b);
-        for c in chunks { w.trade(0, &mut b, &mut a, *c * U); }
+        for c in chunks {
+            w.trade(0, &mut b, &mut a, *c * U);
+        }
         w.refresh(&mut a);
         w.refresh(&mut b);
         (value(&a), value(&b), n_legs(&a), w.oi(0))
@@ -402,7 +513,9 @@ fn realised_pnl_is_path_independent_for_the_same_round_trip() {
 fn open_in_pieces_before_the_move_equals_open_at_once() {
     let run = |pieces: &[i128]| {
         let (mut w, mut a, mut b) = pair();
-        for p in pieces { w.trade(0, &mut a, &mut b, *p * U); }
+        for p in pieces {
+            w.trade(0, &mut a, &mut b, *p * U);
+        }
         w.move_price(0, -300);
         w.refresh(&mut a);
         w.refresh(&mut b);
@@ -465,7 +578,11 @@ fn zero_fee_bps_charges_nothing() {
 #[test]
 fn batch_over_distinct_assets_equals_the_same_fills_one_by_one() {
     let (mut w1, mut a1, mut b1) = pair_n(3);
-    let reqs = [w1.req(0, 3 * U, 0), w1.req(1, 4 * U, 0), w1.req(2, -2 * U, 0)];
+    let reqs = [
+        w1.req(0, 3 * U, 0),
+        w1.req(1, 4 * U, 0),
+        w1.req(2, -2 * U, 0),
+    ];
     let out = w1.try_batch(&mut a1, &mut b1, &reqs).expect("batch");
     assert_eq!(out.fill_count, 3);
     let (mut w2, mut a2, mut b2) = pair_n(3);
@@ -521,7 +638,10 @@ fn batch_same_asset_second_fill_that_adds_risk_is_refused_with_loss_stale() {
 fn batch_longer_than_max_portfolio_assets_is_rejected() {
     let (mut w, mut a, mut b) = pair_n(2);
     let reqs = [w.req(0, U, 0), w.req(1, U, 0), w.req(0, -U, 0)];
-    assert_eq!(w.try_batch(&mut a, &mut b, &reqs).map(|_| ()), Err(V16Error::InvalidConfig));
+    assert_eq!(
+        w.try_batch(&mut a, &mut b, &reqs).map(|_| ()),
+        Err(V16Error::InvalidConfig)
+    );
 }
 
 #[test]
@@ -542,8 +662,19 @@ fn batch_across_two_assets_books_each_asset_separately() {
 #[test]
 fn a_failing_fill_inside_a_batch_is_an_error_and_leaves_no_position() {
     let (mut w, mut a, mut b) = pair_n(2);
-    let reqs = [w.req(0, 2 * U, 0), TradeRequestV16 { asset_index: 1, size_q: U, exec_price: 0, fee_bps: 0 }];
-    assert_eq!(w.try_batch(&mut a, &mut b, &reqs).map(|_| ()), Err(V16Error::InvalidConfig));
+    let reqs = [
+        w.req(0, 2 * U, 0),
+        TradeRequestV16 {
+            asset_index: 1,
+            size_q: U,
+            exec_price: 0,
+            fee_bps: 0,
+        },
+    ];
+    assert_eq!(
+        w.try_batch(&mut a, &mut b, &reqs).map(|_| ()),
+        Err(V16Error::InvalidConfig)
+    );
     assert_eq!(n_legs(&a), 0);
     assert_eq!(w.oi(0), (0, 0));
 }
@@ -554,7 +685,11 @@ fn batch_fill_count_and_notional_add_up() {
     let reqs = [w.req(0, 2 * U, 0), w.req(1, 3 * U, 0), w.req(2, -1 * U, 0)];
     let out = w.try_batch(&mut a, &mut b, &reqs).unwrap();
     assert_eq!(out.fill_count, 3);
-    assert_eq!(out.notional, 6 * PRICE as u128, "notional is the sum of absolute fills");
+    assert_eq!(
+        out.notional,
+        6 * PRICE as u128,
+        "notional is the sum of absolute fills"
+    );
 }
 
 // ---------- size limits ----------
@@ -563,7 +698,10 @@ fn batch_fill_count_and_notional_add_up() {
 fn trade_larger_than_max_trade_size_is_rejected() {
     let (mut w, mut a, mut b) = pair();
     let too_big = percolator::MAX_TRADE_SIZE_Q as i128 + 1;
-    assert_eq!(w.try_trade(0, &mut a, &mut b, too_big), Err(V16Error::InvalidConfig));
+    assert_eq!(
+        w.try_trade(0, &mut a, &mut b, too_big),
+        Err(V16Error::InvalidConfig)
+    );
     assert_eq!(w.oi(0), (0, 0));
 }
 
@@ -585,6 +723,8 @@ fn position_cannot_grow_past_the_position_and_side_oi_cap() {
     w.trade(0, &mut a, &mut b, half);
     w.trade(0, &mut a, &mut b, half);
     // at exactly the cap now; one more atom must fail (position cap and per-side OI cap coincide)
-    assert!(w.try_trade(0, &mut a, &mut b, 1).is_err(), "above MAX_POSITION_ABS_Q must be refused");
+    assert!(
+        w.try_trade(0, &mut a, &mut b, 1).is_err(),
+        "above MAX_POSITION_ABS_Q must be refused"
+    );
 }
-

@@ -106,7 +106,10 @@ fn check(t: &Table) {
         );
     }
     // a compacted table is always recognised, and compaction is idempotent
-    assert!(already_compact(&full), "compacted table not recognised as compact");
+    assert!(
+        already_compact(&full),
+        "compacted table not recognised as compact"
+    );
     let mut twice = full;
     compact(&mut twice);
     assert_eq!(bytemuck::bytes_of(&twice), bytemuck::bytes_of(&full));

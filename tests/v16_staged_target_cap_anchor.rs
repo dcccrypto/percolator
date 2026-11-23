@@ -77,8 +77,12 @@ fn exposed_asset_far_from_its_anchor() -> (MarketGroupV16HeaderAccount, Vec<Mark
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut long = PortfolioV16ViewMut::new(&mut long_header);
         let mut short = PortfolioV16ViewMut::new(&mut short_header);
-        market.deposit_not_atomic(&mut long, 100_000_000_000).unwrap();
-        market.deposit_not_atomic(&mut short, 100_000_000_000).unwrap();
+        market
+            .deposit_not_atomic(&mut long, 100_000_000_000)
+            .unwrap();
+        market
+            .deposit_not_atomic(&mut short, 100_000_000_000)
+            .unwrap();
         market
             .execute_trade_with_fee_loss_stale_scoped_not_atomic(
                 &mut long,
@@ -94,7 +98,10 @@ fn exposed_asset_far_from_its_anchor() -> (MarketGroupV16HeaderAccount, Vec<Mark
             .unwrap();
     }
     let a = asset(&markets);
-    assert!(a.oi_eff_long_q != 0 && a.oi_eff_short_q != 0, "the asset must be exposed");
+    assert!(
+        a.oi_eff_long_q != 0 && a.oi_eff_short_q != 0,
+        "the asset must be exposed"
+    );
     let mut slots_left = 99u64;
     while slots_left > 0 {
         let n = slots_left.min(DT);
@@ -125,9 +132,15 @@ fn v16_staged_target_starts_the_same_cap_anchor_as_a_target_given_to_the_path() 
     let (mut h_s, mut m_s) = (header, markets.clone());
     {
         let mut market = MarketGroupV16ViewMut::new(&mut h_s, &mut m_s);
-        market.set_asset_raw_oracle_targets_not_atomic(&[(0, P0)]).unwrap();
+        market
+            .set_asset_raw_oracle_targets_not_atomic(&[(0, P0)])
+            .unwrap();
     }
-    assert_eq!(asset(&m_s).fund_px_last, mark, "a changed target restarts the anchor at the mark");
+    assert_eq!(
+        asset(&m_s).fund_px_last,
+        mark,
+        "a changed target restarts the anchor at the mark"
+    );
     {
         let steps = path(mark, P0, asset(&m_s).fund_px_last, 0, 1);
         let mut market = MarketGroupV16ViewMut::new(&mut h_s, &mut m_s);
@@ -144,7 +157,11 @@ fn v16_staged_target_starts_the_same_cap_anchor_as_a_target_given_to_the_path() 
             .accrue_asset_path_to_not_atomic(0, slot + 1, P0, &steps, true)
             .unwrap();
     }
-    assert_eq!(asset(&m_s), asset(&m_g), "staged and given targets leave the same asset");
+    assert_eq!(
+        asset(&m_s),
+        asset(&m_g),
+        "staged and given targets leave the same asset"
+    );
     assert_eq!(asset(&m_s).effective_price, mark + mark * CAP_BPS / 10_000);
 }
 
@@ -157,20 +174,30 @@ fn v16_staged_round_trip_restarts_the_anchor_and_an_unchanged_target_keeps_it() 
     let (mut h_u, mut m_u) = (header, markets.clone());
     {
         let mut market = MarketGroupV16ViewMut::new(&mut h_u, &mut m_u);
-        market.set_asset_raw_oracle_targets_not_atomic(&[(0, 1)]).unwrap();
+        market
+            .set_asset_raw_oracle_targets_not_atomic(&[(0, 1)])
+            .unwrap();
     }
-    assert_eq!(asset(&m_u), asset(&markets), "an unchanged target keeps the anchor");
+    assert_eq!(
+        asset(&m_u),
+        asset(&markets),
+        "an unchanged target keeps the anchor"
+    );
 
     // a round trip 1 -> 500_000 -> 1: each change restarts the anchor at the mark
     let (mut h_r, mut m_r) = (header, markets.clone());
     {
         let mut market = MarketGroupV16ViewMut::new(&mut h_r, &mut m_r);
-        market.set_asset_raw_oracle_targets_not_atomic(&[(0, 500_000)]).unwrap();
+        market
+            .set_asset_raw_oracle_targets_not_atomic(&[(0, 500_000)])
+            .unwrap();
     }
     assert_eq!(asset(&m_r).fund_px_last, mark);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut h_r, &mut m_r);
-        market.set_asset_raw_oracle_targets_not_atomic(&[(0, 1)]).unwrap();
+        market
+            .set_asset_raw_oracle_targets_not_atomic(&[(0, 1)])
+            .unwrap();
     }
     let a = asset(&m_r);
     assert_eq!((a.fund_px_last, a.raw_oracle_target_price), (mark, 1));

@@ -1865,8 +1865,7 @@ fn diag_is_the_clamp_regime_discrepancy_the_engine_or_the_harness() {
                 let eq_after = lp.capital.get() as i128 + lp.pnl.get();
                 let actual = eq_after - eq_before;
                 // this settle realized the move accrued by THIS crank (#248 order)
-                let this_move =
-                    markets[0].engine.asset.effective_price.get() as i128 - p_before;
+                let this_move = markets[0].engine.asset.effective_price.get() as i128 - p_before;
                 let expected = -size * this_move / POS_SCALE as i128;
                 cum_expected += expected;
                 cum_actual += actual;

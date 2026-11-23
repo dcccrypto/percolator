@@ -11,7 +11,13 @@
 //! NOT: a victim that nets before a bankrupt loser settles prices that loser's credit as
 //! backed, and it will not be. That residual is bounded and ratcheted below; do not describe the
 //! property as order independent without that qualifier.
-#![allow(dead_code, unused_imports, unused_mut, clippy::needless_range_loop, clippy::type_complexity)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_mut,
+    clippy::needless_range_loop,
+    clippy::type_complexity
+)]
 // Sentinel multi-claimant R1 harness
 use percolator::{
     AutoCrankWorkV16, EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount,
@@ -50,7 +56,13 @@ impl World {
     fn new_pairs(pairs: &[(u128, u128, u128)], ins_long: u128, ins_short: u128) -> Self {
         Self::new_pairs_at(pairs, ins_long, ins_short, PRICE, RATE_E9 as u64)
     }
-    fn new_pairs_at(pairs: &[(u128, u128, u128)], ins_long: u128, ins_short: u128, px: u64, cap: u64) -> Self {
+    fn new_pairs_at(
+        pairs: &[(u128, u128, u128)],
+        ins_long: u128,
+        ins_short: u128,
+        px: u64,
+        cap: u64,
+    ) -> Self {
         let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 100_000);
         cfg.max_abs_funding_e9_per_slot = cap;
         cfg.max_price_move_bps_per_slot = MOVE_CAP_BPS;
@@ -64,7 +76,13 @@ impl World {
         header
             .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, px, 1)
             .unwrap();
-        let mut w = World { header, markets, maker: account(0), traders: Vec::new(), slot: 1 };
+        let mut w = World {
+            header,
+            markets,
+            maker: account(0),
+            traders: Vec::new(),
+            slot: 1,
+        };
         let mut maker = w.maker;
         w.deposit(&mut maker, 1_000_000_000_000_000);
         w.maker = maker;
@@ -73,7 +91,8 @@ impl World {
             let mut s = account(2 + 2 * i as u32);
             w.deposit(&mut l, cl);
             w.deposit(&mut s, cs);
-            w.trade(&mut l, &mut s, units * POS_SCALE).expect("fresh pair opens");
+            w.trade(&mut l, &mut s, units * POS_SCALE)
+                .expect("fresh pair opens");
             w.traders.push(l);
             w.traders.push(s);
         }
@@ -92,7 +111,11 @@ impl World {
     fn deposit(&mut self, acct: &mut PortfolioAccountV16Account, amount: u128) {
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         let a0 = *acct;
-        if m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(acct), amount).is_err() { *acct = a0; }
+        if m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(acct), amount)
+            .is_err()
+        {
+            *acct = a0;
+        }
     }
 
     fn price(&self) -> u64 {
@@ -149,7 +172,9 @@ impl World {
         let slot = self.slot + 1;
         let (h, mk) = (self.header, self.markets.clone());
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-        if m.accrue_asset_to_not_atomic(0, slot, new, rate, true).is_err() {
+        if m.accrue_asset_to_not_atomic(0, slot, new, rate, true)
+            .is_err()
+        {
             self.header = h;
             self.markets = mk;
             return false;
@@ -166,14 +191,25 @@ impl World {
         let a = self.asset();
         let cur = a.effective_price;
         let target = (cur as i128 + cur as i128 * dp_bps as i128 / 10_000).max(1) as u64;
-        let anchor = if a.raw_oracle_target_price != target { a.effective_price } else { a.fund_px_last };
+        let anchor = if a.raw_oracle_target_price != target {
+            a.effective_price
+        } else {
+            a.fund_px_last
+        };
         let exposed = a.oi_eff_long_q != 0 || a.oi_eff_short_q != 0;
         let n = n.clamp(1, 2) as u64;
         let mut price = cur;
         let mut rem = 0u16;
         let mut steps = Vec::new();
         for i in 0..n {
-            let Ok((p, r)) = percolator::canonical_accrual_price_step_v16(price, target, anchor, MOVE_CAP_BPS, exposed, rem) else {
+            let Ok((p, r)) = percolator::canonical_accrual_price_step_v16(
+                price,
+                target,
+                anchor,
+                MOVE_CAP_BPS,
+                exposed,
+                rem,
+            ) else {
                 return false;
             };
             steps.push(percolator::AccrualStepV16 {
@@ -188,7 +224,9 @@ impl World {
         let now = self.slot + n;
         let (h, mk) = (self.header, self.markets.clone());
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-        if m.accrue_asset_path_to_not_atomic(0, now, target, &steps, true).is_err() {
+        if m.accrue_asset_path_to_not_atomic(0, now, target, &steps, true)
+            .is_err()
+        {
             self.header = h;
             self.markets = mk;
             return false;
@@ -203,7 +241,9 @@ impl World {
         let slot = self.slot;
         {
             let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-            for d in 0..2 { let _ = m.expire_source_backing_bucket_not_atomic(d, slot); }
+            for d in 0..2 {
+                let _ = m.expire_source_backing_bucket_not_atomic(d, slot);
+            }
         }
         self.refresh(acct)
     }
@@ -241,13 +281,19 @@ impl World {
         }
         let vault = self.header.vault.get();
         let senior = self.header.c_tot.get() + self.header.insurance.get();
-        assert!(vault >= senior, "P4: vault {vault} < c_tot + insurance {senior}");
+        assert!(
+            vault >= senior,
+            "P4: vault {vault} < c_tot + insurance {senior}"
+        );
     }
 }
 
-
-
-fn rng(s: &mut u64) -> u64 { *s ^= *s << 13; *s ^= *s >> 7; *s ^= *s << 17; *s }
+fn rng(s: &mut u64) -> u64 {
+    *s ^= *s << 13;
+    *s ^= *s >> 7;
+    *s ^= *s << 17;
+    *s
+}
 
 fn effective_equity(w: &mut World, a: &mut PortfolioAccountV16Account) -> i128 {
     assert!(w.refresh(a), "refresh for certification");
@@ -272,7 +318,13 @@ impl Shape {
     fn short_cap(self, pair: usize) -> u128 {
         match self {
             Shape::Uniform(c) => c,
-            Shape::Adversarial(c) => if pair == 0 { CAP } else { c },
+            Shape::Adversarial(c) => {
+                if pair == 0 {
+                    CAP
+                } else {
+                    c
+                }
+            }
         }
     }
 }
@@ -292,10 +344,20 @@ fn reconcile_pending(w: &World, accounts: &[PortfolioAccountV16Account], quiesce
             .map(|sd| sd.source_claim_bound_num.get())
             .sum();
         let slot = &w.markets[0].engine;
-        let pend = if d == 0 { slot.kf_pending_credit_long.get() } else { slot.kf_pending_credit_short.get() };
-        assert!(pend <= stock as i128, "domain {d}: pending credit {pend} exceeds the claim stock {stock}");
+        let pend = if d == 0 {
+            slot.kf_pending_credit_long.get()
+        } else {
+            slot.kf_pending_credit_short.get()
+        };
+        assert!(
+            pend <= stock as i128,
+            "domain {d}: pending credit {pend} exceeds the claim stock {stock}"
+        );
         if quiescent {
-            assert!(pend <= accounts.len() as i128 * 1_000_000_000_000, "domain {d}: stale positive pending credit {pend} at quiescence");
+            assert!(
+                pend <= accounts.len() as i128 * 1_000_000_000_000,
+                "domain {d}: stale positive pending credit {pend} at quiescence"
+            );
         }
     }
 }
@@ -307,7 +369,11 @@ fn scenario(seed: u64, perm: &[usize], shape: Shape, resolved: bool) -> (Vec<i12
     let npairs = 2 + (rng(&mut s) % 3) as usize; // 2..4 pairs
     let cap = 1_000_000_000_000_000u128;
     let units: Vec<u128> = (0..npairs).map(|_| 1 + (rng(&mut s) % 4) as u128).collect();
-    let pairs: Vec<(u128, u128, u128)> = units.iter().enumerate().map(|(i, u)| (cap, shape.short_cap(i), *u)).collect();
+    let pairs: Vec<(u128, u128, u128)> = units
+        .iter()
+        .enumerate()
+        .map(|(i, u)| (cap, shape.short_cap(i), *u))
+        .collect();
     let mut w = World::new_pairs(&pairs, 0, 0);
     let n = w.traders.len();
     let mut tr = w.traders.clone();
@@ -326,13 +392,26 @@ fn scenario(seed: u64, perm: &[usize], shape: Shape, resolved: bool) -> (Vec<i12
     // victim = trader 0 (long). flip: counterparty short_0 (trader 1) buys 2x victim size.
     let flip = 2 * units[0] * POS_SCALE;
     let (mut v, mut c) = (tr[0], tr[1]);
-    if w.trade(&mut c, &mut v, flip).is_err() { return (vec![], 0); }
-    tr[0] = v; tr[1] = c;
+    if w.trade(&mut c, &mut v, flip).is_err() {
+        return (vec![], 0);
+    }
+    tr[0] = v;
+    tr[1] = c;
     // optionally more unconverted claimants flip too (random second victim)
     let up2 = 20 + (rng(&mut s) % 120) as i64;
     let st2 = 1 + (rng(&mut s) % 5) as usize;
-    for _ in 0..st2 { if !w.accrue(up2, 0) { return (vec![], 0); } }
-    let init = |k: usize| -> i128 { if k % 2 == 1 { shape.short_cap(k / 2) as i128 } else { cap as i128 } };
+    for _ in 0..st2 {
+        if !w.accrue(up2, 0) {
+            return (vec![], 0);
+        }
+    }
+    let init = |k: usize| -> i128 {
+        if k % 2 == 1 {
+            shape.short_cap(k / 2) as i128
+        } else {
+            cap as i128
+        }
+    };
     if resolved {
         let slot = w.slot + 1;
         let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
@@ -341,18 +420,33 @@ fn scenario(seed: u64, perm: &[usize], shape: Shape, resolved: bool) -> (Vec<i12
         let mut closed = vec![false; n];
         for _ in 0..60 {
             for &k in perm {
-                if closed[k] { continue; }
-                for d in 0..2 { let _ = m.expire_source_backing_bucket_not_atomic(d, slot); }
-                if let Ok(percolator::ResolvedCloseOutcomeV16::Closed { payout }) = m.close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr[k]), 0) { paid[k] = payout; closed[k] = true; }
+                if closed[k] {
+                    continue;
+                }
+                for d in 0..2 {
+                    let _ = m.expire_source_backing_bucket_not_atomic(d, slot);
+                }
+                if let Ok(percolator::ResolvedCloseOutcomeV16::Closed { payout }) = m
+                    .close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr[k]), 0)
+                {
+                    paid[k] = payout;
+                    closed[k] = true;
+                }
             }
-            if closed.iter().all(|c| *c) { break; }
+            if closed.iter().all(|c| *c) {
+                break;
+            }
         }
-        if !closed.iter().all(|c| *c) { return (vec![], 0); }
+        if !closed.iter().all(|c| *c) {
+            return (vec![], 0);
+        }
         return ((0..n).map(|k| paid[k] as i128 - init(k)).collect(), 0);
     }
     for &k in perm {
         let mut a = tr[k];
-        if !w.settle(&mut a) { return (vec![], 0); }
+        if !w.settle(&mut a) {
+            return (vec![], 0);
+        }
         tr[k] = a;
         reconcile_pending(&w, &tr, false);
     }
@@ -361,7 +455,9 @@ fn scenario(seed: u64, perm: &[usize], shape: Shape, resolved: bool) -> (Vec<i12
     let mut e: [PortfolioAccountV16Account; 0] = [];
     w.validate(&mut e);
     let mut out = vec![];
-    for (k, a) in tr.iter_mut().enumerate().take(n) { out.push(effective_equity(&mut w, a) - init(k)); }
+    for (k, a) in tr.iter_mut().enumerate().take(n) {
+        out.push(effective_equity(&mut w, a) - init(k));
+    }
     (out, 0)
 }
 
@@ -369,12 +465,14 @@ fn perms(n: usize, count: usize, s: &mut u64) -> Vec<Vec<usize>> {
     let mut out = vec![(0..n).collect::<Vec<_>>(), (0..n).rev().collect::<Vec<_>>()];
     while out.len() < count {
         let mut p: Vec<usize> = (0..n).collect();
-        for i in (1..n).rev() { let j = (rng(s) % (i as u64 + 1)) as usize; p.swap(i, j); }
+        for i in (1..n).rev() {
+            let j = (rng(s) % (i as u64 + 1)) as usize;
+            p.swap(i, j);
+        }
         out.push(p);
     }
     out
 }
-
 
 struct Outcome {
     ran: u64,
@@ -413,7 +511,12 @@ fn sweep(worlds: u64, seed0: u64, shape: Shape, resolved: bool) -> Outcome {
                 gain += 1;
             }
             worst_total = worst_total.min(tot2);
-            let d = r.0.iter().zip(&base.0).map(|(a, b)| (a - b).abs()).max().unwrap();
+            let d =
+                r.0.iter()
+                    .zip(&base.0)
+                    .map(|(a, b)| (a - b).abs())
+                    .max()
+                    .unwrap();
             if d > 8 {
                 dep = true;
             }
@@ -423,7 +526,13 @@ fn sweep(worlds: u64, seed0: u64, shape: Shape, resolved: bool) -> Outcome {
             orderdep += 1;
         }
     }
-    Outcome { ran, order_dependent: orderdep, worst_gap: worst, gains: gain, worst_total }
+    Outcome {
+        ran,
+        order_dependent: orderdep,
+        worst_gap: worst,
+        gains: gain,
+        worst_total,
+    }
 }
 
 const CAP: u128 = 1_000_000_000_000_000;
@@ -432,7 +541,10 @@ const CAP: u128 = 1_000_000_000_000_000;
 fn seeds_from_env(default: &[u64]) -> Vec<u64> {
     if let Ok(v) = std::env::var("SEEDS") {
         let (a, b) = v.split_once("..").expect("SEEDS must look like a..b");
-        let (a, b): (u64, u64) = (a.trim().parse().expect("SEEDS start"), b.trim().parse().expect("SEEDS end"));
+        let (a, b): (u64, u64) = (
+            a.trim().parse().expect("SEEDS start"),
+            b.trim().parse().expect("SEEDS end"),
+        );
         return (a..=b).collect();
     }
     if let Some(s) = std::env::var("SEED").ok().and_then(|v| v.parse().ok()) {
@@ -444,14 +556,24 @@ fn seeds_from_env(default: &[u64]) -> Vec<u64> {
 /// Solvent losers: the settle order must not matter.
 #[test]
 fn r1_multi_claimant_solvent_losers_are_settle_order_independent() {
-    let worlds: u64 = std::env::var("WORLDS").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+    let worlds: u64 = std::env::var("WORLDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400);
     for seed0 in seeds_from_env(&[3, 11]) {
         let o = sweep(worlds, seed0, Shape::Uniform(CAP), false);
         eprintln!("R1MULTI solvent seed {seed0}: ran {} order_dependent {} worst_gap {} gains {} worst_total {}", o.ran, o.order_dependent, o.worst_gap, o.gains, o.worst_total);
         assert_eq!(o.ran, worlds);
         assert_eq!(o.gains, 0, "never a gain");
-        assert_eq!(o.worst_total, 0, "solvent: the pair is zero-sum in every order");
-        assert_eq!(o.order_dependent, 0, "seed {seed0}: {} worlds depend on settle order (worst gap {})", o.order_dependent, o.worst_gap);
+        assert_eq!(
+            o.worst_total, 0,
+            "solvent: the pair is zero-sum in every order"
+        );
+        assert_eq!(
+            o.order_dependent, 0,
+            "seed {seed0}: {} worlds depend on settle order (worst gap {})",
+            o.order_dependent, o.worst_gap
+        );
     }
 }
 
@@ -464,35 +586,115 @@ fn r1_multi_claimant_solvent_losers_are_settle_order_independent() {
 #[test]
 fn r1_multi_claimant_residual_ratchets() {
     const CASES: &[(&str, Shape, bool, u64, u64, u64, i128, i128)] = &[
-        ("live bankrupt losers", Shape::Uniform(420_000), false, 3, 800, 14, 12_200, 50_769),
-        ("live bankrupt losers", Shape::Uniform(420_000), false, 7, 800, 26, 21_800, 67_323),
-        ("live adversarial (victim solvent, other losers bankrupt)", Shape::Adversarial(420_000), false, 3, 800, 39, 63_100, 144_500),
-        ("live adversarial", Shape::Adversarial(420_000), false, 7, 800, 38, 21_800, 128_035),
-        ("resolved solvent", Shape::Uniform(CAP), true, 3, 800, 800, 116_400, 144_500),
-        ("resolved bankrupt losers", Shape::Uniform(420_000), true, 3, 800, 515, 169_800, 169_790),
-        ("resolved adversarial", Shape::Adversarial(420_000), true, 3, 800, 800, 466_700, 466_652),
+        (
+            "live bankrupt losers",
+            Shape::Uniform(420_000),
+            false,
+            3,
+            800,
+            14,
+            12_200,
+            50_769,
+        ),
+        (
+            "live bankrupt losers",
+            Shape::Uniform(420_000),
+            false,
+            7,
+            800,
+            26,
+            21_800,
+            67_323,
+        ),
+        (
+            "live adversarial (victim solvent, other losers bankrupt)",
+            Shape::Adversarial(420_000),
+            false,
+            3,
+            800,
+            39,
+            63_100,
+            144_500,
+        ),
+        (
+            "live adversarial",
+            Shape::Adversarial(420_000),
+            false,
+            7,
+            800,
+            38,
+            21_800,
+            128_035,
+        ),
+        (
+            "resolved solvent",
+            Shape::Uniform(CAP),
+            true,
+            3,
+            800,
+            800,
+            116_400,
+            144_500,
+        ),
+        (
+            "resolved bankrupt losers",
+            Shape::Uniform(420_000),
+            true,
+            3,
+            800,
+            515,
+            169_800,
+            169_790,
+        ),
+        (
+            "resolved adversarial",
+            Shape::Adversarial(420_000),
+            true,
+            3,
+            800,
+            800,
+            466_700,
+            466_652,
+        ),
     ];
     for &(name, shape, resolved, seed0, worlds, max_dep, max_gap, _pre) in CASES {
         let o = sweep(worlds, seed0, shape, resolved);
         eprintln!("R1MULTI {name} seed {seed0}: ran {} order_dependent {} worst_gap {} gains {} worst_total {}", o.ran, o.order_dependent, o.worst_gap, o.gains, o.worst_total);
         assert!(o.ran > 400, "{name}: too few worlds ran");
         assert_eq!(o.gains, 0, "{name}: never a gain");
-        assert!(o.order_dependent <= max_dep, "{name}: order-dependent worlds regressed: {} > {max_dep}", o.order_dependent);
-        assert!(o.worst_gap <= max_gap, "{name}: worst gap regressed: {} > {max_gap}", o.worst_gap);
+        assert!(
+            o.order_dependent <= max_dep,
+            "{name}: order-dependent worlds regressed: {} > {max_dep}",
+            o.order_dependent
+        );
+        assert!(
+            o.worst_gap <= max_gap,
+            "{name}: worst gap regressed: {} > {max_gap}",
+            o.worst_gap
+        );
     }
 }
 
 #[test]
 fn r1_multi_measure() {
-    if std::env::var("MEASURE").is_err() { return; }
-    let worlds: u64 = std::env::var("WORLDS").ok().and_then(|v| v.parse().ok()).unwrap_or(800);
+    if std::env::var("MEASURE").is_err() {
+        return;
+    }
+    let worlds: u64 = std::env::var("WORLDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(800);
     for (name, shape, resolved) in [
         ("live solvent", Shape::Uniform(CAP), false),
         ("live bankrupt 420k", Shape::Uniform(420_000), false),
         ("live adversarial 420k", Shape::Adversarial(420_000), false),
         ("resolved solvent", Shape::Uniform(CAP), true),
         ("resolved bankrupt 420k", Shape::Uniform(420_000), true),
-        ("resolved adversarial 420k", Shape::Adversarial(420_000), true),
+        (
+            "resolved adversarial 420k",
+            Shape::Adversarial(420_000),
+            true,
+        ),
     ] {
         for seed0 in [3u64, 7] {
             let o = sweep(worlds, seed0, shape, resolved);
@@ -515,7 +717,11 @@ fn scenario_mixed(seed: u64, perm: &[usize]) -> Vec<i128> {
     let mut units: Vec<u128> = (0..npairs).map(|_| 1 + (rng(&mut s) % 4) as u128).collect();
     units[0] = 3;
     let vcap = 330_000u128;
-    let pairs: Vec<(u128, u128, u128)> = units.iter().enumerate().map(|(i, u)| (if i == 0 { vcap } else { cap }, cap, *u)).collect();
+    let pairs: Vec<(u128, u128, u128)> = units
+        .iter()
+        .enumerate()
+        .map(|(i, u)| (if i == 0 { vcap } else { cap }, cap, *u))
+        .collect();
     let mut w = World::new_pairs(&pairs, 0, 0);
     let n = w.traders.len();
     let mut tr = w.traders.clone();
@@ -523,55 +729,99 @@ fn scenario_mixed(seed: u64, perm: &[usize]) -> Vec<i128> {
     let st1 = 2 + (rng(&mut s) % 8) as usize;
     for _ in 0..st1 {
         assert!(w.accrue(up1, 0));
-        for k in 0..n { let mut a = tr[k]; assert!(w.settle(&mut a)); tr[k] = a; }
+        for k in 0..n {
+            let mut a = tr[k];
+            assert!(w.settle(&mut a));
+            tr[k] = a;
+        }
     }
     let (mut v, mut c) = (tr[0], tr[1]);
-    if w.trade(&mut c, &mut v, 7 * POS_SCALE).is_err() { return vec![]; }
-    tr[0] = v; tr[1] = c;
+    if w.trade(&mut c, &mut v, 7 * POS_SCALE).is_err() {
+        return vec![];
+    }
+    tr[0] = v;
+    tr[1] = c;
     if n >= 4 {
         let (mut v2, mut c2) = (tr[2], tr[3]);
-        if w.trade(&mut c2, &mut v2, 2 * units[1] * POS_SCALE).is_err() { return vec![]; }
-        tr[2] = v2; tr[3] = c2;
+        if w.trade(&mut c2, &mut v2, 2 * units[1] * POS_SCALE).is_err() {
+            return vec![];
+        }
+        tr[2] = v2;
+        tr[3] = c2;
     }
     let up2 = 20 + (rng(&mut s) % 120) as i64;
     let st2 = 1 + (rng(&mut s) % 5) as usize;
-    for _ in 0..st2 { if !w.accrue(up2, 0) { return vec![]; } }
-    for &k in perm { let mut a = tr[k]; if !w.settle(&mut a) { return vec![]; } tr[k] = a; }
+    for _ in 0..st2 {
+        if !w.accrue(up2, 0) {
+            return vec![];
+        }
+    }
+    for &k in perm {
+        let mut a = tr[k];
+        if !w.settle(&mut a) {
+            return vec![];
+        }
+        tr[k] = a;
+    }
     w.traders = tr.clone();
     let mut e: [PortfolioAccountV16Account; 0] = [];
     w.validate(&mut e);
     let mut out = vec![];
-    for k in 0..n { let mut a = tr[k]; out.push(effective_equity(&mut w, &mut a) - if k == 0 { vcap as i128 } else { cap as i128 }); }
+    for k in 0..n {
+        let mut a = tr[k];
+        out.push(
+            effective_equity(&mut w, &mut a) - if k == 0 { vcap as i128 } else { cap as i128 },
+        );
+    }
     out
 }
 
 #[test]
 fn mixed_liened_and_rich_flippers_ratchets() {
-    let (mut worlds, mut sum_worst, mut spread, mut gains, mut rich_worst) = (0u64, 0i128, 0i128, 0u64, 0i128);
+    let (mut worlds, mut sum_worst, mut spread, mut gains, mut rich_worst) =
+        (0u64, 0i128, 0i128, 0u64, 0i128);
     for i in 0..300u64 {
         let seed = 3 * 7919 + i;
         let mut t = seed | 1;
         let np = 2 + (rng(&mut t) % 3) as usize;
         let mut s2 = seed ^ 0xABCDEF;
         let ps = perms(2 * np, 8, &mut s2);
-        let rows: Vec<Vec<i128>> = ps.iter().map(|p| scenario_mixed(seed, p)).take_while(|r| !r.is_empty()).collect();
-        if rows.len() != ps.len() { continue; }
+        let rows: Vec<Vec<i128>> = ps
+            .iter()
+            .map(|p| scenario_mixed(seed, p))
+            .take_while(|r| !r.is_empty())
+            .collect();
+        if rows.len() != ps.len() {
+            continue;
+        }
         worlds += 1;
-        if rows[0].len() > 3 { rich_worst += rows.iter().map(|r| r[2]).min().unwrap(); }
-        for k in 0..rows[0].len() { sum_worst += rows.iter().map(|r| r[k]).min().unwrap(); }
+        if rows[0].len() > 3 {
+            rich_worst += rows.iter().map(|r| r[2]).min().unwrap();
+        }
+        for k in 0..rows[0].len() {
+            sum_worst += rows.iter().map(|r| r[k]).min().unwrap();
+        }
         let tot: Vec<i128> = rows.iter().map(|r| r.iter().sum()).collect();
         spread += tot.iter().max().unwrap() - tot.iter().min().unwrap();
-        if *tot.iter().max().unwrap() > 8 { gains += 1; }
+        if *tot.iter().max().unwrap() > 8 {
+            gains += 1;
+        }
     }
     println!("MIXED worlds {worlds} sum_account_worst {sum_worst} total_spread {spread} gains {gains} rich_flipper_worst {rich_worst}");
     assert_eq!(worlds, 173);
     assert_eq!(gains, 0);
     // pre-R1 engine: sum of per-account worst -14,995,914, total spread 4,160,314 (all 173 worlds
     // order dependent, as they still are here: a liened domain stays order dependent)
-    assert!(sum_worst >= -11_300_000, "per-account worst orders regressed: {sum_worst}");
+    assert!(
+        sum_worst >= -11_300_000,
+        "per-account worst orders regressed: {sum_worst}"
+    );
     assert!(spread <= 1_750_000, "order spread regressed: {spread}");
     // the rich UNliened flipper in the locked domain: pre-R1 worst 8,599,318 summed; priced on the
     // domain's lien state it ends at 10.77M; priced on its own (empty) entry it would get the
     // neutral windfall (11.31M). Pin the domain-level value.
-    assert!((8_599_318..=10_800_000).contains(&rich_worst), "rich flipper priced outside the protective branch: {rich_worst}");
+    assert!(
+        (8_599_318..=10_800_000).contains(&rich_worst),
+        "rich flipper priced outside the protective branch: {rich_worst}"
+    );
 }

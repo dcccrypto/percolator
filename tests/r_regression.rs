@@ -422,7 +422,9 @@ fn r_regression_holder_only_two_crank_route_also_certifies_honestly() {
         "the holder's own crank committed the expiry and retired its impaired lien"
     );
     assert_eq!(
-        long.header.source_domains[0].source_lien_effective_reserved.get(),
+        long.header.source_domains[0]
+            .source_lien_effective_reserved
+            .get(),
         0,
         "the lien was reconciled into the impaired lane"
     );
@@ -473,7 +475,9 @@ fn r_regression_withdraw_and_convert_refusals_are_unchanged() {
         0
     );
     assert_eq!(
-        long.header.source_domains[0].source_claim_impaired_num.get(),
+        long.header.source_domains[0]
+            .source_claim_impaired_num
+            .get(),
         LIEN_EFFECTIVE * BOUND_SCALE,
         "the forfeited face sits in the impaired lane"
     );
@@ -499,14 +503,24 @@ fn r_regression_withdraw_and_convert_refusals_are_unchanged() {
     // The support -> capital conduit: the impaired face has no backing, so nothing converts.
     let cap_before = long.header.capital.get();
     let conv = market.convert_released_pnl_to_capital_not_atomic(&mut long);
-    println!("LIVEFIX convert after reconcile => {conv:?} capital={}", long.header.capital.get());
+    println!(
+        "LIVEFIX convert after reconcile => {conv:?} capital={}",
+        long.header.capital.get()
+    );
     assert_eq!(
         conv,
         Err(V16Error::LockActive),
         "convert must not pay out the forfeited (impaired) face"
     );
-    assert_eq!(long.header.capital.get(), cap_before, "no capital minted from the impaired face");
-    assert_eq!(market.withdraw_not_atomic(&mut long, 1), Err(V16Error::LockActive));
+    assert_eq!(
+        long.header.capital.get(),
+        cap_before,
+        "no capital minted from the impaired face"
+    );
+    assert_eq!(
+        market.withdraw_not_atomic(&mut long, 1),
+        Err(V16Error::LockActive)
+    );
     assert_eq!(market.header.vault.get(), 1_000 + CLAIM);
 }
 

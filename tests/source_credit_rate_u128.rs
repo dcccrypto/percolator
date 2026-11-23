@@ -113,7 +113,10 @@ fn protective_rate_domain_is_below_the_cap() {
         };
         let available = 1 + rng.below(denominator - 1);
         let r = wide(available, denominator).unwrap();
-        assert!(r < CREDIT_RATE_SCALE, "available={available} denominator={denominator}");
+        assert!(
+            r < CREDIT_RATE_SCALE,
+            "available={available} denominator={denominator}"
+        );
         assert_eq!(fast(available, denominator), Ok(r));
     }
 }

@@ -68,9 +68,18 @@ fn bounds_round_inward_by_one_tick_off_multiples() {
 #[test]
 fn bounds_sweep_keeps_ordering_and_containment() {
     for d in [1u64, 2, 129, 130, 999, 2_000] {
-        for a in (1u64..=300).chain([10_000, 999_999, 1_000_000, MAX_ORACLE_PRICE - 1, MAX_ORACLE_PRICE]) {
+        for a in (1u64..=300).chain([
+            10_000,
+            999_999,
+            1_000_000,
+            MAX_ORACLE_PRICE - 1,
+            MAX_ORACLE_PRICE,
+        ]) {
             let (lo, hi) = band_bounds(a, d).unwrap();
-            assert!(1 <= lo && lo <= a && a <= hi && hi <= MAX_ORACLE_PRICE, "a={a} d={d}");
+            assert!(
+                1 <= lo && lo <= a && a <= hi && hi <= MAX_ORACLE_PRICE,
+                "a={a} d={d}"
+            );
         }
     }
 }
@@ -147,7 +156,9 @@ fn min_wide_anchor_has_a_nine_long_wide_run_and_rejects_bad_d() {
         Err(BandRentError::InvalidInput)
     );
     for d in [1u64, 10, 50, 130, 500, 1_000, MAX_BAND_BPS] {
-        let a = band_min_wide_anchor(d).unwrap().expect("exists below the oracle cap");
+        let a = band_min_wide_anchor(d)
+            .unwrap()
+            .expect("exists below the oracle cap");
         for k in 0..=8 {
             assert!(band_width_ok(a + k, d).unwrap(), "d={d} a+{k}");
         }
@@ -162,7 +173,10 @@ fn genesis_price_rule_is_100x_the_min_wide_anchor() {
         assert!(!band_genesis_price_ok(min * 100 - 1, d).unwrap());
         assert!(!band_genesis_price_ok(0, d).unwrap());
     }
-    assert_eq!(band_genesis_price_ok(1_000_000, 0), Err(BandRentError::InvalidInput));
+    assert_eq!(
+        band_genesis_price_ok(1_000_000, 0),
+        Err(BandRentError::InvalidInput)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -171,10 +185,19 @@ fn genesis_price_rule_is_100x_the_min_wide_anchor() {
 
 #[test]
 fn duration_pin_boundary_is_strictly_after_the_window() {
-    assert!(!band_duration_pinned(1_600, 1_000, 600), "end == anchor + E is inside");
-    assert!(band_duration_pinned(1_601, 1_000, 600), "one slot later is pinned");
+    assert!(
+        !band_duration_pinned(1_600, 1_000, 600),
+        "end == anchor + E is inside"
+    );
+    assert!(
+        band_duration_pinned(1_601, 1_000, 600),
+        "one slot later is pinned"
+    );
     assert!(!band_duration_pinned(1_000, 1_000, 600));
-    assert!(!band_duration_pinned(5, 1_000, 600), "segment before anchor is not pinned");
+    assert!(
+        !band_duration_pinned(5, 1_000, 600),
+        "segment before anchor is not pinned"
+    );
     assert!(band_duration_pinned(u64::MAX, 0, u64::MAX - 1));
     assert!(!band_duration_pinned(u64::MAX, 0, u64::MAX));
     // E = 0 degenerates to "pinned the moment the clock moves past the anchor".
@@ -184,19 +207,40 @@ fn duration_pin_boundary_is_strictly_after_the_window() {
 
 #[test]
 fn d1_step_pinned_always_feeds_the_current_price() {
-    assert_eq!(band_d1_pinned_step(1_000_000, 1_000_000, 1_000_000, 130, true), Ok((1_000_000, false)));
-    assert_eq!(band_d1_pinned_step(1_000_000, 1_005_000, 1_000_000, 130, true), Ok((1_000_000, true)));
+    assert_eq!(
+        band_d1_pinned_step(1_000_000, 1_000_000, 1_000_000, 130, true),
+        Ok((1_000_000, false))
+    );
+    assert_eq!(
+        band_d1_pinned_step(1_000_000, 1_005_000, 1_000_000, 130, true),
+        Ok((1_000_000, true))
+    );
     // Even a capped step far outside the band is ignored while the duration pin holds.
-    assert_eq!(band_d1_pinned_step(1_000_000, 1, 1_000_000, 130, true), Ok((1_000_000, true)));
+    assert_eq!(
+        band_d1_pinned_step(1_000_000, 1, 1_000_000, 130, true),
+        Ok((1_000_000, true))
+    );
 }
 
 #[test]
 fn d1_step_unpinned_clamps_and_flags_only_when_it_moved_the_step() {
     let (lo, hi) = band_bounds(1_000_000, 130).unwrap();
-    assert_eq!(band_d1_pinned_step(1_000_000, hi, 1_000_000, 130, false), Ok((hi, false)));
-    assert_eq!(band_d1_pinned_step(1_000_000, hi + 1, 1_000_000, 130, false), Ok((hi, true)));
-    assert_eq!(band_d1_pinned_step(1_000_000, lo, 1_000_000, 130, false), Ok((lo, false)));
-    assert_eq!(band_d1_pinned_step(1_000_000, lo - 1, 1_000_000, 130, false), Ok((lo, true)));
+    assert_eq!(
+        band_d1_pinned_step(1_000_000, hi, 1_000_000, 130, false),
+        Ok((hi, false))
+    );
+    assert_eq!(
+        band_d1_pinned_step(1_000_000, hi + 1, 1_000_000, 130, false),
+        Ok((hi, true))
+    );
+    assert_eq!(
+        band_d1_pinned_step(1_000_000, lo, 1_000_000, 130, false),
+        Ok((lo, false))
+    );
+    assert_eq!(
+        band_d1_pinned_step(1_000_000, lo - 1, 1_000_000, 130, false),
+        Ok((lo, true))
+    );
     assert_eq!(
         band_d1_pinned_step(1_000_000, 1_000_000, 0, 130, false),
         Err(BandRentError::InvalidInput)
@@ -257,12 +301,18 @@ fn due_zero_size_charges_nothing_and_keeps_the_carry() {
 #[test]
 fn due_with_unchanged_index_charges_nothing_and_keeps_the_carry() {
     let carry = 12_345u64;
-    assert_eq!(rent_due_with_carry(10 * POS_SCALE, 777, 777, carry), Ok((0, carry)));
+    assert_eq!(
+        rent_due_with_carry(10 * POS_SCALE, 777, 777, carry),
+        Ok((0, carry))
+    );
 }
 
 #[test]
 fn due_rejects_snapshot_ahead_of_index_and_oversized_carry() {
-    assert_eq!(rent_due_with_carry(1, 5, 6, 0), Err(BandRentError::InvalidInput));
+    assert_eq!(
+        rent_due_with_carry(1, 5, 6, 0),
+        Err(BandRentError::InvalidInput)
+    );
     assert_eq!(
         rent_due_with_carry(1, 5, 0, RENT_INDEX_DEN as u64),
         Err(BandRentError::InvalidInput)
@@ -336,7 +386,14 @@ fn due_saturates_instead_of_wrapping_for_absurd_sizes() {
 #[test]
 fn due_split_settles_equal_one_settle_when_carry_is_threaded() {
     // Deterministic schedule over awkward sizes: n settles with carry == one settle.
-    for &q in &[1u128, 3, POS_SCALE - 1, POS_SCALE, 7 * POS_SCALE + 5, 1u128 << 90] {
+    for &q in &[
+        1u128,
+        3,
+        POS_SCALE - 1,
+        POS_SCALE,
+        7 * POS_SCALE + 5,
+        1u128 << 90,
+    ] {
         for &step in &[1u128, 7, 999_983, 1_000_000_007] {
             let mut idx = 0u128;
             let mut snap = 0u128;
@@ -394,10 +451,18 @@ fn due_is_monotone_in_size_and_index() {
 fn chargeable_is_min_of_due_and_loss_free_capital() {
     assert_eq!(rent_chargeable_atoms(10, 100, 0), 10);
     assert_eq!(rent_chargeable_atoms(100, 10, 0), 10);
-    assert_eq!(rent_chargeable_atoms(10, 100, 50), 10, "positive pnl is not capital");
+    assert_eq!(
+        rent_chargeable_atoms(10, 100, 50),
+        10,
+        "positive pnl is not capital"
+    );
     assert_eq!(rent_chargeable_atoms(10, 100, -95), 5);
     assert_eq!(rent_chargeable_atoms(10, 100, -100), 0);
-    assert_eq!(rent_chargeable_atoms(10, 100, -101), 0, "loss beyond capital: nothing");
+    assert_eq!(
+        rent_chargeable_atoms(10, 100, -101),
+        0,
+        "loss beyond capital: nothing"
+    );
     assert_eq!(rent_chargeable_atoms(0, 100, -5), 0);
     assert_eq!(rent_chargeable_atoms(10, 0, 0), 0);
 }
@@ -405,7 +470,10 @@ fn chargeable_is_min_of_due_and_loss_free_capital() {
 #[test]
 fn chargeable_handles_extreme_pnl_and_capital() {
     assert_eq!(rent_chargeable_atoms(u128::MAX, u128::MAX, 0), u128::MAX);
-    assert_eq!(rent_chargeable_atoms(u128::MAX, u128::MAX, i128::MIN), u128::MAX - (1u128 << 127));
+    assert_eq!(
+        rent_chargeable_atoms(u128::MAX, u128::MAX, i128::MIN),
+        u128::MAX - (1u128 << 127)
+    );
     assert_eq!(rent_chargeable_atoms(5, 1u128 << 127, i128::MIN), 0);
     assert_eq!(rent_chargeable_atoms(5, 10, i128::MAX), 5);
 }
@@ -418,7 +486,10 @@ fn chargeable_never_exceeds_due_nor_capital_nor_leaves_loss_uncovered() {
                 let c = rent_chargeable_atoms(due, cap, pnl);
                 assert!(c <= due && c <= cap);
                 if pnl < 0 {
-                    assert!(cap - c >= pnl.unsigned_abs().min(cap), "loss-owned capital kept");
+                    assert!(
+                        cap - c >= pnl.unsigned_abs().min(cap),
+                        "loss-owned capital kept"
+                    );
                 }
             }
         }
@@ -871,8 +942,16 @@ fn rent_closed_leg_pays_only_for_the_time_it_was_open() {
     run_rent(&mut w, 150, 20, 20);
     w.refresh(0).unwrap();
     w.refresh(1).unwrap();
-    assert_eq!(w.accounts[0].capital.get(), cap0, "closed long pays nothing after close");
-    assert_eq!(w.accounts[1].capital.get(), cap1, "closed short pays nothing after close");
+    assert_eq!(
+        w.accounts[0].capital.get(),
+        cap0,
+        "closed long pays nothing after close"
+    );
+    assert_eq!(
+        w.accounts[1].capital.get(),
+        cap1,
+        "closed short pays nothing after close"
+    );
     // The first period charged exactly floor(q * idx / DEN) to account 0 (deposit - paid).
     let paid0 = 10_000_000 - cap0;
     assert_eq!(paid0, rent_due_atoms(q, idx_at_close, 0).unwrap());
@@ -922,7 +1001,10 @@ fn rent_partial_close_charges_the_remaining_size_afterwards() {
     let exact_first = rent_due_with_carry(q, idx1, 0, 0).unwrap();
     let (_, carry_mid) = exact_first;
     let (due2, _) = rent_due_with_carry(remaining, idx2, idx1, carry_mid).unwrap();
-    assert_eq!(paid_second, due2, "second period charged on the remaining size only");
+    assert_eq!(
+        paid_second, due2,
+        "second period charged on the remaining size only"
+    );
     assert_books(&w);
 }
 
@@ -977,9 +1059,20 @@ fn rent_moves_capital_to_insurance_one_for_one() {
     w.refresh(1).unwrap();
     let paid = w.header.insurance.get();
     assert!(paid > 0);
-    assert_eq!(w.header.c_tot.get() + w.header.insurance.get(), total_before);
-    assert_eq!(w.header.vault.get(), vault_before, "rent never touches the vault");
-    assert_eq!(w.asset().rent_unrouted_atoms, paid, "every atom is booked as LP rent");
+    assert_eq!(
+        w.header.c_tot.get() + w.header.insurance.get(),
+        total_before
+    );
+    assert_eq!(
+        w.header.vault.get(),
+        vault_before,
+        "rent never touches the vault"
+    );
+    assert_eq!(
+        w.asset().rent_unrouted_atoms,
+        paid,
+        "every atom is booked as LP rent"
+    );
     assert_books(&w);
 }
 
@@ -991,8 +1084,12 @@ fn rent_routing_twice_pays_out_once() {
     w.refresh(0).unwrap();
     w.refresh(1).unwrap();
     let claim = w.asset().rent_unrouted_atoms;
-    let first = w.with(2, |m, a| m.route_rent_to_account_not_atomic(0, a)).unwrap();
-    let second = w.with(2, |m, a| m.route_rent_to_account_not_atomic(0, a)).unwrap();
+    let first = w
+        .with(2, |m, a| m.route_rent_to_account_not_atomic(0, a))
+        .unwrap();
+    let second = w
+        .with(2, |m, a| m.route_rent_to_account_not_atomic(0, a))
+        .unwrap();
     assert!(claim > 0);
     assert_eq!((first, second), (claim, 0));
     assert_books(&w);

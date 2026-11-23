@@ -2952,26 +2952,56 @@ fn rentstale_rent_only_accrual_keeps_the_cohort_and_admits_opens() {
     for _ in 0..34 {
         w.now += 3;
         w.accrue(0, 20, 10).unwrap();
-        assert_eq!(stale_counts(&w), (0, 0), "rent alone must not restale the cohort");
+        assert_eq!(
+            stale_counts(&w),
+            (0, 0),
+            "rent alone must not restale the cohort"
+        );
     }
     let a1 = w.asset();
-    assert!(a1.rent_index_long_num > 0 && a1.rent_index_short_num > 0, "rent accrued");
+    assert!(
+        a1.rent_index_long_num > 0 && a1.rent_index_short_num > 0,
+        "rent accrued"
+    );
     assert_eq!(a1.k_long, a0.k_long, "no K move");
     assert_eq!(a1.f_long_num, a0.f_long_num, "no F move");
-    assert_eq!(stale_counts(&w), (0, 0), "rent alone must not restale the cohort");
-    assert_eq!((a1.kf_epoch_long, a1.kf_epoch_short), (a0.kf_epoch_long, a0.kf_epoch_short));
-    assert!(w.header.funding_epoch.get() > fe0, "rent still invalidates certificates");
-    assert_eq!(w.header.insurance.get(), 0, "no insurance: the relaxation cannot admit");
+    assert_eq!(
+        stale_counts(&w),
+        (0, 0),
+        "rent alone must not restale the cohort"
+    );
+    assert_eq!(
+        (a1.kf_epoch_long, a1.kf_epoch_short),
+        (a0.kf_epoch_long, a0.kf_epoch_short)
+    );
+    assert!(
+        w.header.funding_epoch.get() > fe0,
+        "rent still invalidates certificates"
+    );
+    assert_eq!(
+        w.header.insurance.get(),
+        0,
+        "no insurance: the relaxation cannot admit"
+    );
     // An entrant opens while legs 0/1 still owe rent (pre-fix: Err(LossStale)).
-    w.trade(2, 3, 10 * POS_SCALE).expect("open with untouched rent-owing legs");
+    w.trade(2, 3, 10 * POS_SCALE)
+        .expect("open with untouched rent-owing legs");
     // ... and the untouched legs pay exactly what they owe on their next touch.
     w.refresh(0).unwrap();
     w.refresh(1).unwrap();
     let due_l = (10 * POS_SCALE) * a1.rent_index_long_num / RENT_INDEX_DEN;
     let due_s = (10 * POS_SCALE) * a1.rent_index_short_num / RENT_INDEX_DEN;
     assert!(due_l > 0 && due_s > 0, "non-vacuous dues");
-    assert_eq!(cap0 - w.accounts[0].capital.get(), due_l, "long pays its rent exactly");
-    assert_eq!(cap1 - w.accounts[1].capital.get(), due_s, "short pays its rent exactly");
+    assert_eq!(
+        cap0 - w.accounts[0].capital.get(),
+        due_l,
+        "long pays its rent exactly"
+    );
+    assert_eq!(
+        cap1 - w.accounts[1].capital.get(),
+        due_s,
+        "short pays its rent exactly"
+    );
     assert_eq!(w.asset().rent_unrouted_atoms, due_l + due_s);
     w.assert_conservation();
     w.assert_census();
@@ -2995,7 +3025,10 @@ fn rentstale_k_and_f_moves_still_restale_and_refuse_opens() {
     open_book(&mut w, 1, 10 * POS_SCALE);
     w.now += 3;
     w.accrue(50, 0, 0).unwrap();
-    assert!(w.asset().f_long_num != 0 || w.asset().f_short_num != 0, "F moved");
+    assert!(
+        w.asset().f_long_num != 0 || w.asset().f_short_num != 0,
+        "F moved"
+    );
     assert!(stale_counts(&w) != (0, 0), "an F move restales");
     assert_eq!(w.trade(2, 3, 10 * POS_SCALE), Err(V16Error::LossStale));
 }
@@ -3021,11 +3054,22 @@ fn rentstale_rent_only_path_accrual_keeps_the_cohort_and_admits_opens() {
     w.market(|m| m.accrue_asset_path_with_rent_to_not_atomic(0, now, price, &steps, 20, 10, true))
         .unwrap();
     let a1 = w.asset();
-    assert!(a1.rent_index_long_num > a0.rent_index_long_num, "rent accrued on the path route");
-    assert_eq!(stale_counts(&w), (0, 0), "rent alone must not restale on the path route");
-    assert_eq!((a1.kf_epoch_long, a1.kf_epoch_short), (a0.kf_epoch_long, a0.kf_epoch_short));
+    assert!(
+        a1.rent_index_long_num > a0.rent_index_long_num,
+        "rent accrued on the path route"
+    );
+    assert_eq!(
+        stale_counts(&w),
+        (0, 0),
+        "rent alone must not restale on the path route"
+    );
+    assert_eq!(
+        (a1.kf_epoch_long, a1.kf_epoch_short),
+        (a0.kf_epoch_long, a0.kf_epoch_short)
+    );
     assert_eq!(w.header.insurance.get(), 0);
-    w.trade(2, 3, 10 * POS_SCALE).expect("open after a rent-only path accrual");
+    w.trade(2, 3, 10 * POS_SCALE)
+        .expect("open after a rent-only path accrual");
     w.assert_conservation();
 }
 
@@ -3045,14 +3089,18 @@ fn rentstale_unsettled_rent_never_becomes_a_deficit() {
         w.accrue(0, 23, 0).unwrap();
         assert_eq!(stale_counts(&w), (0, 0));
     }
-    w.trade(2, 3, POS_SCALE).expect("open while leg 0 owes rent");
+    w.trade(2, 3, POS_SCALE)
+        .expect("open while leg 0 owes rent");
     let cap = w.accounts[0].capital.get();
     let owed = (9 * POS_SCALE) * w.asset().rent_index_long_num / RENT_INDEX_DEN;
     assert!(owed > 0);
     w.refresh(0).unwrap();
     let acct = &w.accounts[0];
     let pnl = acct.pnl.get();
-    assert!(pnl >= 0 || acct.capital.get() >= pnl.unsigned_abs(), "rent never eats loss-owned capital");
+    assert!(
+        pnl >= 0 || acct.capital.get() >= pnl.unsigned_abs(),
+        "rent never eats loss-owned capital"
+    );
     assert!(cap - acct.capital.get() <= owed);
     w.assert_conservation();
 }

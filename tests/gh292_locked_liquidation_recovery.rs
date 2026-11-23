@@ -83,7 +83,12 @@ impl W2 {
             a.init_empty_in_place(prov).unwrap();
             accounts.push(a);
         }
-        let mut w = Self { header, markets, accounts, now: 1 };
+        let mut w = Self {
+            header,
+            markets,
+            accounts,
+            now: 1,
+        };
         for (i, d) in deposits.iter().enumerate() {
             w.with(i, |m, a| m.deposit_not_atomic(a, *d)).unwrap();
         }
@@ -111,27 +116,43 @@ impl W2 {
 
     fn trade(&mut self, ai: usize, long: usize, short: usize, q: u128) -> Result<(), V16Error> {
         let price = self.asset(ai).effective_price;
-        let (lo, hi) = if long < short { (long, short) } else { (short, long) };
+        let (lo, hi) = if long < short {
+            (long, short)
+        } else {
+            (short, long)
+        };
         let (left, right) = self.accounts.split_at_mut(hi);
         let (a_lo, a_hi) = (&mut left[lo], &mut right[0]);
-        let (l, s) = if long < short { (a_lo, a_hi) } else { (a_hi, a_lo) };
+        let (l, s) = if long < short {
+            (a_lo, a_hi)
+        } else {
+            (a_hi, a_lo)
+        };
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         let mut lv = PortfolioV16ViewMut::new(l);
         let mut sv = PortfolioV16ViewMut::new(s);
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
             &mut lv,
             &mut sv,
-            TradeRequestV16 { asset_index: ai, size_q: q as i128, exec_price: price, fee_bps: 0 },
+            TradeRequestV16 {
+                asset_index: ai,
+                size_q: q as i128,
+                exec_price: price,
+                fee_bps: 0,
+            },
             true,
         )
         .map(|_| ())
     }
 
     fn step_price(&mut self, ai: usize, target: u64) {
-        self.market(|m| m.set_asset_raw_oracle_target_not_atomic(ai, target)).unwrap();
+        self.market(|m| m.set_asset_raw_oracle_target_not_atomic(ai, target))
+            .unwrap();
         let a = self.asset(ai);
         let cfg = self.header.config.try_to_runtime_shape().unwrap();
-        let dt = (self.now - a.slot_last).min(cfg.max_accrual_dt_slots).max(1);
+        let dt = (self.now - a.slot_last)
+            .min(cfg.max_accrual_dt_slots)
+            .max(1);
         let p = a.effective_price;
         let exposed = a.oi_eff_long_q != 0 || a.oi_eff_short_q != 0;
         let capped = if !exposed {
@@ -139,7 +160,11 @@ impl W2 {
         } else {
             let md =
                 (p as u128 * cfg.max_price_move_bps_per_slot as u128 * dt as u128 / 10_000) as u64;
-            if target > p { p + md.min(target - p) } else { p - md.min(p - target) }
+            if target > p {
+                p + md.min(target - p)
+            } else {
+                p - md.min(p - target)
+            }
         };
         let now = self.now;
         let r = self.market(|m| m.accrue_asset_to_not_atomic(ai, now, capped, 0, true));
@@ -171,8 +196,6 @@ impl W2 {
             .collect()
     }
 }
-
-
 
 /// Insurance domain charged when the bankrupt LONG on asset `k` is resolved: (k, Short) = 2k + 1.
 const DOMAIN_A0_SHORT: usize = 1;
@@ -223,24 +246,41 @@ fn latch(
     }
     for &(domain, amount) in insure {
         if amount != 0 {
-            w.market(|m| m.deposit_domain_insurance_not_atomic(domain, amount)).ok()?;
+            w.market(|m| m.deposit_domain_insurance_not_atomic(domain, amount))
+                .ok()?;
         }
     }
     let deficit = w.accounts[0].pnl.get().unsigned_abs();
-    assert_eq!(w.legs(0).iter().filter(|(_, act)| *act).count(), 2, "two legs open");
-    Some(Latched { w, deficit, order: [first, 1 - first] })
+    assert_eq!(
+        w.legs(0).iter().filter(|(_, act)| *act).count(),
+        2,
+        "two legs open"
+    );
+    Some(Latched {
+        w,
+        deficit,
+        order: [first, 1 - first],
+    })
 }
 
 /// The attributable state: only asset 0 realized the loss. The caller closes asset 0 FIRST (while
 /// asset 1 is still open) -- the order in which T2a charged asset 1, and in which a reduce-only
 /// first close would remove asset 0's winners before the flat close.
 fn latched(chunk: Option<u128>, insure_a0_short: u128) -> Latched {
-    latch(260_000, chunk, false, &[(DOMAIN_A0_SHORT, insure_a0_short)], 0)
-        .expect("precondition: bad debt with the lock set")
+    latch(
+        260_000,
+        chunk,
+        false,
+        &[(DOMAIN_A0_SHORT, insure_a0_short)],
+        0,
+    )
+    .expect("precondition: bad debt with the lock set")
 }
 
 fn close(l: &mut Latched, ai: usize) -> Result<LiquidationOutcomeV16, V16Error> {
-    l.w.with(0, |m, a| m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: ai }))
+    l.w.with(0, |m, a| {
+        m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: ai })
+    })
 }
 
 /// Liquidates the legs in `l.order` and returns the summed outcome; stops at the first error. A
@@ -284,7 +324,10 @@ struct Snap {
 /// the live index), so the booking is visible in `b_epoch_start` as well as `b_num`.
 fn b_total(w: &W2, ai: usize) -> (u128, u128) {
     let a = w.asset(ai);
-    (a.b_long_num + a.b_epoch_start_long_num, a.b_short_num + a.b_epoch_start_short_num)
+    (
+        a.b_long_num + a.b_epoch_start_long_num,
+        a.b_short_num + a.b_epoch_start_short_num,
+    )
 }
 
 fn snap(w: &W2) -> Snap {
@@ -301,16 +344,35 @@ fn snap(w: &W2) -> Snap {
 }
 
 /// The resolution charged asset 0's domain (the one that realized the loss) and nothing else.
-fn assert_resolved_cleanly(l: &Latched, before: &Snap, out: &LiquidationOutcomeV16, written_off: u128) {
+fn assert_resolved_cleanly(
+    l: &Latched,
+    before: &Snap,
+    out: &LiquidationOutcomeV16,
+    written_off: u128,
+) {
     let w = &l.w;
-    assert_eq!(w.accounts[0].pnl.get(), 0, "deficit fully resolved in place");
-    assert_eq!(w.accounts[0].liquidation_lock, 0, "lock clears with the deficit");
-    assert_eq!(w.header.negative_pnl_account_count.get(), 0, "counter released");
+    assert_eq!(
+        w.accounts[0].pnl.get(),
+        0,
+        "deficit fully resolved in place"
+    );
+    assert_eq!(
+        w.accounts[0].liquidation_lock, 0,
+        "lock clears with the deficit"
+    );
+    assert_eq!(
+        w.header.negative_pnl_account_count.get(),
+        0,
+        "counter released"
+    );
     assert_eq!(before.neg, 1, "precondition: counter was armed");
     assert_eq!(w.header.mode, 0, "market stays Live");
     assert!(w.header.recovery_reason.try_to_runtime().unwrap().is_none());
     assert!(w.legs(0).iter().all(|(_, act)| !*act), "account is flat");
-    assert_eq!(out.explicit_loss, 0, "Live never writes a loss off unbacked");
+    assert_eq!(
+        out.explicit_loss, 0,
+        "Live never writes a loss off unbacked"
+    );
     // Conservation: no token moved; insurance fell by exactly what was used; deficit partition.
     assert_eq!(w.header.vault.get(), before.vault, "vault unchanged");
     assert_eq!(
@@ -320,17 +382,31 @@ fn assert_resolved_cleanly(l: &Latched, before: &Snap, out: &LiquidationOutcomeV
     );
     assert!(w.header.vault.get() >= w.header.c_tot.get() + w.header.insurance.get());
     assert_eq!(
-        out.insurance_used + out.residual_booked + (before.c_tot - w.header.c_tot.get()) + written_off,
+        out.insurance_used
+            + out.residual_booked
+            + (before.c_tot - w.header.c_tot.get())
+            + written_off,
         l.deficit,
         "deficit = principal paid + insurance + booked residual + written off (nothing lost)"
     );
     // Source-domain isolation: asset 1 (whatever leg was closed last) is untouched on both sides,
     // and on asset 0 only the winners' (short) side moves, never the bankrupt's own long side.
-    assert_eq!(b_total(w, 1), before.a1_b, "the closed-last asset's domain is not charged");
+    assert_eq!(
+        b_total(w, 1),
+        before.a1_b,
+        "the closed-last asset's domain is not charged"
+    );
     assert_eq!(b_total(w, 0).0, before.a0_b.0);
-    assert_eq!(w.header.pnl_pos_tot.get(), before.pnl_pos_tot, "no positive claim changed");
+    assert_eq!(
+        w.header.pnl_pos_tot.get(),
+        before.pnl_pos_tot,
+        "no positive claim changed"
+    );
     let ledger = w.accounts[0].close_progress.try_to_runtime().unwrap();
-    assert_eq!(ledger.residual_remaining, 0, "no close residual left pending");
+    assert_eq!(
+        ledger.residual_remaining, 0,
+        "no close residual left pending"
+    );
 }
 
 /// Squid's reproduction (GH#292), adapted to an attributable loss: liquidating the locked account
@@ -341,7 +417,11 @@ fn assert_resolved_cleanly(l: &Latched, before: &Snap, out: &LiquidationOutcomeV
 #[test]
 fn gh292_locked_flat_close_resolves_the_deficit_in_the_live_market() {
     let mut l = latched(None, 0);
-    assert_eq!(l.order, [0, 1], "precondition: the asset that lost nothing is closed last");
+    assert_eq!(
+        l.order,
+        [0, 1],
+        "precondition: the asset that lost nothing is closed last"
+    );
     let before = snap(&l.w);
     assert_eq!(before.neg, 1, "precondition: the counter is armed");
     let out = resolve(&mut l).expect("the flat close must resolve, not escalate or strand");
@@ -350,7 +430,10 @@ fn gh292_locked_flat_close_resolves_the_deficit_in_the_live_market() {
     // No insurance anywhere: the whole deficit is B-booked onto the short side of a0.
     assert_eq!(out.insurance_used, 0);
     assert_eq!(out.residual_booked, l.deficit);
-    assert!(b_total(&l.w, 0).1 > before.a0_b.1, "B index of the loss domain's winners moved");
+    assert!(
+        b_total(&l.w, 0).1 > before.a0_b.1,
+        "B index of the loss domain's winners moved"
+    );
 }
 
 /// Stage 1: the loss domain's insurance alone covers the deficit; nobody is haircut.
@@ -362,8 +445,15 @@ fn gh292_stage_insurance_only_cover_books_nothing() {
     let out = resolve(&mut l).expect("insurance covers it");
     assert_resolved_cleanly(&l, &before, &out, 0);
     assert_eq!(out.insurance_used, l.deficit);
-    assert_eq!(out.residual_booked, 0, "insurance is exhausted BEFORE any B-booking");
-    assert_eq!(b_total(&l.w, 0).1, before.a0_b.1, "no winner haircut at all");
+    assert_eq!(
+        out.residual_booked, 0,
+        "insurance is exhausted BEFORE any B-booking"
+    );
+    assert_eq!(
+        b_total(&l.w, 0).1,
+        before.a0_b.1,
+        "no winner haircut at all"
+    );
     assert_eq!(l.w.header.insurance.get(), before.insurance - l.deficit);
 }
 
@@ -378,8 +468,15 @@ fn gh292_stage_insurance_then_b_booking_in_order() {
     let before = snap(&l.w);
     let out = resolve(&mut l).expect("insurance + B covers it");
     assert_resolved_cleanly(&l, &before, &out, 0);
-    assert_eq!(out.insurance_used, seed, "ALL available insurance is used first");
-    assert_eq!(out.residual_booked, l.deficit - seed, "only the remainder is booked");
+    assert_eq!(
+        out.insurance_used, seed,
+        "ALL available insurance is used first"
+    );
+    assert_eq!(
+        out.residual_booked,
+        l.deficit - seed,
+        "only the remainder is booked"
+    );
     assert_eq!(l.w.header.insurance.get(), before.insurance - seed);
     assert!(b_total(&l.w, 0).1 > before.a0_b.1);
 }
@@ -396,14 +493,32 @@ fn gh292_only_the_charged_domains_holder_bears_the_booking() {
     let other_before = (l.w.accounts[2].pnl.get(), l.w.accounts[2].capital.get());
     let b_before = b_total(&l.w, 0).1;
     let w_sum = l.w.asset(0).loss_weight_sum_short;
-    assert_eq!(w_sum, POS_SCALE, "precondition: one opposing holder at weight POS_SCALE");
+    assert_eq!(
+        w_sum, POS_SCALE,
+        "precondition: one opposing holder at weight POS_SCALE"
+    );
     let out = resolve(&mut l).expect("resolves");
     l.w.refresh(2).unwrap();
-    assert_eq!((l.w.accounts[2].pnl.get(), l.w.accounts[2].capital.get()), other_before, "a1 counterparty untouched");
-    assert_eq!(out.residual_booked, l.deficit, "precondition: the whole deficit was booked (non-vacuous)");
+    assert_eq!(
+        (l.w.accounts[2].pnl.get(), l.w.accounts[2].capital.get()),
+        other_before,
+        "a1 counterparty untouched"
+    );
+    assert_eq!(
+        out.residual_booked, l.deficit,
+        "precondition: the whole deficit was booked (non-vacuous)"
+    );
     let delta_b = b_total(&l.w, 0).1 - b_before;
-    assert_eq!(delta_b, out.residual_booked * 1_000_000_000_000_000, "B index moved by exactly the booking");
-    assert_eq!(b_total(&l.w, 1), (0, 0), "the closed-last asset's domain is untouched");
+    assert_eq!(
+        delta_b,
+        out.residual_booked * 1_000_000_000_000_000,
+        "B index moved by exactly the booking"
+    );
+    assert_eq!(
+        b_total(&l.w, 1),
+        (0, 0),
+        "the closed-last asset's domain is untouched"
+    );
 }
 
 /// Stage 3 (changed by b-prime-2, att-302 finding 1, then by upstream 083a0d08): with no insurance
@@ -414,13 +529,24 @@ fn gh292_only_the_charged_domains_holder_bears_the_booking() {
 #[test]
 fn gh292_uninsured_deficit_is_booked_in_one_step_never_recovery() {
     for first in [0usize, 1] {
-        let mut l = latch(260_000, Some(1), false, &[(DOMAIN_A0_SHORT, 0)], first).expect("latched");
+        let mut l =
+            latch(260_000, Some(1), false, &[(DOMAIN_A0_SHORT, 0)], first).expect("latched");
         let before = snap(&l.w);
         assert!(l.deficit > 1);
         let out = resolve(&mut l).expect("never Recovery: the flat close succeeds");
         assert_eq!(l.w.header.mode, 0, "market stays Live");
-        assert!(l.w.header.recovery_reason.try_to_runtime().unwrap().is_none());
-        assert_eq!((out.insurance_used, out.residual_booked, out.explicit_loss), (0, l.deficit, 0), "whole deficit booked");
+        assert!(l
+            .w
+            .header
+            .recovery_reason
+            .try_to_runtime()
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            (out.insurance_used, out.residual_booked, out.explicit_loss),
+            (0, l.deficit, 0),
+            "whole deficit booked"
+        );
         assert_resolved_cleanly(&l, &before, &out, 0);
     }
 }
@@ -465,12 +591,21 @@ fn gh292_locked_close_with_open_risk_remaining_charges_nothing() {
     let b = (b_total(&w, 0).1, b_total(&w, 1).1);
     let pnl = w.accounts[0].pnl.get();
     let out = w
-        .with(0, |m, a| m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: 0 }))
+        .with(0, |m, a| {
+            m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: 0 })
+        })
         .unwrap();
-    assert_eq!((out.insurance_used, out.residual_booked, out.fee_charged), (0, 0, 0));
+    assert_eq!(
+        (out.insurance_used, out.residual_booked, out.fee_charged),
+        (0, 0, 0)
+    );
     assert_eq!(w.header.insurance.get(), ins);
     assert_eq!(b, (b_total(&w, 0).1, b_total(&w, 1).1));
-    assert_eq!(w.accounts[0].pnl.get(), pnl, "deficit untouched while risk remains");
+    assert_eq!(
+        w.accounts[0].pnl.get(),
+        pnl,
+        "deficit untouched while risk remains"
+    );
     assert_ne!(w.accounts[0].liquidation_lock, 0);
 }
 
@@ -483,10 +618,17 @@ fn e299_closing_the_other_leg_first_charges_nothing() {
     let pnl = l.w.accounts[0].pnl.get();
     let out = close(&mut l, 1).expect("reduce-only close of the non-loss leg");
     assert!(out.closed_q > 0);
-    assert_eq!((out.insurance_used, out.residual_booked, out.fee_charged), (0, 0, 0));
+    assert_eq!(
+        (out.insurance_used, out.residual_booked, out.fee_charged),
+        (0, 0, 0)
+    );
     assert_eq!(snap(&l.w).insurance, before.insurance);
     assert_eq!(b_total(&l.w, 0), before.a0_b);
-    assert_eq!(l.w.accounts[0].pnl.get(), pnl, "deficit untouched while the loss leg is open");
+    assert_eq!(
+        l.w.accounts[0].pnl.get(),
+        pnl,
+        "deficit untouched while the loss leg is open"
+    );
     assert_ne!(l.w.accounts[0].liquidation_lock, 0);
 }
 
@@ -508,12 +650,24 @@ fn gh292_single_asset_bankruptcy_still_resolves_in_place() {
             }
         }
     }
-    assert!(liquidatable, "precondition: the control account must breach maintenance");
-    assert_eq!(w.accounts[0].liquidation_lock, 0, "a single-leg account never takes the locked branch");
+    assert!(
+        liquidatable,
+        "precondition: the control account must breach maintenance"
+    );
+    assert_eq!(
+        w.accounts[0].liquidation_lock, 0,
+        "a single-leg account never takes the locked branch"
+    );
     let out = w.with(0, |m, a| {
         m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: 0 })
     });
-    assert!(out.is_ok(), "got {:?}", out.as_ref().map(|o| o.closed_q).map_err(|e| format!("{e:?}")));
+    assert!(
+        out.is_ok(),
+        "got {:?}",
+        out.as_ref()
+            .map(|o| o.closed_q)
+            .map_err(|e| format!("{e:?}"))
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -530,13 +684,18 @@ struct Attribution {
     counterparties: [(i128, u128); 2],
 }
 
-fn attribution_after_flat_close(drop_a1: bool, insure: &[(usize, u128)], first: usize) -> (Attribution, u128) {
+fn attribution_after_flat_close(
+    drop_a1: bool,
+    insure: &[(usize, u128)],
+    first: usize,
+) -> (Attribution, u128) {
     let mut l = latch(260_000, None, drop_a1, insure, first).expect("precondition: latched");
     let out = resolve(&mut l);
     // The group-wide h-lock is a withdrawal gate, not an attribution: whether a LATER instruction
     // already ran its clear check depends on how many closes followed the charge. Run the public
     // clear step once in both orders so the comparison is of the clearable state.
-    l.w.market(|m| m.try_clear_bankruptcy_hlock_not_atomic()).unwrap();
+    l.w.market(|m| m.try_clear_bankruptcy_hlock_not_atomic())
+        .unwrap();
     let mut cp = [(0i128, 0u128); 2];
     for (k, i) in [1usize, 2].into_iter().enumerate() {
         cp[k] = (l.w.accounts[i].pnl.get(), l.w.accounts[i].capital.get());
@@ -572,9 +731,16 @@ fn e299_close_order_does_not_change_who_pays() {
         // non-vacuous: the deficit is actually resolved (two orders that both strand would compare
         // equal too)
         let (ins, booked, explicit) = a0_last.result.clone().expect("resolves");
-        assert_eq!((ins + booked, explicit), (d0, 0), "{insure:?}: whole deficit charged");
+        assert_eq!(
+            (ins + booked, explicit),
+            (d0, 0),
+            "{insure:?}: whole deficit charged"
+        );
         assert_eq!(a0_last.market.neg, 0, "{insure:?}: counter released");
-        assert_eq!(a0_last, a1_last, "{insure:?}: close order changed the attribution");
+        assert_eq!(
+            a0_last, a1_last,
+            "{insure:?}: close order changed the attribution"
+        );
     }
 }
 
@@ -587,10 +753,24 @@ fn e299_liquidator_cannot_steer_a0_loss_onto_a1_insurance() {
     assert_eq!(l.order, [0, 1], "the leg left for last is asset 1's");
     let before = snap(&l.w);
     let out = resolve(&mut l).expect("resolves against asset 0's domain");
-    assert_eq!(out.insurance_used, 0, "asset 1's insurance must not pay for asset 0's loss");
-    assert_eq!(l.w.header.insurance.get(), before.insurance, "no insurance moved at all");
-    assert_eq!(b_total(&l.w, 1), before.a1_b, "asset 1's winners not haircut");
-    assert_eq!(out.residual_booked, l.deficit, "asset 0's winners bear it via B");
+    assert_eq!(
+        out.insurance_used, 0,
+        "asset 1's insurance must not pay for asset 0's loss"
+    );
+    assert_eq!(
+        l.w.header.insurance.get(),
+        before.insurance,
+        "no insurance moved at all"
+    );
+    assert_eq!(
+        b_total(&l.w, 1),
+        before.a1_b,
+        "asset 1's winners not haircut"
+    );
+    assert_eq!(
+        out.residual_booked, l.deficit,
+        "asset 0's winners bear it via B"
+    );
     assert!(b_total(&l.w, 0).1 > before.a0_b.1);
     assert_resolved_cleanly(&l, &before, &out, 0);
 }
@@ -614,16 +794,42 @@ fn e299_two_domain_deficit_is_unattributable_and_is_written_off_not_recovered() 
         .expect("precondition: Squid's latched state");
         let before = snap(&l.w);
         let reduce = close(&mut l, first).expect("first close is reduce-only");
-        assert_eq!((reduce.insurance_used, reduce.residual_booked, reduce.fee_charged), (0, 0, 0));
+        assert_eq!(
+            (
+                reduce.insurance_used,
+                reduce.residual_booked,
+                reduce.fee_charged
+            ),
+            (0, 0, 0)
+        );
         assert_eq!(l.w.header.mode, 0, "no Recovery while risk remains");
         let out = close(&mut l, 1 - first).expect("b-prime: the flat close succeeds, no Recovery");
-        assert_eq!((out.insurance_used, out.residual_booked, out.fee_charged), (0, 0, 0));
+        assert_eq!(
+            (out.insurance_used, out.residual_booked, out.fee_charged),
+            (0, 0, 0)
+        );
         assert_eq!(l.w.header.mode, 0, "market stays Live");
-        assert_eq!(l.w.header.insurance.get(), before.insurance, "no insurance consumed");
-        assert_eq!((b_total(&l.w, 0), b_total(&l.w, 1)), (before.a0_b, before.a1_b), "nothing booked");
-        assert_eq!(l.w.accounts[0].pnl.get(), 0, "deficit recognised account-locally");
+        assert_eq!(
+            l.w.header.insurance.get(),
+            before.insurance,
+            "no insurance consumed"
+        );
+        assert_eq!(
+            (b_total(&l.w, 0), b_total(&l.w, 1)),
+            (before.a0_b, before.a1_b),
+            "nothing booked"
+        );
+        assert_eq!(
+            l.w.accounts[0].pnl.get(),
+            0,
+            "deficit recognised account-locally"
+        );
         assert_eq!(l.w.accounts[0].liquidation_lock, 0);
-        assert_eq!(l.w.header.negative_pnl_account_count.get(), 0, "counter released: no latch");
+        assert_eq!(
+            l.w.header.negative_pnl_account_count.get(),
+            0,
+            "counter released: no latch"
+        );
     }
 }
 
@@ -641,7 +847,12 @@ fn chunk_for(chunk_sel: u8, deficit: u128) -> Option<u128> {
     }
 }
 
-fn latched_with_deposit(deposit: u128, chunk: Option<u128>, insure: u128, first: usize) -> Option<Latched> {
+fn latched_with_deposit(
+    deposit: u128,
+    chunk: Option<u128>,
+    insure: u128,
+    first: usize,
+) -> Option<Latched> {
     std::panic::catch_unwind(|| latch(deposit, chunk, false, &[(DOMAIN_A0_SHORT, insure)], first))
         .ok()
         .flatten()
@@ -705,16 +916,21 @@ proptest! {
 /// with insurance only, insurance + B, B only, and partial charge + write-off; never Recovery), asserting the invariants on each.
 #[test]
 fn gh292_sim_sweep_covers_every_waterfall_outcome() {
-    let (mut ran, mut ins_only, mut ins_b, mut b_only, mut partial) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    let (mut ran, mut ins_only, mut ins_b, mut b_only, mut partial) =
+        (0u32, 0u32, 0u32, 0u32, 0u32);
     for deposit in (200_000u128..=330_000).step_by(10_000) {
         for first in [0usize, 1] {
-            let Some(probe) = latched_with_deposit(deposit, None, 0, first) else { continue };
+            let Some(probe) = latched_with_deposit(deposit, None, 0, first) else {
+                continue;
+            };
             let deficit = probe.deficit;
             for seed_pct in [0u32, 25, 50, 100, 150] {
                 for chunk_sel in 0u8..4 {
                     let seed = deficit * seed_pct as u128 / 100;
                     let chunk = chunk_for(chunk_sel, deficit);
-                    let Some(mut l) = latched_with_deposit(deposit, chunk, seed, first) else { continue };
+                    let Some(mut l) = latched_with_deposit(deposit, chunk, seed, first) else {
+                        continue;
+                    };
                     assert_eq!(l.deficit, deficit);
                     ran += 1;
                     let before = snap(&l.w);
@@ -725,7 +941,10 @@ fn gh292_sim_sweep_covers_every_waterfall_outcome() {
                     match resolve(&mut l) {
                         Ok(o) => {
                             assert_resolved_cleanly(&l, &before, &o, written_off);
-                            assert_eq!((o.insurance_used, o.residual_booked), (used, booked_expected));
+                            assert_eq!(
+                                (o.insurance_used, o.residual_booked),
+                                (used, booked_expected)
+                            );
                             match (o.insurance_used > 0, o.residual_booked > 0, written_off > 0) {
                                 (true, false, false) => ins_only += 1,
                                 (true, true, false) => ins_b += 1,
@@ -742,6 +961,9 @@ fn gh292_sim_sweep_covers_every_waterfall_outcome() {
     }
     println!("sweep ran={ran} ins_only={ins_only} ins_b={ins_b} b_only={b_only} partial_writeoff={partial}");
     // partial write-off needs a chunk below the deficit; the chunk is now PUBLIC_B_CHUNK_ATOMS.
-    assert!(ran >= 40 && ins_only > 0 && ins_b > 0 && b_only > 0, "sim must be non-vacuous");
+    assert!(
+        ran >= 40 && ins_only > 0 && ins_b > 0 && b_only > 0,
+        "sim must be non-vacuous"
+    );
     assert_eq!(partial, 0, "no deficit here exceeds the public B chunk");
 }

@@ -22,11 +22,26 @@ use LossProvenanceV16::{Domain, Unattributable};
 
 #[test]
 fn e299_provenance_wire_round_trips() {
-    assert_eq!(decode_loss_provenance(LOSS_PROVENANCE_NONE), Ok(LossProvenanceV16::None));
-    assert_eq!(decode_loss_provenance(LOSS_PROVENANCE_UNATTRIBUTABLE), Ok(Unattributable));
+    assert_eq!(
+        decode_loss_provenance(LOSS_PROVENANCE_NONE),
+        Ok(LossProvenanceV16::None)
+    );
+    assert_eq!(
+        decode_loss_provenance(LOSS_PROVENANCE_UNATTRIBUTABLE),
+        Ok(Unattributable)
+    );
     assert_eq!(decode_loss_provenance(1), Ok(Domain(0)));
-    for p in [LossProvenanceV16::None, Unattributable, Domain(0), Domain(7), Domain(31)] {
-        assert_eq!(decode_loss_provenance(encode_loss_provenance(p).unwrap()), Ok(p));
+    for p in [
+        LossProvenanceV16::None,
+        Unattributable,
+        Domain(0),
+        Domain(7),
+        Domain(31),
+    ] {
+        assert_eq!(
+            decode_loss_provenance(encode_loss_provenance(p).unwrap()),
+            Ok(p)
+        );
     }
     // a domain that would collide with the sentinel is refused, never aliased
     assert!(encode_loss_provenance(Domain(u32::MAX as usize - 1)).is_err());
@@ -56,7 +71,11 @@ fn e299_record_names_the_single_realizing_domain() {
 #[test]
 fn e299_gains_keep_the_record_while_negative_and_clear_it_at_zero() {
     let p = Domain(1);
-    assert_eq!(lp1(p, -100, -40, Some(3)), Domain(1), "netting gain keeps it");
+    assert_eq!(
+        lp1(p, -100, -40, Some(3)),
+        Domain(1),
+        "netting gain keeps it"
+    );
     assert_eq!(lp1(p, -100, -40, None), Domain(1));
     assert_eq!(lp1(p, -100, 0, None), LossProvenanceV16::None);
     assert_eq!(lp1(Unattributable, -100, 5, None), LossProvenanceV16::None);
@@ -69,9 +88,15 @@ fn e299_multi_leg_record_is_sticky_until_one_leg_and_pnl_nonnegative() {
     let p = loss_provenance_after_pnl(LossProvenanceV16::None, 0, -100, Some(0), true);
     let p = loss_provenance_after_pnl(p, -100, 50, None, true);
     assert_eq!(p, Domain(0), "multi-leg gain keeps the record");
-    assert_eq!(loss_provenance_after_pnl(p, 50, -70, Some(4), true), Unattributable);
+    assert_eq!(
+        loss_provenance_after_pnl(p, 50, -70, Some(4), true),
+        Unattributable
+    );
     // the first write with at most one leg and pnl >= 0 clears it
-    assert_eq!(loss_provenance_after_pnl(p, 50, 60, None, false), LossProvenanceV16::None);
+    assert_eq!(
+        loss_provenance_after_pnl(p, 50, 60, None, false),
+        LossProvenanceV16::None
+    );
 }
 
 #[test]
@@ -87,10 +112,19 @@ fn e299_a_loss_absorbed_by_positive_face_is_still_recorded() {
 
 #[test]
 fn e299_no_record_on_a_negative_pnl_is_never_attributed() {
-    assert_eq!(effective_loss_provenance(LossProvenanceV16::None, -1), Unattributable);
-    assert_eq!(effective_loss_provenance(LossProvenanceV16::None, 0), LossProvenanceV16::None);
+    assert_eq!(
+        effective_loss_provenance(LossProvenanceV16::None, -1),
+        Unattributable
+    );
+    assert_eq!(
+        effective_loss_provenance(LossProvenanceV16::None, 0),
+        LossProvenanceV16::None
+    );
     // a later single-domain loss cannot launder an unknown earlier deficit into an attribution
-    assert_eq!(lp1(LossProvenanceV16::None, -5, -9, Some(0)), Unattributable);
+    assert_eq!(
+        lp1(LossProvenanceV16::None, -5, -9, Some(0)),
+        Unattributable
+    );
 }
 
 /// Apply a sequence of signed pnl deltas (loss domain per negative delta), returning the record.
@@ -98,7 +132,13 @@ fn replay(start: i128, steps: &[(i128, usize)], multi_leg: bool) -> LossProvenan
     let (mut pnl, mut p) = (start, LossProvenanceV16::None);
     for &(delta, d) in steps {
         let next = pnl + delta;
-        p = loss_provenance_after_pnl(p, pnl, next, if delta < 0 { Some(d) } else { None }, multi_leg);
+        p = loss_provenance_after_pnl(
+            p,
+            pnl,
+            next,
+            if delta < 0 { Some(d) } else { None },
+            multi_leg,
+        );
         pnl = next;
     }
     p
@@ -108,7 +148,9 @@ fn shuffle<T: Clone>(v: &[T], seed: u64) -> Vec<T> {
     let mut out = v.to_vec();
     let mut x = seed | 1;
     for i in (1..out.len()).rev() {
-        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
         out.swap(i, (x % (i as u64 + 1)) as usize);
     }
     out
@@ -180,7 +222,10 @@ fn e299_charge_decision_table() {
         for flat in [false, true] {
             // unlocked: the closed leg's domain, whatever the record says (unchanged path)
             for p in [none, Unattributable, Domain(0), Domain(5)] {
-                assert_eq!(liquidation_residual_charge(false, p, 3, full, flat), Charge(3));
+                assert_eq!(
+                    liquidation_residual_charge(false, p, 3, full, flat),
+                    Charge(3)
+                );
             }
             // locked, unattributable or no record: never charged; ResolveFlat (never Recovery) once flat
             for p in [none, Unattributable] {
@@ -188,11 +233,23 @@ fn e299_charge_decision_table() {
                 assert_eq!(liquidation_residual_charge(true, p, 3, full, flat), want);
             }
             // locked, attributed to the closed leg's domain: charged at its full close; flat -> ResolveFlat
-            let want = if flat { ResolveFlat } else if full { Charge(3) } else { ReduceOnly };
-            assert_eq!(liquidation_residual_charge(true, Domain(3), 3, full, flat), want);
+            let want = if flat {
+                ResolveFlat
+            } else if full {
+                Charge(3)
+            } else {
+                ReduceOnly
+            };
+            assert_eq!(
+                liquidation_residual_charge(true, Domain(3), 3, full, flat),
+                want
+            );
             // locked, attributed elsewhere: the closed leg NEVER becomes the charged domain
             let want = if flat { ResolveFlat } else { ReduceOnly };
-            assert_eq!(liquidation_residual_charge(true, Domain(0), 3, full, flat), want);
+            assert_eq!(
+                liquidation_residual_charge(true, Domain(0), 3, full, flat),
+                want
+            );
         }
     }
 }
@@ -275,7 +332,12 @@ impl W2 {
             a.init_empty_in_place(prov).unwrap();
             accounts.push(a);
         }
-        let mut w = Self { header, markets, accounts, now: 1 };
+        let mut w = Self {
+            header,
+            markets,
+            accounts,
+            now: 1,
+        };
         for (i, d) in deposits.iter().enumerate() {
             w.with(i, |m, a| m.deposit_not_atomic(a, *d)).unwrap();
         }
@@ -303,27 +365,43 @@ impl W2 {
 
     fn trade(&mut self, ai: usize, long: usize, short: usize, q: u128) -> Result<(), V16Error> {
         let price = self.asset(ai).effective_price;
-        let (lo, hi) = if long < short { (long, short) } else { (short, long) };
+        let (lo, hi) = if long < short {
+            (long, short)
+        } else {
+            (short, long)
+        };
         let (left, right) = self.accounts.split_at_mut(hi);
         let (a_lo, a_hi) = (&mut left[lo], &mut right[0]);
-        let (l, s) = if long < short { (a_lo, a_hi) } else { (a_hi, a_lo) };
+        let (l, s) = if long < short {
+            (a_lo, a_hi)
+        } else {
+            (a_hi, a_lo)
+        };
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         let mut lv = PortfolioV16ViewMut::new(l);
         let mut sv = PortfolioV16ViewMut::new(s);
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
             &mut lv,
             &mut sv,
-            TradeRequestV16 { asset_index: ai, size_q: q as i128, exec_price: price, fee_bps: 0 },
+            TradeRequestV16 {
+                asset_index: ai,
+                size_q: q as i128,
+                exec_price: price,
+                fee_bps: 0,
+            },
             true,
         )
         .map(|_| ())
     }
 
     fn step_price(&mut self, ai: usize, target: u64) {
-        self.market(|m| m.set_asset_raw_oracle_target_not_atomic(ai, target)).unwrap();
+        self.market(|m| m.set_asset_raw_oracle_target_not_atomic(ai, target))
+            .unwrap();
         let a = self.asset(ai);
         let cfg = self.header.config.try_to_runtime_shape().unwrap();
-        let dt = (self.now - a.slot_last).min(cfg.max_accrual_dt_slots).max(1);
+        let dt = (self.now - a.slot_last)
+            .min(cfg.max_accrual_dt_slots)
+            .max(1);
         let p = a.effective_price;
         let exposed = a.oi_eff_long_q != 0 || a.oi_eff_short_q != 0;
         let capped = if !exposed {
@@ -331,7 +409,11 @@ impl W2 {
         } else {
             let md =
                 (p as u128 * cfg.max_price_move_bps_per_slot as u128 * dt as u128 / 10_000) as u64;
-            if target > p { p + md.min(target - p) } else { p - md.min(p - target) }
+            if target > p {
+                p + md.min(target - p)
+            } else {
+                p - md.min(p - target)
+            }
         };
         let now = self.now;
         let r = self.market(|m| m.accrue_asset_to_not_atomic(ai, now, capped, 0, true));
@@ -364,7 +446,6 @@ impl W2 {
     }
 }
 
-
 fn record(w: &W2) -> LossProvenanceV16 {
     decode_loss_provenance(w.accounts[0].loss_provenance.get()).unwrap()
 }
@@ -386,7 +467,10 @@ fn latched(drop_a1: bool) -> W2 {
         // two legs open: the record is sticky for the episode and only ever names a loser
         let r = record(&w);
         if drop_a1 {
-            assert!(matches!(r, LossProvenanceV16::None | Domain(0) | Domain(2) | Unattributable));
+            assert!(matches!(
+                r,
+                LossProvenanceV16::None | Domain(0) | Domain(2) | Unattributable
+            ));
         } else {
             assert!(matches!(r, LossProvenanceV16::None | Domain(0)), "{r:?}");
         }
@@ -399,10 +483,16 @@ fn e299_engine_records_the_realizing_domain_and_clears_it_on_resolution() {
     let mut w = latched(false);
     // a0 long lost: loss domain (asset 0, Long) = 0
     assert_eq!(record(&w), Domain(0));
-    let out = w.with(0, |m, a| m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: 0 }));
+    let out = w.with(0, |m, a| {
+        m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: 0 })
+    });
     assert!(out.is_ok(), "{out:?}");
     assert_eq!(w.accounts[0].pnl.get(), 0);
-    assert_eq!(record(&w), LossProvenanceV16::None, "resolved: record cleared");
+    assert_eq!(
+        record(&w),
+        LossProvenanceV16::None,
+        "resolved: record cleared"
+    );
     assert_eq!(w.accounts[0].liquidation_lock, 0);
 }
 
@@ -418,9 +508,15 @@ fn e299_out_of_range_record_fails_closed() {
     // 2 configured assets -> 4 domains; domain 4 is out of range
     w.accounts[0].loss_provenance = V16PodU32::new(1 + 4);
     let before = (w.header, w.accounts[0]);
-    let out = w.with(0, |m, a| m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: 1 }));
+    let out = w.with(0, |m, a| {
+        m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: 1 })
+    });
     assert_eq!(out.map(|o| o.closed_q), Err(V16Error::InvalidLeg));
-    assert_eq!((w.header, w.accounts[0]), before, "rejected before any mutation");
+    assert_eq!(
+        (w.header, w.accounts[0]),
+        before,
+        "rejected before any mutation"
+    );
     // the in-range record is accepted again
     w.accounts[0].loss_provenance = V16PodU32::new(1 + 3);
     assert!(w.refresh(0).is_ok());
@@ -436,7 +532,11 @@ fn e299_out_of_range_record_fails_closed() {
 /// target; each slot the assets are stepped and the account refreshed in `order`, one asset at a
 /// time. Returns the record once the account is in bad debt (or after 80 slots).
 fn record_after_crank_order(targets: [u64; 3], order: [usize; 3]) -> (LossProvenanceV16, i128) {
-    let mut w = W2::new(band_cfg(3), &[400_000, 50_000_000, 50_000_000, 50_000_000], 3);
+    let mut w = W2::new(
+        band_cfg(3),
+        &[400_000, 50_000_000, 50_000_000, 50_000_000],
+        3,
+    );
     w.trade(0, 0, 1, POS_SCALE).unwrap();
     w.trade(1, 2, 0, POS_SCALE).unwrap();
     w.trade(2, 0, 3, POS_SCALE).unwrap();
@@ -455,7 +555,14 @@ fn record_after_crank_order(targets: [u64; 3], order: [usize; 3]) -> (LossProven
     (record(&w), w.accounts[0].pnl.get())
 }
 
-const ORDERS: [[usize; 3]; 6] = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+const ORDERS: [[usize; 3]; 6] = [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0],
+];
 
 /// Two legs lose (a0 long, a2 long fall) while one gains (a1 short, a1 falls): in EVERY crank order
 /// the record is unattributable. Before the multi-leg-sticky rule the record named whichever loser
@@ -470,7 +577,10 @@ fn e299_crank_order_cannot_choose_the_payer_two_losers() {
         seen.push((order, p));
     }
     for (order, p) in &seen {
-        assert_eq!(*p, Unattributable, "order {order:?} attributed a two-domain loss: {seen:?}");
+        assert_eq!(
+            *p, Unattributable,
+            "order {order:?} attributed a two-domain loss: {seen:?}"
+        );
     }
 }
 

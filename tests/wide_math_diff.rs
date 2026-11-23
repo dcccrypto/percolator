@@ -194,7 +194,10 @@ struct Sg {
 }
 impl Sg {
     fn new(neg: bool, m: Big) -> Sg {
-        Sg { neg: neg && !m.is_zero(), m }
+        Sg {
+            neg: neg && !m.is_zero(),
+            m,
+        }
     }
     fn from_i128(v: i128) -> Sg {
         Sg::new(v < 0, Big::from_u128(v.unsigned_abs()))
@@ -246,7 +249,11 @@ impl Sg {
         if !self.fits_i256() {
             return None;
         }
-        let raw = if self.neg { two256().sub(&self.m).mask256() } else { self.m };
+        let raw = if self.neg {
+            two256().sub(&self.m).mask256()
+        } else {
+            self.m
+        };
         Some(I256::from_raw_u256(raw.to_u256().unwrap()))
     }
     fn fits_i128_mag(&self) -> bool {
@@ -279,7 +286,12 @@ struct Tally {
 }
 impl Tally {
     fn new(op: &'static str) -> Tally {
-        Tally { op, cases: 0, bad: 0, first: vec![] }
+        Tally {
+            op,
+            cases: 0,
+            bad: 0,
+            first: vec![],
+        }
     }
     fn ck(&mut self, ok: bool, msg: impl FnOnce() -> String) {
         self.cases += 1;
@@ -295,7 +307,13 @@ impl Tally {
             "WIDE_MATH_DIFF op={} cases={} mismatches={}",
             self.op, self.cases, self.bad
         );
-        assert!(self.bad == 0, "{} mismatches in {}:\n{}", self.bad, self.op, self.first.join("\n"));
+        assert!(
+            self.bad == 0,
+            "{} mismatches in {}:\n{}",
+            self.bad,
+            self.op,
+            self.first.join("\n")
+        );
     }
 }
 
@@ -332,7 +350,11 @@ impl Rng {
             1 => {
                 let bits = self.below(257) as u32;
                 let v = Big::from_u256(U256::new(self.u128(), self.u128()));
-                let m = if bits == 0 { Big::ZERO } else { Big::pow2(bits).sub(&Big::from_u128(1)) };
+                let m = if bits == 0 {
+                    Big::ZERO
+                } else {
+                    Big::pow2(bits).sub(&Big::from_u128(1))
+                };
                 let mut r = v;
                 for i in 0..L {
                     r.0[i] &= m.0[i];
@@ -360,7 +382,9 @@ impl Rng {
                 v.to_u256().unwrap_or(U256::MAX)
             }
             4 => U256::from_u64(self.next()),
-            5 => U256::MAX.checked_sub(U256::from_u64(self.below(1000))).unwrap(),
+            5 => U256::MAX
+                .checked_sub(U256::from_u64(self.below(1000)))
+                .unwrap(),
             _ => U256::from_u128(self.u128()),
         }
     }
@@ -418,7 +442,9 @@ fn edge_u256() -> Vec<U256> {
         max256().sub(&Big::from_u128(1)),
         max256().sub(&Big::from_u128(2)),
     ];
-    for &k in &[1u32, 7, 8, 31, 32, 33, 63, 64, 65, 95, 96, 127, 128, 129, 191, 192, 193, 254, 255] {
+    for &k in &[
+        1u32, 7, 8, 31, 32, 33, 63, 64, 65, 95, 96, 127, 128, 129, 191, 192, 193, 254, 255,
+    ] {
         let p = Big::pow2(k);
         v.push(p.sub(&Big::from_u128(1)));
         v.push(p);
@@ -482,25 +508,42 @@ fn wide_math_diff_u256_add_sub() {
         let sum = ra.add(&rb);
         let exp_sum = sum.to_u256();
         let wrapped = u(&sum.mask256());
-        t.ck(a.checked_add(b) == exp_sum, || format!("checked_add {a:?} {b:?}"));
-        t.ck(a.overflowing_add(b) == (wrapped, exp_sum.is_none()), || format!("overflowing_add {a:?} {b:?}"));
-        t.ck(a.saturating_add(b) == exp_sum.unwrap_or(U256::MAX), || format!("saturating_add {a:?} {b:?}"));
+        t.ck(a.checked_add(b) == exp_sum, || {
+            format!("checked_add {a:?} {b:?}")
+        });
+        t.ck(a.overflowing_add(b) == (wrapped, exp_sum.is_none()), || {
+            format!("overflowing_add {a:?} {b:?}")
+        });
+        t.ck(a.saturating_add(b) == exp_sum.unwrap_or(U256::MAX), || {
+            format!("saturating_add {a:?} {b:?}")
+        });
         if let Some(s) = exp_sum {
             t.ck(a + b == s, || format!("Add {a:?} {b:?}"));
         }
         let ge = ra.cmp(&rb) != Ordering::Less;
         let exp_diff = if ge { Some(u(&ra.sub(&rb))) } else { None };
         let wdiff = u(&two256().add(&ra).sub(&rb).mask256());
-        t.ck(a.checked_sub(b) == exp_diff, || format!("checked_sub {a:?} {b:?}"));
-        t.ck(a.overflowing_sub(b) == (wdiff, !ge), || format!("overflowing_sub {a:?} {b:?}"));
-        t.ck(a.saturating_sub(b) == exp_diff.unwrap_or(U256::ZERO), || format!("saturating_sub {a:?} {b:?}"));
+        t.ck(a.checked_sub(b) == exp_diff, || {
+            format!("checked_sub {a:?} {b:?}")
+        });
+        t.ck(a.overflowing_sub(b) == (wdiff, !ge), || {
+            format!("overflowing_sub {a:?} {b:?}")
+        });
+        t.ck(
+            a.saturating_sub(b) == exp_diff.unwrap_or(U256::ZERO),
+            || format!("saturating_sub {a:?} {b:?}"),
+        );
         if let Some(d) = exp_diff {
             t.ck(a - b == d, || format!("Sub {a:?} {b:?}"));
         }
     }
     // operator panics on overflow / underflow
-    t.ck(panics(|| U256::MAX + U256::ONE), || "MAX+1 must panic".into());
-    t.ck(panics(|| U256::ZERO - U256::ONE), || "0-1 must panic".into());
+    t.ck(panics(|| U256::MAX + U256::ONE), || {
+        "MAX+1 must panic".into()
+    });
+    t.ck(panics(|| U256::ZERO - U256::ONE), || {
+        "0-1 must panic".into()
+    });
     t.finish();
 }
 
@@ -510,7 +553,9 @@ fn wide_math_diff_u256_mul() {
     for (a, b) in pairs(2) {
         let p = bg(a).mul(&bg(b));
         let exp = p.to_u256();
-        t.ck(a.checked_mul(b) == exp, || format!("checked_mul {a:?} {b:?}"));
+        t.ck(a.checked_mul(b) == exp, || {
+            format!("checked_mul {a:?} {b:?}")
+        });
         if let Some(e) = exp {
             t.ck(a * b == e, || format!("Mul {a:?} {b:?}"));
         }
@@ -519,8 +564,12 @@ fn wide_math_diff_u256_mul() {
     for k in 1..=255u32 {
         let (x, y) = (Big::pow2(k), Big::pow2(256 - k));
         let y1 = y.sub(&Big::from_u128(1));
-        t.ck(u(&x).checked_mul(u(&y)).is_none(), || format!("2^{k} * 2^{} must overflow", 256 - k));
-        t.ck(u(&x).checked_mul(u(&y1)) == x.mul(&y1).to_u256(), || format!("2^{k} * (2^{}-1)", 256 - k));
+        t.ck(u(&x).checked_mul(u(&y)).is_none(), || {
+            format!("2^{k} * 2^{} must overflow", 256 - k)
+        });
+        t.ck(u(&x).checked_mul(u(&y1)) == x.mul(&y1).to_u256(), || {
+            format!("2^{k} * (2^{}-1)", 256 - k)
+        });
     }
     t.finish();
 }
@@ -530,16 +579,32 @@ fn wide_math_diff_u256_div_rem() {
     let mut t = Tally::new("u256_div_rem");
     let check = |t: &mut Tally, a: U256, b: U256| {
         if b.is_zero() {
-            t.ck(a.checked_div(b).is_none() && a.checked_rem(b).is_none(), || format!("div0 {a:?}"));
-            t.ck(panics(|| div_rem_u256(a, b)), || format!("div_rem_u256 by 0 must panic {a:?}"));
+            t.ck(
+                a.checked_div(b).is_none() && a.checked_rem(b).is_none(),
+                || format!("div0 {a:?}"),
+            );
+            t.ck(panics(|| div_rem_u256(a, b)), || {
+                format!("div_rem_u256 by 0 must panic {a:?}")
+            });
             return;
         }
         let (q, r) = bg(a).divrem(&bg(b));
         let (eq, er) = (u(&q), u(&r));
-        t.ck(div_rem_u256(a, b) == (eq, er), || format!("div_rem_u256 {a:?} / {b:?}: want {eq:?} {er:?} got {:?}", div_rem_u256(a, b)));
-        t.ck(a.checked_div(b) == Some(eq), || format!("checked_div {a:?} {b:?}"));
-        t.ck(a.checked_rem(b) == Some(er), || format!("checked_rem {a:?} {b:?}"));
-        t.ck(a / b == eq && a % b == er, || format!("Div/Rem {a:?} {b:?}"));
+        t.ck(div_rem_u256(a, b) == (eq, er), || {
+            format!(
+                "div_rem_u256 {a:?} / {b:?}: want {eq:?} {er:?} got {:?}",
+                div_rem_u256(a, b)
+            )
+        });
+        t.ck(a.checked_div(b) == Some(eq), || {
+            format!("checked_div {a:?} {b:?}")
+        });
+        t.ck(a.checked_rem(b) == Some(er), || {
+            format!("checked_rem {a:?} {b:?}")
+        });
+        t.ck(a / b == eq && a % b == er, || {
+            format!("Div/Rem {a:?} {b:?}")
+        });
     };
     for (a, b) in pairs(3) {
         check(&mut t, a, b);
@@ -579,7 +644,9 @@ fn wide_math_diff_u256_shifts() {
         let er = u(&ra.shr(k.min(600)));
         t.ck(a.shl(k) == el, || format!("shl {a:?} << {k}"));
         t.ck(a.shr(k) == er, || format!("shr {a:?} >> {k}"));
-        t.ck((a << k) == el && (a >> k) == er, || format!("Shl/Shr ops {a:?} {k}"));
+        t.ck((a << k) == el && (a >> k) == er, || {
+            format!("Shl/Shr ops {a:?} {k}")
+        });
     };
     for a in edge_u256() {
         for k in 0..=260u32 {
@@ -604,25 +671,40 @@ fn wide_math_diff_u256_cmp_bits_conv() {
     for (a, b) in pairs(5) {
         let (ra, rb) = (bg(a), bg(b));
         t.ck(a.cmp(&b) == ra.cmp(&rb), || format!("cmp {a:?} {b:?}"));
-        t.ck(a.partial_cmp(&b) == Some(ra.cmp(&rb)), || format!("partial_cmp {a:?} {b:?}"));
+        t.ck(a.partial_cmp(&b) == Some(ra.cmp(&rb)), || {
+            format!("partial_cmp {a:?} {b:?}")
+        });
         t.ck((a == b) == (ra == rb), || format!("eq {a:?} {b:?}"));
-        t.ck((a < b) == (ra.cmp(&rb) == Ordering::Less), || format!("lt {a:?} {b:?}"));
+        t.ck((a < b) == (ra.cmp(&rb) == Ordering::Less), || {
+            format!("lt {a:?} {b:?}")
+        });
         let (mut and, mut or) = (Big::ZERO, Big::ZERO);
         for i in 0..L {
             and.0[i] = ra.0[i] & rb.0[i];
             or.0[i] = ra.0[i] | rb.0[i];
         }
-        t.ck(a.bitand(b) == u(&and) && (a & b) == u(&and), || format!("bitand {a:?} {b:?}"));
-        t.ck(a.bitor(b) == u(&or) && (a | b) == u(&or), || format!("bitor {a:?} {b:?}"));
-        t.ck(U256::new(a.lo(), a.hi()) == a, || format!("new/lo/hi {a:?}"));
+        t.ck(a.bitand(b) == u(&and) && (a & b) == u(&and), || {
+            format!("bitand {a:?} {b:?}")
+        });
+        t.ck(a.bitor(b) == u(&or) && (a | b) == u(&or), || {
+            format!("bitor {a:?} {b:?}")
+        });
+        t.ck(U256::new(a.lo(), a.hi()) == a, || {
+            format!("new/lo/hi {a:?}")
+        });
         t.ck(a.is_zero() == ra.is_zero(), || format!("is_zero {a:?}"));
-        t.ck(a.try_into_u128() == ra.to_u128(), || format!("try_into_u128 {a:?}"));
+        t.ck(a.try_into_u128() == ra.to_u128(), || {
+            format!("try_into_u128 {a:?}")
+        });
         t.ck(
-            U256::from_u128(a.lo()).try_into_u128() == Some(a.lo()) && U256::from_u128(a.lo()).hi() == 0,
+            U256::from_u128(a.lo()).try_into_u128() == Some(a.lo())
+                && U256::from_u128(a.lo()).hi() == 0,
             || format!("from_u128 {a:?}"),
         );
         let w = a.lo() as u64;
-        t.ck(U256::from_u64(w) == U256::from_u128(w as u128), || format!("from_u64 {w}"));
+        t.ck(U256::from_u64(w) == U256::from_u128(w as u128), || {
+            format!("from_u64 {w}")
+        });
         let mut aa = a;
         if let Some(s) = ra.add(&rb).to_u256() {
             aa += b;
@@ -634,7 +716,10 @@ fn wide_math_diff_u256_cmp_bits_conv() {
             t.ck(ss == u(&ra.sub(&rb)), || format!("SubAssign {a:?} {b:?}"));
         }
     }
-    t.ck(U256::ZERO.is_zero() && U256::ONE == U256::from_u64(1), || "consts".into());
+    t.ck(
+        U256::ZERO.is_zero() && U256::ONE == U256::from_u64(1),
+        || "consts".into(),
+    );
     t.ck(U256::MAX == u(&max256()), || "MAX".into());
     t.finish();
 }
@@ -677,7 +762,11 @@ fn triples(seed: u64) -> Vec<(U256, U256, U256)> {
         out.push((u(&Big::pow2(k)), u(&Big::pow2(256 - k)), U256::new(2, 0)));
     }
     out.push((U256::MAX, U256::MAX, U256::MAX));
-    out.push((U256::MAX, U256::MAX, U256::MAX.checked_sub(U256::ONE).unwrap()));
+    out.push((
+        U256::MAX,
+        U256::MAX,
+        U256::MAX.checked_sub(U256::ONE).unwrap(),
+    ));
     out
 }
 
@@ -686,41 +775,73 @@ fn wide_math_diff_mul_div_u256() {
     let mut t = Tally::new("mul_div_u256");
     for (a, b, d) in triples(6) {
         if d.is_zero() {
-            t.ck(panics(|| mul_div_floor_u256(a, b, d)), || "floor d=0 must panic".into());
-            t.ck(panics(|| mul_div_ceil_u256(a, b, d)), || "ceil d=0 must panic".into());
-            t.ck(checked_mul_div_ceil_u256(a, b, d).is_none(), || "checked ceil d=0".into());
+            t.ck(panics(|| mul_div_floor_u256(a, b, d)), || {
+                "floor d=0 must panic".into()
+            });
+            t.ck(panics(|| mul_div_ceil_u256(a, b, d)), || {
+                "ceil d=0 must panic".into()
+            });
+            t.ck(checked_mul_div_ceil_u256(a, b, d).is_none(), || {
+                "checked ceil d=0".into()
+            });
             continue;
         }
         let p = bg(a).mul(&bg(b));
         let (q, r) = p.divrem(&bg(d));
         let qf = q.to_u256();
-        let qc = if r.is_zero() { Some(q) } else { Some(q.add(&Big::from_u128(1))) }
-            .and_then(|x| x.to_u256());
+        let qc = if r.is_zero() {
+            Some(q)
+        } else {
+            Some(q.add(&Big::from_u128(1)))
+        }
+        .and_then(|x| x.to_u256());
         match qf {
             Some(qf) => {
-                t.ck(mul_div_floor_u256(a, b, d) == qf, || format!("floor {a:?} {b:?} {d:?}"));
-                t.ck(mul_div_floor_u256_with_rem(a, b, d) == (qf, u(&r)), || format!("floor_with_rem {a:?} {b:?} {d:?}"));
+                t.ck(mul_div_floor_u256(a, b, d) == qf, || {
+                    format!("floor {a:?} {b:?} {d:?}")
+                });
+                t.ck(mul_div_floor_u256_with_rem(a, b, d) == (qf, u(&r)), || {
+                    format!("floor_with_rem {a:?} {b:?} {d:?}")
+                });
             }
             None => {
-                t.ck(panics(|| mul_div_floor_u256(a, b, d)), || format!("floor overflow must panic {a:?} {b:?} {d:?}"));
-                t.ck(panics(|| mul_div_floor_u256_with_rem(a, b, d)), || format!("floor_with_rem overflow must panic {a:?} {b:?} {d:?}"));
+                t.ck(panics(|| mul_div_floor_u256(a, b, d)), || {
+                    format!("floor overflow must panic {a:?} {b:?} {d:?}")
+                });
+                t.ck(panics(|| mul_div_floor_u256_with_rem(a, b, d)), || {
+                    format!("floor_with_rem overflow must panic {a:?} {b:?} {d:?}")
+                });
             }
         }
         match qc {
-            Some(qc) => t.ck(mul_div_ceil_u256(a, b, d) == qc, || format!("ceil {a:?} {b:?} {d:?}")),
-            None => t.ck(panics(|| mul_div_ceil_u256(a, b, d)), || format!("ceil overflow must panic {a:?} {b:?} {d:?}")),
+            Some(qc) => t.ck(mul_div_ceil_u256(a, b, d) == qc, || {
+                format!("ceil {a:?} {b:?} {d:?}")
+            }),
+            None => t.ck(panics(|| mul_div_ceil_u256(a, b, d)), || {
+                format!("ceil overflow must panic {a:?} {b:?} {d:?}")
+            }),
         }
-        t.ck(checked_mul_div_ceil_u256(a, b, d) == qc, || format!("checked_ceil {a:?} {b:?} {d:?}"));
+        t.ck(checked_mul_div_ceil_u256(a, b, d) == qc, || {
+            format!("checked_ceil {a:?} {b:?} {d:?}")
+        });
     }
     // ceil_div_positive_checked: pairs
     for (n, d) in pairs(7) {
         if d.is_zero() {
-            t.ck(panics(|| ceil_div_positive_checked(n, d)), || "ceil_div d=0".into());
+            t.ck(panics(|| ceil_div_positive_checked(n, d)), || {
+                "ceil_div d=0".into()
+            });
             continue;
         }
         let (q, r) = bg(n).divrem(&bg(d));
-        let e = if r.is_zero() { q } else { q.add(&Big::from_u128(1)) };
-        t.ck(ceil_div_positive_checked(n, d) == u(&e), || format!("ceil_div_positive_checked {n:?} {d:?}"));
+        let e = if r.is_zero() {
+            q
+        } else {
+            q.add(&Big::from_u128(1))
+        };
+        t.ck(ceil_div_positive_checked(n, d) == u(&e), || {
+            format!("ceil_div_positive_checked {n:?} {d:?}")
+        });
     }
     t.finish();
 }
@@ -731,7 +852,19 @@ fn wide_math_diff_mul_div_u128() {
     let mut r = Rng(8);
     let mut cases: Vec<(u128, u128, u128)> = vec![];
     let e: Vec<u128> = {
-        let mut v = vec![0u128, 1, 2, 3, u128::MAX, u128::MAX - 1, u64::MAX as u128, 1u128 << 64, (1u128 << 64) + 1, 1u128 << 127, (1u128 << 127) - 1];
+        let mut v = vec![
+            0u128,
+            1,
+            2,
+            3,
+            u128::MAX,
+            u128::MAX - 1,
+            u64::MAX as u128,
+            1u128 << 64,
+            (1u128 << 64) + 1,
+            1u128 << 127,
+            (1u128 << 127) - 1,
+        ];
         for k in [1u32, 31, 32, 63, 64, 65, 126] {
             v.push(1u128 << k);
             v.push((1u128 << k) - 1);
@@ -755,34 +888,62 @@ fn wide_math_diff_mul_div_u128() {
     for (a, b, d) in cases {
         let p = Big::from_u128(a).mul(&Big::from_u128(b));
         if d == 0 {
-            t.ck(panics(|| mul_div_floor_u128(a, b, d)), || "native floor d=0".into());
-            t.ck(panics(|| mul_div_ceil_u128(a, b, d)), || "native ceil d=0".into());
-            t.ck(panics(|| wide_mul_div_floor_u128(a, b, d)), || "wide floor d=0".into());
-            t.ck(panics(|| wide_mul_div_ceil_u128_or_over_i128max(a, b, d)), || "ceil_or_over d=0".into());
+            t.ck(panics(|| mul_div_floor_u128(a, b, d)), || {
+                "native floor d=0".into()
+            });
+            t.ck(panics(|| mul_div_ceil_u128(a, b, d)), || {
+                "native ceil d=0".into()
+            });
+            t.ck(panics(|| wide_mul_div_floor_u128(a, b, d)), || {
+                "wide floor d=0".into()
+            });
+            t.ck(
+                panics(|| wide_mul_div_ceil_u128_or_over_i128max(a, b, d)),
+                || "ceil_or_over d=0".into(),
+            );
             continue;
         }
         let (q, rem) = p.divrem(&Big::from_u128(d));
-        let qc = if rem.is_zero() { q } else { q.add(&Big::from_u128(1)) };
+        let qc = if rem.is_zero() {
+            q
+        } else {
+            q.add(&Big::from_u128(1))
+        };
         // native: only when the product fits u128
         match p.to_u128() {
             Some(_) => {
-                t.ck(mul_div_floor_u128(a, b, d) == q.to_u128().unwrap(), || format!("native floor {a} {b} {d}"));
-                t.ck(mul_div_ceil_u128(a, b, d) == qc.to_u128().unwrap(), || format!("native ceil {a} {b} {d}"));
+                t.ck(mul_div_floor_u128(a, b, d) == q.to_u128().unwrap(), || {
+                    format!("native floor {a} {b} {d}")
+                });
+                t.ck(mul_div_ceil_u128(a, b, d) == qc.to_u128().unwrap(), || {
+                    format!("native ceil {a} {b} {d}")
+                });
             }
             None => {
-                t.ck(panics(|| mul_div_floor_u128(a, b, d)), || format!("native floor overflow {a} {b} {d}"));
-                t.ck(panics(|| mul_div_ceil_u128(a, b, d)), || format!("native ceil overflow {a} {b} {d}"));
+                t.ck(panics(|| mul_div_floor_u128(a, b, d)), || {
+                    format!("native floor overflow {a} {b} {d}")
+                });
+                t.ck(panics(|| mul_div_ceil_u128(a, b, d)), || {
+                    format!("native ceil overflow {a} {b} {d}")
+                });
             }
         }
         match q.to_u128() {
-            Some(v) => t.ck(wide_mul_div_floor_u128(a, b, d) == v, || format!("wide floor {a} {b} {d}")),
-            None => t.ck(panics(|| wide_mul_div_floor_u128(a, b, d)), || format!("wide floor overflow {a} {b} {d}")),
+            Some(v) => t.ck(wide_mul_div_floor_u128(a, b, d) == v, || {
+                format!("wide floor {a} {b} {d}")
+            }),
+            None => t.ck(panics(|| wide_mul_div_floor_u128(a, b, d)), || {
+                format!("wide floor overflow {a} {b} {d}")
+            }),
         }
         let exp = match qc.to_u128() {
             Some(v) if v <= i128max => Ok(v),
             _ => Err(OverI128Magnitude),
         };
-        t.ck(wide_mul_div_ceil_u128_or_over_i128max(a, b, d) == exp, || format!("ceil_or_over {a} {b} {d}"));
+        t.ck(
+            wide_mul_div_ceil_u128_or_over_i128max(a, b, d) == exp,
+            || format!("ceil_or_over {a} {b} {d}"),
+        );
     }
     t.finish();
 }
@@ -792,7 +953,15 @@ fn wide_math_diff_saturating_and_fee_debt() {
     let mut t = Tally::new("saturating_fee_debt");
     let mut r = Rng(9);
     let mut ins: Vec<(u128, u64)> = vec![];
-    for &a in &[0u128, 1, u128::MAX, u128::MAX - 1, (1u128 << 64) - 1, 1 << 64, 1 << 127] {
+    for &a in &[
+        0u128,
+        1,
+        u128::MAX,
+        u128::MAX - 1,
+        (1u128 << 64) - 1,
+        1 << 64,
+        1 << 127,
+    ] {
         for &b in &[0u64, 1, 2, u64::MAX, u64::MAX - 1, 1 << 63] {
             ins.push((a, b));
         }
@@ -802,19 +971,39 @@ fn wide_math_diff_saturating_and_fee_debt() {
     }
     for (a, b) in ins {
         let p = Big::from_u128(a).mul(&Big::from_u128(b as u128));
-        t.ck(saturating_mul_u128_u64(a, b) == p.to_u128().unwrap_or(u128::MAX), || format!("sat_mul_u128_u64 {a} {b}"));
+        t.ck(
+            saturating_mul_u128_u64(a, b) == p.to_u128().unwrap_or(u128::MAX),
+            || format!("sat_mul_u128_u64 {a} {b}"),
+        );
     }
     for (a, _) in pairs(10).into_iter().take(5000) {
         let b = a.lo() as u64;
         let p = bg(a).mul(&Big::from_u128(b as u128));
-        t.ck(saturating_mul_u256_u64(a, b) == p.to_u256().unwrap_or(U256::MAX), || format!("sat_mul_u256_u64 {a:?} {b}"));
+        t.ck(
+            saturating_mul_u256_u64(a, b) == p.to_u256().unwrap_or(U256::MAX),
+            || format!("sat_mul_u256_u64 {a:?} {b}"),
+        );
     }
-    let mut vals: Vec<i128> = vec![i128::MIN, i128::MIN + 1, -2, -1, 0, 1, 2, i128::MAX, i128::MAX - 1];
+    let mut vals: Vec<i128> = vec![
+        i128::MIN,
+        i128::MIN + 1,
+        -2,
+        -1,
+        0,
+        1,
+        2,
+        i128::MAX,
+        i128::MAX - 1,
+    ];
     for _ in 0..N_RANDOM {
         vals.push(r.i128());
     }
     for v in vals {
-        let exp = if v < 0 { Sg::from_i128(v).m.to_u128().unwrap() } else { 0 };
+        let exp = if v < 0 {
+            Sg::from_i128(v).m.to_u128().unwrap()
+        } else {
+            0
+        };
         t.ck(fee_debt_u128_checked(v) == exp, || format!("fee_debt {v}"));
     }
     t.finish();
@@ -842,27 +1031,50 @@ fn sg_pairs(seed: u64) -> Vec<(Sg, Sg)> {
 fn wide_math_diff_i256_basic() {
     let mut t = Tally::new("i256_basic");
     let mut r = Rng(11);
-    for s in edge_sg256().into_iter().chain((0..N_RANDOM).map(|_| r.sg256())) {
+    for s in edge_sg256()
+        .into_iter()
+        .chain((0..N_RANDOM).map(|_| r.sg256()))
+    {
         let x = s.to_i256().unwrap();
         t.ck(x.is_zero() == s.m.is_zero(), || format!("is_zero {s:?}"));
         t.ck(x.is_negative() == s.neg, || format!("is_negative {s:?}"));
-        t.ck(x.is_positive() == (!s.neg && !s.m.is_zero()), || format!("is_positive {s:?}"));
-        let sig = if s.m.is_zero() { 0 } else if s.neg { -1 } else { 1 };
+        t.ck(x.is_positive() == (!s.neg && !s.m.is_zero()), || {
+            format!("is_positive {s:?}")
+        });
+        let sig = if s.m.is_zero() {
+            0
+        } else if s.neg {
+            -1
+        } else {
+            1
+        };
         t.ck(x.signum() == sig, || format!("signum {s:?}"));
-        t.ck(x.try_into_i128() == s.to_i128(), || format!("try_into_i128 {s:?}"));
+        t.ck(x.try_into_i128() == s.to_i128(), || {
+            format!("try_into_i128 {s:?}")
+        });
         let is_min = s.neg && s.m == Big::pow2(255);
         if is_min {
-            t.ck(panics(|| x.abs_u256()), || "abs_u256(MIN) must panic".into());
+            t.ck(panics(|| x.abs_u256()), || {
+                "abs_u256(MIN) must panic".into()
+            });
             t.ck(x.checked_neg().is_none(), || "checked_neg(MIN)".into());
             t.ck(panics(|| -x), || "Neg(MIN) must panic".into());
         } else {
             t.ck(x.abs_u256() == u(&s.m), || format!("abs_u256 {s:?}"));
-            t.ck(x.checked_neg() == s.negate().to_i256(), || format!("checked_neg {s:?}"));
+            t.ck(x.checked_neg() == s.negate().to_i256(), || {
+                format!("checked_neg {s:?}")
+            });
             t.ck(-x == s.negate().to_i256().unwrap(), || format!("Neg {s:?}"));
         }
         // from_raw_u256 / from_u256_or_overflow on the raw magnitude bits
-        let raw = if s.neg { two256().sub(&s.m).mask256() } else { s.m };
-        t.ck(I256::from_raw_u256(u(&raw)) == x, || format!("from_raw_u256 {s:?}"));
+        let raw = if s.neg {
+            two256().sub(&s.m).mask256()
+        } else {
+            s.m
+        };
+        t.ck(I256::from_raw_u256(u(&raw)) == x, || {
+            format!("from_raw_u256 {s:?}")
+        });
         let ov = I256::from_u256_or_overflow(u(&s.m));
         let want = Sg::new(false, s.m).to_i256();
         t.ck(ov == want, || format!("from_u256_or_overflow {s:?}"));
@@ -871,16 +1083,43 @@ fn wide_math_diff_i256_basic() {
         .into_iter()
         .chain((0..N_RANDOM).map(|_| r.i128()))
     {
-        t.ck(I256::from_i128(v) == Sg::from_i128(v).to_i256().unwrap(), || format!("from_i128 {v}"));
-        t.ck(I256::from_i128(v).try_into_i128() == Some(v), || format!("i128 roundtrip {v}"));
+        t.ck(
+            I256::from_i128(v) == Sg::from_i128(v).to_i256().unwrap(),
+            || format!("from_i128 {v}"),
+        );
+        t.ck(I256::from_i128(v).try_into_i128() == Some(v), || {
+            format!("i128 roundtrip {v}")
+        });
     }
     for v in [0u128, 1, u128::MAX, u128::MAX - 1, 1 << 127, (1 << 127) - 1] {
-        t.ck(I256::from_u128(v) == Sg::new(false, Big::from_u128(v)).to_i256().unwrap(), || format!("from_u128 {v}"));
-        t.ck(I256::from_u128(v).try_into_i128() == if v <= i128::MAX as u128 { Some(v as i128) } else { None }, || format!("from_u128 try {v}"));
+        t.ck(
+            I256::from_u128(v) == Sg::new(false, Big::from_u128(v)).to_i256().unwrap(),
+            || format!("from_u128 {v}"),
+        );
+        t.ck(
+            I256::from_u128(v).try_into_i128()
+                == if v <= i128::MAX as u128 {
+                    Some(v as i128)
+                } else {
+                    None
+                },
+            || format!("from_u128 try {v}"),
+        );
     }
-    t.ck(I256::ZERO.is_zero() && I256::ONE == I256::from_i128(1) && I256::MINUS_ONE == I256::from_i128(-1), || "consts".into());
-    t.ck(Some(I256::MAX) == Sg::new(false, Big::pow2(255).sub(&Big::from_u128(1))).to_i256(), || "MAX".into());
-    t.ck(Some(I256::MIN) == Sg::new(true, Big::pow2(255)).to_i256(), || "MIN".into());
+    t.ck(
+        I256::ZERO.is_zero()
+            && I256::ONE == I256::from_i128(1)
+            && I256::MINUS_ONE == I256::from_i128(-1),
+        || "consts".into(),
+    );
+    t.ck(
+        Some(I256::MAX) == Sg::new(false, Big::pow2(255).sub(&Big::from_u128(1))).to_i256(),
+        || "MAX".into(),
+    );
+    t.ck(
+        Some(I256::MIN) == Sg::new(true, Big::pow2(255)).to_i256(),
+        || "MIN".into(),
+    );
     t.finish();
 }
 
@@ -890,13 +1129,22 @@ fn wide_math_diff_i256_arith() {
     for (a, b) in sg_pairs(12) {
         let (x, y) = (a.to_i256().unwrap(), b.to_i256().unwrap());
         t.ck(x.cmp(&y) == a.cmp(&b), || format!("cmp {a:?} {b:?}"));
-        t.ck(x.partial_cmp(&y) == Some(a.cmp(&b)) && (x == y) == (a == b), || format!("partial_cmp/eq {a:?} {b:?}"));
+        t.ck(
+            x.partial_cmp(&y) == Some(a.cmp(&b)) && (x == y) == (a == b),
+            || format!("partial_cmp/eq {a:?} {b:?}"),
+        );
         let sum = a.add(&b);
-        t.ck(x.checked_add(y) == sum.to_i256(), || format!("checked_add {a:?} {b:?}"));
+        t.ck(x.checked_add(y) == sum.to_i256(), || {
+            format!("checked_add {a:?} {b:?}")
+        });
         let diff = a.sub(&b);
-        t.ck(x.checked_sub(y) == diff.to_i256(), || format!("checked_sub {a:?} {b:?}"));
+        t.ck(x.checked_sub(y) == diff.to_i256(), || {
+            format!("checked_sub {a:?} {b:?}")
+        });
         let prod = a.mul(&b);
-        t.ck(x.checked_mul_i256(y) == prod.to_i256(), || format!("checked_mul_i256 {a:?} {b:?}"));
+        t.ck(x.checked_mul_i256(y) == prod.to_i256(), || {
+            format!("checked_mul_i256 {a:?} {b:?}")
+        });
         let sat = match sum.to_i256() {
             Some(v) => v,
             None => {
@@ -907,16 +1155,22 @@ fn wide_math_diff_i256_arith() {
                 }
             }
         };
-        t.ck(x.saturating_add(y) == sat, || format!("saturating_add {a:?} {b:?}"));
+        t.ck(x.saturating_add(y) == sat, || {
+            format!("saturating_add {a:?} {b:?}")
+        });
         if let Some(v) = sum.to_i256() {
             t.ck(x + y == v, || format!("Add {a:?} {b:?}"));
         } else {
-            t.ck(panics(|| x + y), || format!("Add overflow must panic {a:?} {b:?}"));
+            t.ck(panics(|| x + y), || {
+                format!("Add overflow must panic {a:?} {b:?}")
+            });
         }
         if let Some(v) = diff.to_i256() {
             t.ck(x - y == v, || format!("Sub {a:?} {b:?}"));
         } else {
-            t.ck(panics(|| x - y), || format!("Sub overflow must panic {a:?} {b:?}"));
+            t.ck(panics(|| x - y), || {
+                format!("Sub overflow must panic {a:?} {b:?}")
+            });
         }
     }
     t.finish();
@@ -931,7 +1185,10 @@ fn wide_math_diff_floor_div_signed() {
     let min = Sg::new(true, Big::pow2(255));
     let run = |t: &mut Tally, n: Sg, d: U256| {
         if d.is_zero() {
-            t.ck(panics(|| floor_div_signed_conservative(n.to_i256().unwrap(), d)), || "d=0 must panic".into());
+            t.ck(
+                panics(|| floor_div_signed_conservative(n.to_i256().unwrap(), d)),
+                || "d=0 must panic".into(),
+            );
             return;
         }
         let (q, _) = n.floor_divrem(&bg(d));
@@ -959,7 +1216,11 @@ fn wide_math_diff_floor_div_signed() {
     for _ in 0..N_RANDOM {
         let d = r.nonzero_u256();
         let q = r.u256();
-        let rem = if r.below(2) == 0 { Big::ZERO } else { bg(d).sub(&Big::from_u128(1)) };
+        let rem = if r.below(2) == 0 {
+            Big::ZERO
+        } else {
+            bg(d).sub(&Big::from_u128(1))
+        };
         let m = bg(q).mul(&bg(d)).add(&rem);
         let s = Sg::new(r.below(2) == 0, m);
         if s.fits_i256() {
@@ -967,12 +1228,31 @@ fn wide_math_diff_floor_div_signed() {
         }
     }
     // i128 native version
-    let mut vals: Vec<i128> = vec![i128::MIN, i128::MIN + 1, -2, -1, 0, 1, 2, i128::MAX - 1, i128::MAX];
+    let mut vals: Vec<i128> = vec![
+        i128::MIN,
+        i128::MIN + 1,
+        -2,
+        -1,
+        0,
+        1,
+        2,
+        i128::MAX - 1,
+        i128::MAX,
+    ];
     for _ in 0..N_RANDOM {
         vals.push(r.i128());
     }
     for n in vals {
-        let mut ds: Vec<u128> = vec![1, 2, 3, u128::MAX, u128::MAX - 1, 1 << 127, (1 << 127) - 1, 1 << 64];
+        let mut ds: Vec<u128> = vec![
+            1,
+            2,
+            3,
+            u128::MAX,
+            u128::MAX - 1,
+            1 << 127,
+            (1 << 127) - 1,
+            1 << 64,
+        ];
         for _ in 0..4 {
             ds.push(r.u128_shaped().max(1));
         }
@@ -982,13 +1262,20 @@ fn wide_math_diff_floor_div_signed() {
                 continue; // known gap, see ignored test
             }
             if q.fits_i128_mag() {
-                t.ck(floor_div_signed_conservative_i128(n, d) == q.to_i128().unwrap(), || format!("floor_div_i128 {n} / {d}"));
+                t.ck(
+                    floor_div_signed_conservative_i128(n, d) == q.to_i128().unwrap(),
+                    || format!("floor_div_i128 {n} / {d}"),
+                );
             } else {
-                t.ck(panics(|| floor_div_signed_conservative_i128(n, d)), || format!("floor_div_i128 out of range {n} / {d}"));
+                t.ck(panics(|| floor_div_signed_conservative_i128(n, d)), || {
+                    format!("floor_div_i128 out of range {n} / {d}")
+                });
             }
         }
     }
-    t.ck(panics(|| floor_div_signed_conservative_i128(5, 0)), || "i128 d=0".into());
+    t.ck(panics(|| floor_div_signed_conservative_i128(5, 0)), || {
+        "i128 d=0".into()
+    });
     t.finish();
 }
 
@@ -999,12 +1286,16 @@ fn wide_math_diff_wide_signed_mul_div_floor() {
     let run = |t: &mut Tally, basis: U256, k: Sg, d: U256| {
         let ki = k.to_i256().unwrap();
         if d.is_zero() {
-            t.ck(panics(|| wide_signed_mul_div_floor(basis, ki, d)), || "d=0 must panic".into());
+            t.ck(panics(|| wide_signed_mul_div_floor(basis, ki, d)), || {
+                "d=0 must panic".into()
+            });
             return;
         }
         if k == min {
             if !basis.is_zero() {
-                t.ck(panics(|| wide_signed_mul_div_floor(basis, ki, d)), || "k=MIN must panic".into());
+                t.ck(panics(|| wide_signed_mul_div_floor(basis, ki, d)), || {
+                    "k=MIN must panic".into()
+                });
             }
             return;
         }
@@ -1060,15 +1351,43 @@ fn wide_math_diff_k_pair_with_carry() {
             let want = (q.to_i128().unwrap(), rem.to_u128().unwrap());
             t.ck(got.as_ref().ok() == Some(&want), || format!("carry form basis={basis} k0={k0} k1={k1} den={den} carry={carry}: want {want:?}, got {got:?}"));
             if carry == 0 {
-                let g0 = catch_unwind(AssertUnwindSafe(|| wide_signed_mul_div_floor_from_k_pair(basis, k0, k1, den)));
-                t.ck(g0.ok() == Some(want.0), || format!("k_pair basis={basis} k0={k0} k1={k1} den={den}"));
+                let g0 = catch_unwind(AssertUnwindSafe(|| {
+                    wide_signed_mul_div_floor_from_k_pair(basis, k0, k1, den)
+                }));
+                t.ck(g0.ok() == Some(want.0), || {
+                    format!("k_pair basis={basis} k0={k0} k1={k1} den={den}")
+                });
             }
         } else {
             t.ck(got.is_err(), || format!("carry form out of range must panic basis={basis} k0={k0} k1={k1} den={den} carry={carry}"));
         }
     };
-    let e128: Vec<u128> = vec![0, 1, 2, 3, u128::MAX, u128::MAX - 1, 1 << 127, (1 << 127) - 1, 1 << 64, (1 << 64) - 1, (1 << 64) + 1];
-    let ei: Vec<i128> = vec![i128::MIN, i128::MIN + 1, -(1 << 64), -2, -1, 0, 1, 2, 1 << 64, i128::MAX - 1, i128::MAX];
+    let e128: Vec<u128> = vec![
+        0,
+        1,
+        2,
+        3,
+        u128::MAX,
+        u128::MAX - 1,
+        1 << 127,
+        (1 << 127) - 1,
+        1 << 64,
+        (1 << 64) - 1,
+        (1 << 64) + 1,
+    ];
+    let ei: Vec<i128> = vec![
+        i128::MIN,
+        i128::MIN + 1,
+        -(1 << 64),
+        -2,
+        -1,
+        0,
+        1,
+        2,
+        1 << 64,
+        i128::MAX - 1,
+        i128::MAX,
+    ];
     for &basis in &e128 {
         for &k0 in &ei {
             for &k1 in &ei {
@@ -1095,8 +1414,14 @@ fn wide_math_diff_k_pair_with_carry() {
         run(&mut t, basis, k0, k1, den, carry);
     }
     // contract panics
-    t.ck(panics(|| wide_signed_mul_div_floor_with_carry_from_k_pair(1, 0, 1, 0, 0)), || "den=0".into());
-    t.ck(panics(|| wide_signed_mul_div_floor_with_carry_from_k_pair(1, 0, 1, 5, 5)), || "carry>=den".into());
+    t.ck(
+        panics(|| wide_signed_mul_div_floor_with_carry_from_k_pair(1, 0, 1, 0, 0)),
+        || "den=0".into(),
+    );
+    t.ck(
+        panics(|| wide_signed_mul_div_floor_with_carry_from_k_pair(1, 0, 1, 5, 5)),
+        || "carry>=den".into(),
+    );
     t.finish();
 }
 
@@ -1121,7 +1446,11 @@ fn wide_math_known_floor_div_signed_min_by_one() {
 #[ignore = "known gap: floor_div_signed_conservative_i128(i128::MIN, 1) panics though the exact result fits"]
 fn wide_math_known_floor_div_signed_i128_min_by_one() {
     let got = catch_unwind(|| floor_div_signed_conservative_i128(i128::MIN, 1));
-    assert_eq!(got.ok(), Some(i128::MIN), "expected i128::MIN / 1 == i128::MIN");
+    assert_eq!(
+        got.ok(),
+        Some(i128::MIN),
+        "expected i128::MIN / 1 == i128::MIN"
+    );
 }
 
 /// Negative result of exactly -2^255 is representable but wide_signed_mul_div_floor panics.
@@ -1145,7 +1474,10 @@ fn wide_math_known_wide_signed_mul_div_floor_positive_wrap() {
     // correct behaviour: panic (or error); a returned value is wrong
     match got {
         Err(_) => {}
-        Ok(v) => panic!("returned {v:?} (is_negative={}) for +2^255, which does not fit I256", v.is_negative()),
+        Ok(v) => panic!(
+            "returned {v:?} (is_negative={}) for +2^255, which does not fit I256",
+            v.is_negative()
+        ),
     }
 }
 
@@ -1158,6 +1490,9 @@ fn wide_math_known_wide_signed_mul_div_floor_negative_wrap() {
     let got = catch_unwind(|| wide_signed_mul_div_floor(basis, I256::MINUS_ONE, U256::ONE));
     match got {
         Err(_) => {}
-        Ok(v) => panic!("returned {v:?} (is_negative={}) for -(2^255+5), which does not fit I256", v.is_negative()),
+        Ok(v) => panic!(
+            "returned {v:?} (is_negative={}) for -(2^255+5), which does not fit I256",
+            v.is_negative()
+        ),
     }
 }

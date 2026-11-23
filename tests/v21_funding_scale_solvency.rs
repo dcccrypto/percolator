@@ -159,7 +159,9 @@ impl World {
         let slot = self.slot + 1;
         let (h, mk) = (self.header, self.markets.clone());
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-        if m.accrue_asset_to_not_atomic(0, slot, new, rate, true).is_err() {
+        if m.accrue_asset_to_not_atomic(0, slot, new, rate, true)
+            .is_err()
+        {
             self.header = h;
             self.markets = mk;
             return false;
@@ -228,7 +230,10 @@ impl World {
         }
         let vault = self.header.vault.get();
         let senior = self.header.c_tot.get() + self.header.insurance.get();
-        assert!(vault >= senior, "P4: vault {vault} < c_tot + insurance {senior}");
+        assert!(
+            vault >= senior,
+            "P4: vault {vault} < c_tot + insurance {senior}"
+        );
     }
 
     /// Crank every account at the current slot until nothing makes progress.
@@ -282,7 +287,10 @@ fn floor_div(n: i128, d: i128) -> i128 {
 }
 
 /// Exact K/F loss a stale leg would recognize at settlement (the engine's floor formula).
-fn stale_leg_loss(asset: &percolator::AssetStateV16, a: &PortfolioAccountV16Account) -> Option<(SideV16, u128)> {
+fn stale_leg_loss(
+    asset: &percolator::AssetStateV16,
+    a: &PortfolioAccountV16Account,
+) -> Option<(SideV16, u128)> {
     let bitmap = a.active_bitmap[0].get();
     if bitmap & 1 == 0 {
         return None;
@@ -307,19 +315,32 @@ fn stale_leg_loss(asset: &percolator::AssetStateV16, a: &PortfolioAccountV16Acco
 fn bound(w: &World, side: SideV16) -> u128 {
     let asset = w.asset();
     let (stale, d) = match side {
-        SideV16::Long => (asset.stale_account_count_long, w.markets[0].engine.kf_drift_long.to_runtime()),
-        SideV16::Short => (asset.stale_account_count_short, w.markets[0].engine.kf_drift_short.to_runtime()),
+        SideV16::Long => (
+            asset.stale_account_count_long,
+            w.markets[0].engine.kf_drift_long.to_runtime(),
+        ),
+        SideV16::Short => (
+            asset.stale_account_count_short,
+            w.markets[0].engine.kf_drift_short.to_runtime(),
+        ),
     };
     if stale == 0 {
         return 0;
     }
     let den = SOCIAL_WEIGHT_SCALE * POS_SCALE;
     // weights <= 1e21; drift here stays far below 1e17, so u128 products are exact.
-    let g = d.stale_weight.checked_mul(d.drift_gen).expect("test worlds stay in u128").div_ceil(den);
+    let g = d
+        .stale_weight
+        .checked_mul(d.drift_gen)
+        .expect("test worlds stay in u128")
+        .div_ceil(den);
     let p = if d.laggard_count == 0 {
         0
     } else {
-        d.laggard_weight.checked_mul(d.drift_prior).expect("test worlds stay in u128").div_ceil(den)
+        d.laggard_weight
+            .checked_mul(d.drift_prior)
+            .expect("test worlds stay in u128")
+            .div_ceil(den)
     };
     g + p + 2 * u128::from(stale)
 }
@@ -369,7 +390,12 @@ fn check_admission(w: &World, entrant: &PortfolioAccountV16Account, stats: &mut 
     let asset = w.asset();
     // P1: soundness of the bound, per side, against the exact settlement of every stale leg.
     let mut real = [0u128; 2];
-    for a in w.traders.iter().chain(core::iter::once(&w.maker)).chain(core::iter::once(entrant)) {
+    for a in w
+        .traders
+        .iter()
+        .chain(core::iter::once(&w.maker))
+        .chain(core::iter::once(entrant))
+    {
         if let Some((side, loss)) = stale_leg_loss(&asset, a) {
             real[(side == SideV16::Short) as usize] += loss;
         }
@@ -392,10 +418,15 @@ fn check_admission(w: &World, entrant: &PortfolioAccountV16Account, stats: &mut 
             m.domain_insurance_withdraw_capacity(if side == SideV16::Long { 1 } else { 0 })
                 .unwrap()
                 .saturating_add(b)
-                >= domain_available(w, if side == SideV16::Long { 1 } else { 0 }).min(w.header.vault.get()),
+                >= domain_available(w, if side == SideV16::Long { 1 } else { 0 })
+                    .min(w.header.vault.get()),
             true
         );
-        assert!(real[i] <= b, "P1: side {side:?} real hidden loss {} > bound {b}", real[i]);
+        assert!(
+            real[i] <= b,
+            "P1: side {side:?} real hidden loss {} > bound {b}",
+            real[i]
+        );
         // P2: the absorbing domain covers it.
         let absorbing = if side == SideV16::Long { 1 } else { 0 };
         assert!(
@@ -419,7 +450,11 @@ fn check_admission(w: &World, entrant: &PortfolioAccountV16Account, stats: &mut 
         (b_long, b_short),
         "P3: a pre-admission deficit reached B-socialization"
     );
-    assert_eq!(equity(&e2[0]), before, "P3: entrant charged for pre-entry loss");
+    assert_eq!(
+        equity(&e2[0]),
+        before,
+        "P3: entrant charged for pre-entry loss"
+    );
     w2.validate(&mut e2);
     stats.p3_checked += 1;
 
@@ -441,12 +476,7 @@ fn check_admission(w: &World, entrant: &PortfolioAccountV16Account, stats: &mut 
     }
 }
 
-fn run(
-    traders: Vec<(u128, bool, u128)>,
-    ins: (u128, u128),
-    ops: Vec<Op>,
-    stats: &mut Stats,
-) {
+fn run(traders: Vec<(u128, bool, u128)>, ins: (u128, u128), ops: Vec<Op>, stats: &mut Stats) {
     let mut w = World::new(&traders, ins.0, ins.1);
     let mut entrants: Vec<PortfolioAccountV16Account> = Vec::new();
     let mut seed = 10_000u32;
@@ -507,7 +537,10 @@ fn run(
                 let n = entrants.len();
                 let mut e = entrants[i % n];
                 let mut maker = w.maker;
-                let long = e.legs[0].try_to_runtime().map(|l| l.side == SideV16::Long).unwrap_or(true);
+                let long = e.legs[0]
+                    .try_to_runtime()
+                    .map(|l| l.side == SideV16::Long)
+                    .unwrap_or(true);
                 w.deposit(&mut e, (units * u128::from(w.price())) / 8 + 1);
                 let ok = if long {
                     w.trade(&mut e, &mut maker, units * POS_SCALE)
@@ -536,9 +569,8 @@ fn run(
 fn trader() -> impl Strategy<Value = (u128, bool, u128)> {
     // capital between ~10% and ~40% of notional at PRICE: thin accounts go bankrupt on a
     // few capped adverse slots, fat ones never do.
-    (1u128..=3, any::<bool>(), 105u128..=400).prop_map(|(units, long, pct10)| {
-        (units * u128::from(PRICE) * pct10 / 1_000, long, units)
-    })
+    (1u128..=3, any::<bool>(), 105u128..=400)
+        .prop_map(|(units, long, pct10)| (units * u128::from(PRICE) * pct10 / 1_000, long, units))
 }
 
 proptest! {
@@ -560,15 +592,25 @@ proptest! {
 #[test]
 fn v21_relaxed_admission_sweep_is_not_vacuous() {
     use proptest::strategy::ValueTree;
-    use proptest::test_runner::{Config, TestRng, RngAlgorithm, TestRunner};
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
     let mut runner = TestRunner::new_with_rng(
         Config::default(),
         TestRng::from_seed(RngAlgorithm::ChaCha, &[7u8; 32]),
     );
     let strat = (
         prop::collection::vec(trader(), 4..24),
-        prop_oneof![Just(0u128), 1u128..2_000, 2_000u128..2_000_000, 2_000_000u128..60_000_000],
-        prop_oneof![Just(0u128), 1u128..2_000, 2_000u128..2_000_000, 2_000_000u128..60_000_000],
+        prop_oneof![
+            Just(0u128),
+            1u128..2_000,
+            2_000u128..2_000_000,
+            2_000_000u128..60_000_000
+        ],
+        prop_oneof![
+            Just(0u128),
+            1u128..2_000,
+            2_000u128..2_000_000,
+            2_000_000u128..60_000_000
+        ],
         prop::collection::vec(op(), 4..40),
     );
     let mut stats = Stats::default();
@@ -577,13 +619,25 @@ fn v21_relaxed_admission_sweep_is_not_vacuous() {
         run(t, (il, is), ops, &mut stats);
     }
     eprintln!("v21 sweep: {stats:?}");
-    assert!(stats.relaxed_admissions > 50, "relaxed path barely exercised: {stats:?}");
-    assert!(stats.p3_checked > 20, "P3 cascade barely exercised: {stats:?}");
+    assert!(
+        stats.relaxed_admissions > 50,
+        "relaxed path barely exercised: {stats:?}"
+    );
+    assert!(
+        stats.p3_checked > 20,
+        "P3 cascade barely exercised: {stats:?}"
+    );
     // Random worlds that reach a hidden deficit at admission must exist, and the P3 control
     // (cover stripped) must find harm in some of them; the deterministic
     // `v21_hidden_deficit_is_absorbed_by_cover_not_by_entrant` pins one such world exactly.
-    assert!(stats.hidden_deficit_admissions > 0, "no admission ever had a hidden deficit: {stats:?}");
-    assert!(stats.control_harm > 0, "control never found harm: P3 would be vacuous: {stats:?}");
+    assert!(
+        stats.hidden_deficit_admissions > 0,
+        "no admission ever had a hidden deficit: {stats:?}"
+    );
+    assert!(
+        stats.control_harm > 0,
+        "control never found harm: P3 would be vacuous: {stats:?}"
+    );
 }
 
 /// Deterministic: thin longs go underwater on a capped price slide nobody has refreshed. The
@@ -593,7 +647,13 @@ fn v21_relaxed_admission_sweep_is_not_vacuous() {
 fn v21_hidden_deficit_is_absorbed_by_cover_not_by_entrant() {
     // 6 thin longs (10.5% of notional), 2 fat longs; the maker is short against all of them.
     let traders: Vec<(u128, bool, u128)> = (0..8)
-        .map(|i| if i < 6 { (105_000, true, 1) } else { (900_000, true, 1) })
+        .map(|i| {
+            if i < 6 {
+                (105_000, true, 1)
+            } else {
+                (900_000, true, 1)
+            }
+        })
         .collect();
     let mut w = World::new(&traders, 0, 0);
     // Slide 2% per slot for 7 slots with positive funding (longs pay): ~13% adverse.
@@ -609,7 +669,10 @@ fn v21_hidden_deficit_is_absorbed_by_cover_not_by_entrant() {
             hidden_deficit -= after;
         }
     }
-    assert!(hidden_deficit > 0, "the slide must leave unrecognized bankruptcies");
+    assert!(
+        hidden_deficit > 0,
+        "the slide must leave unrecognized bankruptcies"
+    );
     let b_long = bound(&w, SideV16::Long);
     assert!(b_long > 0);
 
@@ -636,7 +699,10 @@ fn v21_hidden_deficit_is_absorbed_by_cover_not_by_entrant() {
     let mut stats = Stats::default();
     check_admission(&w, &entrant, &mut stats);
     assert_eq!(stats.p3_checked, 1, "P3 must run on this world");
-    assert_eq!(stats.control_harm, 1, "control: without the cover the entrant is charged");
+    assert_eq!(
+        stats.control_harm, 1,
+        "control: without the cover the entrant is charged"
+    );
 
     // Same world, one atom less cover: refused.
     let mut w2 = World::new(&traders, 0, 0);
@@ -645,7 +711,8 @@ fn v21_hidden_deficit_is_absorbed_by_cover_not_by_entrant() {
     }
     {
         let mut m = MarketGroupV16ViewMut::new(&mut w2.header, &mut w2.markets);
-        m.deposit_domain_insurance_not_atomic(1, b_long - 1).unwrap();
+        m.deposit_domain_insurance_not_atomic(1, b_long - 1)
+            .unwrap();
         m.deposit_domain_insurance_not_atomic(0, b_short).unwrap();
     }
     let mut cp = account(50_000);
