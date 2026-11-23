@@ -22931,15 +22931,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if route == PositionRouteV16::Clear {
             let leg = current_leg;
             if leg.active && self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
-                let asset = self.asset_state(asset_index)?;
-                let effective_abs_q = V16Core::effective_abs_quantity_for_detach(asset, leg)?;
-                let (obligation, asset) =
-                    V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
-                let asset = self.sync_side_adl_index(asset, leg.side, 0)?;
-                account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&obligation);
-                account.header.health_cert.valid = 0;
-                self.set_asset_state(asset_index, asset)?;
-                return Ok(());
+                return self.retain_cleared_leg_as_pending_obligation_at_slot(
+                    account,
+                    asset_index,
+                    leg_slot,
+                    leg,
+                );
             }
             return self.clear_leg_at_slot_inner(
                 account,
@@ -23005,11 +23002,53 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             old_effective_abs,
             new_effective_abs,
         )?;
-        let new_asset = self.sync_side_adl_index(new_asset, old_leg.side, new.unsigned_abs())?;
-        account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&new_leg);
+        self.store_leg_and_synced_asset(
+            account,
+            asset_index,
+            leg_slot,
+            &new_leg,
+            new_asset,
+            new.unsigned_abs(),
+        )
+    }
+
+    /// The Clear route of a position change while the leg's side has a pending
+    /// domain-loss barrier: the leg stays as a pending obligation. Out of line
+    /// so its asset-state copies stay out of the position-delta frame (SBF
+    /// 4096-byte stack frame).
+    #[inline(never)]
+    fn retain_cleared_leg_as_pending_obligation_at_slot(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        leg_slot: usize,
+        leg: PortfolioLegV16,
+    ) -> V16Result<()> {
+        let asset = self.asset_state(asset_index)?;
+        let effective_abs_q = V16Core::effective_abs_quantity_for_detach(asset, leg)?;
+        let (obligation, asset) =
+            V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
+        self.store_leg_and_synced_asset(account, asset_index, leg_slot, &obligation, asset, 0)
+    }
+
+    /// Re-derive the changed leg's side A index, then write the leg (clearing the
+    /// account's health certificate) and the asset, in that order. Out of line so
+    /// the asset copies of the A sync and the write stay out of the callers'
+    /// frames (SBF 4096-byte stack frame).
+    #[inline(never)]
+    fn store_leg_and_synced_asset(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        leg_slot: usize,
+        leg: &PortfolioLegV16,
+        asset: AssetStateV16,
+        acting_raw_after_q: u128,
+    ) -> V16Result<()> {
+        let asset = self.sync_side_adl_index(asset, leg.side, acting_raw_after_q)?;
+        account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(leg);
         account.header.health_cert.valid = 0;
-        self.set_asset_state(asset_index, new_asset)?;
-        Ok(())
+        self.set_asset_state(asset_index, asset)
     }
 
     fn set_pending_domain_loss_barrier_count(
