@@ -7115,6 +7115,9 @@ struct ParNettingBatchV16 {
     netted_num: u128,
     transfer_num: u128,
     expiry_slot: u64,
+    /// Resolved mode (upstream 78d180f2): the twin's face is cancelled without a
+    /// move, and backing moved from a domain at rate 1 is booked in whole atoms.
+    whole_atoms: bool,
 }
 
 #[repr(C)]
@@ -17392,17 +17395,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // loss-domain credit, the PnL write and the source-array compaction are
         // done once per loss.
         let start_pnl = account.header.pnl.get();
-        if loss_abs == 0
-            || start_pnl <= 0
-            || decode_market_mode(self.header.mode)? != MarketModeV16::Live
-        {
+        if loss_abs == 0 || start_pnl <= 0 {
             return Ok(0);
         }
+        // upstream 78d180f2: a K/F loss first settled after resolution is netted
+        // too (not in Recovery). Before, a Resolved close skipped this, so the
+        // loss burned the account's face at whatever rate its domain showed at
+        // that moment and the payouts depended on which close ran first.
+        let resolved = match decode_market_mode(self.header.mode)? {
+            MarketModeV16::Live => false,
+            MarketModeV16::Resolved => true,
+            MarketModeV16::Recovery => return Ok(0),
+        };
         let (asset_index, loss_side) = self.domain_asset_side(loss_domain)?;
         let twin_domain = self.insurance_domain_index(asset_index, opposite_side(loss_side))?;
+        // In Live a payment is added to the loss bucket as it stands, so the bucket
+        // must be able to take it. In Resolved mode the resolved booking rule decides
+        // what the loss domain takes and what is left to the junior pool.
         let loss_side_open = !self.has_pending_domain_loss_barrier(asset_index, SideV16::Long)?
             && !self.has_pending_domain_loss_barrier(asset_index, SideV16::Short)?
-            && self.loss_bucket_accepts_fresh(loss_domain)?;
+            && (resolved || self.loss_bucket_accepts_fresh(loss_domain)?);
         let mut end = 0usize;
         let mut twin_slot = None;
         while end < PORTFOLIO_SOURCE_DOMAIN_CAP {
@@ -17422,6 +17434,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             netted_num: 0,
             transfer_num: 0,
             expiry_slot: u64::MAX,
+            whole_atoms: resolved,
         };
         if let Some(slot) = twin_slot {
             self.net_slot_face_at_par_not_atomic(
@@ -17441,7 +17454,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let unliened_num = Self::slot_unliened_claim_num(source)?;
                 if unliened_num != 0 {
                     let d = source.domain.get() as usize;
-                    if self.stored_source_credit_rate_num(d)? == CREDIT_RATE_SCALE {
+                    let rate = self.stored_source_credit_rate_num(d)?;
+                    if rate == CREDIT_RATE_SCALE {
                         self.net_slot_face_at_par_not_atomic(
                             account,
                             slot,
@@ -17450,7 +17464,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                             true,
                             &mut batch,
                         )?;
-                    } else {
+                    } else if !resolved || (rate != 0 && d == loss_domain) {
+                        // Resolved mode: face is kept only where it sits in the
+                        // loss domain itself, below par because that domain's
+                        // losers (this account among them) have not all paid
+                        // yet. Face in any other domain below rate 1, and face
+                        // with nothing behind it, is left to support-and-burn.
                         partially_backed_num = partially_backed_num
                             .checked_add(unliened_num)
                             .ok_or(V16Error::ArithmeticOverflow)?;
@@ -17461,7 +17480,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         if batch.netted != 0 {
             account.compact_source_domains();
-            if batch.transfer_num != 0 {
+            if batch.transfer_num != 0 && resolved {
+                // The moved backing was consumed from its domain exactly as support
+                // is; it is booked for the loss domain by the same rule.
+                self.book_kf_loss_support_for_source_domain_not_atomic(
+                    loss_domain,
+                    batch.transfer_num / BOUND_SCALE,
+                )?;
+            } else if batch.transfer_num != 0 {
                 let expiry_slot = if self.backing_bucket_for_domain(loss_domain)?.status
                     == BackingBucketStatusV16::Fresh
                 {
@@ -17627,7 +17653,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 V16Core::bound_num_from_amount(atoms)?.min(netted_num)
             }
         };
-        let transfer_num = owed_num.min(movable_num);
+        let mut transfer_num = owed_num.min(movable_num);
+        if batch.whole_atoms {
+            // Resolved mode (upstream 78d180f2: whole atoms). Upstream cancels the
+            // twin's face without a move and places stranded loser payments later
+            // (its part 2, which needs a55aceb3's bounded Resolved K/F settlement).
+            // Here the twin's backing moves now, but only its loser-paid share:
+            // provider principal stays in the twin domain. The pooled share cannot
+            // tell whether those losers paid before or after the reversal, so a
+            // partial reversal can still move a few atoms a provider is owed.
+            if !require_full_backing {
+                transfer_num = transfer_num.min(self.twin_loser_paid_share_num(
+                    face_domain,
+                    netted_num,
+                    credit.positive_claim_bound_num,
+                )?);
+            }
+            transfer_num -= transfer_num % BOUND_SCALE;
+        }
         if require_full_backing && transfer_num != netted_num {
             return Ok(());
         }
@@ -17771,9 +17814,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         loss: u128,
     ) -> V16Result<u128> {
         let (loss_asset, _) = self.domain_asset_side(loss_domain)?;
+        let resolved = decode_market_mode(self.header.mode)? == MarketModeV16::Resolved;
         if self.has_pending_domain_loss_barrier(loss_asset, SideV16::Long)?
             || self.has_pending_domain_loss_barrier(loss_asset, SideV16::Short)?
-            || !self.loss_bucket_accepts_fresh(loss_domain)?
+            || (!resolved && !self.loss_bucket_accepts_fresh(loss_domain)?)
         {
             return Ok(0);
         }
@@ -17806,8 +17850,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.vault.get(),
         )?
         .validate()?;
-        let expiry_slot = self.fresh_counterparty_backing_expiry_slot(loss_domain)?;
-        self.add_fresh_counterparty_backing_unchecked(loss_domain, paid_num, expiry_slot)?;
+        if resolved {
+            // Exactly the tail of the ordinary capital reservation
+            // (`reserve_new_capital_backed_loss_for_source_domain_not_atomic`).
+            self.book_realized_loss_backing_for_domain_not_atomic(loss_domain, paid)?;
+        } else {
+            let expiry_slot = self.fresh_counterparty_backing_expiry_slot(loss_domain)?;
+            self.add_fresh_counterparty_backing_unchecked(loss_domain, paid_num, expiry_slot)?;
+        }
         Self::record_account_residual_crystallized_loss(account, paid)?;
         account.header.health_cert.valid = 0;
         Ok(paid)

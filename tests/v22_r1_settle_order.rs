@@ -676,9 +676,10 @@ fn r1_resolved_close_is_unchanged() {
     let wf = resolved_payouts(true);
     let lf = resolved_payouts(false);
     eprintln!("R1RESOLVED winner-first {wf:?} victim-first {lf:?}");
-    // pre-R1 values (874fe33a). Resolved close is itself order dependent (pre-existing, not R1);
-    // this test only pins that the R1 change does not touch it.
-    assert_eq!(wf, (999_999_999_998_674, 999_999_999_942_508));
+    // pre-R1 values (874fe33a) were order dependent: winner-first (999_999_999_998_674,
+    // 999_999_999_942_508) left 58,818 short. With the Resolved K/F netting (i457 fix) the
+    // winner's loss is netted in the close too, so both orders pay the same and sum to the deposits.
+    assert_eq!(wf, (1_000_000_000_057_492, 999_999_999_942_508));
     assert_eq!(lf, (1_000_000_000_057_492, 999_999_999_942_508));
 }
 
