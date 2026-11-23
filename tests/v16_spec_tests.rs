@@ -1698,6 +1698,75 @@ fn v16_fee_sync_keeps_a_current_certificate_when_its_settlement_changes_nothing(
 }
 
 #[test]
+fn v16_fee_sync_keeps_a_current_certificate_for_a_winner_with_source_claims() {
+    // Fork: a winner holding source claims (PnL > 0) values its certificate's deficit from the
+    // liquidation equity (in-flight support). The kept certificate must still equal a refresh.
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 14);
+    let mut short_header = account_fixture(1, 15);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 2, 101, 0, true)
+            .unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+    }
+    assert!(long_header.pnl.get() > 0, "the long account is a winner");
+    assert!(
+        long_header.source_domains.iter().any(|s| s.is_occupied()),
+        "the winner holds a source claim"
+    );
+    let before = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(before.valid);
+
+    let charged = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let charged = market
+            .sync_account_fee_to_slot_not_atomic(&mut long, 2, 7)
+            .unwrap();
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        charged
+    };
+    assert!(charged > 0, "the fixture must charge a fee");
+    let kept = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(kept.valid, "nothing to settle: the certificate is kept");
+    assert_eq!(kept.certified_equity, before.certified_equity - charged as i128);
+
+    let (mut refresh_header, mut refresh_markets) = (header.clone(), markets.clone());
+    let mut refresh_long_header = long_header.clone();
+    let refreshed = {
+        let mut market = MarketGroupV16ViewMut::new(&mut refresh_header, &mut refresh_markets);
+        let mut long = PortfolioV16ViewMut::new(&mut refresh_long_header);
+        market.full_account_refresh_not_atomic(&mut long).unwrap()
+    };
+    assert_eq!(refreshed.certified_equity, kept.certified_equity);
+    assert_eq!(refreshed.certified_maintenance_req, kept.certified_maintenance_req);
+    assert_eq!(refreshed.certified_liq_deficit, kept.certified_liq_deficit);
+    assert_eq!(refreshed.certified_initial_req, kept.certified_initial_req);
+    assert_eq!(refreshed.certified_worst_case_loss, kept.certified_worst_case_loss);
+}
+
+#[test]
 fn v16_finalize_side_reset_is_public_value_neutral_and_epoch_bumping() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let vault_before = header.vault.get();

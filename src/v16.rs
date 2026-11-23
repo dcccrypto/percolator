@@ -2239,7 +2239,9 @@ impl V16Core {
     /// Equity is linear in capital (`kernel_haircut_equity`), so it falls by exactly
     /// `charged`; the deficit is recomputed by `kernel_certified_liq_deficit`. Pure
     /// scalar; `sync_account_fee_to_slot_not_atomic` calls exactly this when it keeps
-    /// a current certificate, and keeps the certificate's other fields.
+    /// a current certificate, and keeps the certificate's other fields. Fork: it calls
+    /// it twice, for the certified equity and for the liquidation equity the deficit
+    /// is read from (haircut-order fix B).
     pub(crate) fn kernel_cert_equity_after_capital_charge(
         certified_equity: i128,
         maintenance_req: u128,
@@ -21985,12 +21987,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn fee_sync_settlement_noop_last_asset(
         &self,
         account: &PortfolioV16View<'_>,
-    ) -> V16Result<Option<usize>> {
+    ) -> V16Result<Option<(usize, i128)>> {
         if account.header.pnl.get() < 0
             || !self.account_settlement_skippable_with_current_certificate(account)?
         {
             return Ok(None);
         }
+        // Fork (haircut-order fix B): the kept certificate's deficit is read from the liquidation
+        // equity (in-flight support, not stored in the certificate). Read it here, before anything
+        // is written: an account whose support cannot be valued now settles as before.
+        let liquidation_equity = match self.account_liquidation_equity(account) {
+            Ok(equity) => equity,
+            Err(_) => return Ok(None),
+        };
         let now_slot = self.header.current_slot.get();
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
@@ -22053,7 +22062,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             slot += 1;
         }
-        Ok(last.map(|(_, _, asset_index)| asset_index))
+        Ok(last.map(|(_, _, asset_index)| (asset_index, liquidation_equity)))
     }
 
     /// Whether the S9 clamp (`clamp_kf_pending_credit_to_claims`) would lower either of the
@@ -27803,13 +27812,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             None
         };
         let kept_certificate = match noop_last_asset {
-            Some(asset_index) => {
+            Some((asset_index, liquidation_equity)) => {
                 let certificate = account.header.health_cert.try_to_runtime()?;
                 self.header.loss_stale_active = encode_bool(asset_is_loss_stale_at_slot(
                     self.asset_state(asset_index)?,
                     self.header.current_slot.get(),
                 ));
-                Some(certificate)
+                Some((certificate, liquidation_equity))
             }
             None => {
                 if live_nonflat {
@@ -27832,23 +27841,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let charged = self.charge_account_fee_current_not_atomic(account, requested_fee)?;
         account.header.last_fee_slot = V16PodU64::new(fee_anchor);
-        if let Some(mut certificate) = kept_certificate {
+        if let Some((mut certificate, liquidation_equity)) = kept_certificate {
             let (certified_equity, _) = V16Core::kernel_cert_equity_after_capital_charge(
                 certificate.certified_equity,
                 certificate.certified_maintenance_req,
                 charged,
             )?;
-            certificate.certified_equity = certified_equity;
-            // Fork (haircut-order fix B): the certificate's deficit is read from the liquidation
-            // equity, which counts in-flight backing and is not stored in the certificate, so it
-            // is recomputed here exactly as `compute_account_health_cert_with_price_override`
-            // does. With PnL not positive or no source claims it reads no support.
-            certificate.certified_liq_deficit = self.account_liquidation_deficit(
-                &account.as_view(),
+            // Fork (haircut-order fix B): the deficit comes from the liquidation equity, as in
+            // `compute_account_health_cert_with_price_override`; it is linear in capital too
+            // (the support reads no capital), so it also falls by exactly `charged`.
+            let (_, certified_liq_deficit) = V16Core::kernel_cert_equity_after_capital_charge(
+                liquidation_equity,
                 certificate.certified_maintenance_req,
+                charged,
             )?;
+            certificate.certified_equity = certified_equity;
+            certificate.certified_liq_deficit = certified_liq_deficit;
             certificate.valid = true;
             account.header.health_cert = HealthCertV16Account::from_runtime(&certificate);
+            // v2.2 band: a capital debit carried on the prior certificate's requirements may
+            // only mark liquidation-pending, never certify (as `charge_account_backing_fee`).
+            self.band_observe_cert_not_atomic(account, &certificate, false)?;
         }
         account.validate_with_market(&self.as_view())?;
         self.validate_shape()?;
