@@ -20532,3 +20532,25 @@ fn proof_v16_asset_wire_only_validation_matches_full_decode() {
     kani::cover!(full.is_err(), "invalid image");
     assert_eq!(asset.validate_wire_only().err(), full.err());
 }
+
+/// For every leg image that decodes, the decoded leg is empty exactly when the raw image is the
+/// empty encoding, so `validate_with_market` / the refresh loop can test the raw bytes instead of
+/// the 22 decoded fields. `active == 1` images are not decoded here (that would run
+/// `validate_active_leg`'s wide arithmetic): there `leg.active` is true, so `is_empty()` is false,
+/// and `is_empty_encoding()` is false because it requires `active == 0`.
+#[kani::proof]
+#[kani::unwind(220)]
+#[kani::solver(cadical)]
+fn proof_v16_decoded_leg_is_empty_matches_encoding() {
+    let image: [u8; core::mem::size_of::<PortfolioLegV16Account>()] = kani::any();
+    let leg: PortfolioLegV16Account = bytemuck::pod_read_unaligned(&image);
+    if leg.active == 1 {
+        assert!(!leg.is_empty_encoding());
+        return;
+    }
+    if let Ok(decoded) = leg.try_to_runtime() {
+        kani::cover!(decoded.is_empty(), "empty leg");
+        kani::cover!(!decoded.is_empty(), "inactive non-empty leg");
+        assert_eq!(decoded.is_empty(), leg.is_empty_encoding());
+    }
+}

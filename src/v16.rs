@@ -7258,8 +7258,11 @@ impl<'a> PortfolioV16View<'a> {
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let bit = active_bitmap_get(bitmap, slot);
             let leg = self.header.legs[slot].try_to_runtime()?;
+            // For a leg that decoded, `leg.is_empty()` is exactly `is_empty_encoding()` of its
+            // raw bytes (the decode is one-to-one); the byte compare is one memcmp instead of
+            // 22 field compares. Pinned by proof_v16_decoded_leg_is_empty_matches_encoding.
             if slot >= active_leg_cap {
-                if bit || !leg.is_empty() {
+                if bit || !self.header.legs[slot].is_empty_encoding() {
                     return Err(V16Error::HiddenLeg);
                 }
                 slot += 1;
@@ -7269,7 +7272,7 @@ impl<'a> PortfolioV16View<'a> {
                 return Err(V16Error::HiddenLeg);
             }
             if !leg.active {
-                if !leg.is_empty() {
+                if !self.header.legs[slot].is_empty_encoding() {
                     return Err(V16Error::HiddenLeg);
                 }
                 slot += 1;
@@ -17859,8 +17862,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
             let bit = active_bitmap_get(bitmap, slot);
+            // `leg.is_empty()` == `is_empty_encoding()` for a decoded leg (see validate_with_market).
             if slot >= active_leg_cap {
-                if bit || !leg.is_empty() {
+                if bit || !account.header.legs[slot].is_empty_encoding() {
                     return Err(V16Error::HiddenLeg);
                 }
                 slot += 1;
@@ -17870,7 +17874,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 return Err(V16Error::HiddenLeg);
             }
             if !leg.active {
-                if !leg.is_empty() {
+                if !account.header.legs[slot].is_empty_encoding() {
                     return Err(V16Error::HiddenLeg);
                 }
                 slot += 1;
