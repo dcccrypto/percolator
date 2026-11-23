@@ -16388,15 +16388,17 @@ fn s16ac_walk_stats(steps: usize) -> (usize, Vec<u64>, Vec<u64>, u128) {
 /// Hunk (c) + upstream 9615f05c. A winner whose close runs before the loser's loss has arrived
 /// as backing must wait, not demote its claim: on 1c96c22f seed 2381 pays account 0 only 86
 /// of its 240 and leaves 154 atoms in the vault after every account has closed. With the
-/// Resolved K/F netting (i457 fix; upstream 78d180f2 part 1 does the same here) account 0 is
-/// paid 231 and 9 atoms stay in the vault: upstream places such stranded loser payments with
-/// its part 2, which this fork does not have yet. Still far above 1c96c22f's 86 / 154.
+/// Resolved K/F netting (i457 fix, upstream 78d180f2 part 1) account 0 was paid 231 with 9
+/// left. With part 2 (the twin's face is cancelled without a move, the stranded loser payment
+/// is placed once a side has settled) it is paid 230 and 10 stay: one atom of whole-atom
+/// rounding in the other direction, the class upstream reports for 78d180f2 (1 to 3 atoms in
+/// 24 of 9,000 wind-downs). Still far above 1c96c22f's 86 / 154.
 #[test]
 fn s16ac_early_winner_keeps_backing_that_arrives_after_its_close() {
     let o = s16ac_walk(2381, 80).expect("scenario builds");
     assert!(o.closed.iter().all(|c| *c));
     assert_eq!(o.paid.iter().sum::<u128>() + o.vault, o.deposits + o.insurance);
-    assert_eq!((o.paid, o.vault - o.insurance), ([231, 960, 840, 360], 9));
+    assert_eq!((o.paid, o.vault - o.insurance), ([230, 960, 840, 360], 10));
 }
 
 /// Hunk (a), narrowed: once the creditor side can no longer grow its claims, a late loss beyond
@@ -16405,12 +16407,14 @@ fn s16ac_early_winner_keeps_backing_that_arrives_after_its_close() {
 /// (#387) they read [400,360,1000,1020] 20 / [800,1000,340,845] 15 / [760,230,400,200] 10; under
 /// #387 2041 strands less (11) and 3226 / 3262 strand more (18 / 12), all below 1c96c22f.
 /// With the Resolved K/F netting (i457 fix) all three strand less than before #387: 8 / 12 / 7.
+/// With upstream 78d180f2 part 2 (stranded loser payments placed in the Resolved close) none
+/// strands anything: the 8 / 12 / 7 go to the winners.
 #[test]
 fn s16ac_excess_late_loss_funds_junior_residual_once_creditors_are_final() {
     let pinned: [(u64, [u128; 4], u128); 3] = [
-        (2041, [400, 360, 1000, 1032], 8),
-        (3226, [800, 1000, 340, 848], 12),
-        (3262, [760, 233, 400, 200], 7),
+        (2041, [400, 360, 1000, 1040], 0),
+        (3226, [800, 1000, 340, 860], 0),
+        (3262, [760, 240, 400, 200], 0),
     ];
     for (seed, paid, left) in pinned {
         let o = s16ac_walk(seed, 80).expect("scenario builds");
@@ -16428,10 +16432,10 @@ fn s16ac_excess_late_loss_funds_junior_residual_once_creditors_are_final() {
 /// chain (#387): 22,357 and 23,724. Under #387 the 80-step value (24,552) is above 1c96c22f's
 /// 22,537, so that attribution is no longer shown for the 80-step walk; stuck and leaky stay
 /// empty. With the Resolved K/F netting (i457 fix) both are below every earlier value: 20,010
-/// and 19,108.
+/// and 19,108; with upstream 78d180f2 part 2 lower again: 18,459 and 19,098.
 #[test]
 fn s16ac_resolved_close_walk_is_live_conserving_and_pinned() {
-    for (steps, want_left) in [(80usize, 20_010u128), (0, 19_108)] {
+    for (steps, want_left) in [(80usize, 18_459u128), (0, 19_098)] {
         let (built, stuck, leaky, left) = s16ac_walk_stats(steps);
         eprintln!("S16AC steps {steps}: built {built} stuck {stuck:?} leaky {leaky:?} left {left}");
         assert!(built > 5000, "vacuity: {built} scenarios built");

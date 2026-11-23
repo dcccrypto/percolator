@@ -386,26 +386,20 @@ fn i457_resolved_close_order_does_not_change_payouts() {
     }
 }
 
-/// S10 is a LIVE repair only. The Resolved close carries no move budget, so backing a loser
-/// stranded at the peak that no refresh crank moved before the market resolved stays stranded and
-/// the Resolved payouts are the BASE engine's (release/v22-engine-rem 8e5a8c8f), not the ideal:
-/// maker-alone peak crank pays the maker 117.926 instead of 725.220 and actor 2 1,124.860 instead
-/// of 1,217.566. Pinned so nobody reads the Live exactness tests as a Resolved guarantee.
+/// S10 is a LIVE repair only: the Resolved close carries no move budget. Before upstream
+/// 78d180f2 part 2, backing a loser stranded at the peak that no refresh crank moved before the
+/// market resolved stayed stranded, and the maker-alone peak crank paid the maker 117.926 instead
+/// of 725.220 and actor 2 1,124.860 instead of 1,217.566 (the base engine's payouts). The Resolved
+/// close now places a stranded loser payment once a side has settled, so every one of the 16
+/// peak-crank subsets pays the ideal in both close orders.
 #[test]
-fn i457_resolved_close_alone_repairs_nothing() {
+fn i457_resolved_close_places_what_a_live_reversal_stranded() {
     const IDEAL: [u128; 4] = [347_302_000, 709_912_000, 1_217_566_000, 1_000_000_725_220_000];
-    const BASE_MAKER_ALONE: [u128; 4] = [347_302_000, 709_912_000, 1_124_859_950, 1_000_000_117_926_049];
-    for order in [[0usize, 1, 2, 3], [3, 2, 1, 0]] {
-        assert_eq!(run_resolved(&[3], &order, true), BASE_MAKER_ALONE, "maker-alone peak crank, close order {order:?}");
-    }
-    // nothing stranded (nobody, or everybody, cranked at the peak): the ideal, as on base
-    for peak in [vec![], vec![0, 1, 2, 3]] {
-        assert_eq!(run_resolved(&peak, &[0, 1, 2, 3], true), IDEAL, "peak {peak:?}");
-    }
-    // and in every stranded subset no account is paid above the ideal
-    for peak in [vec![3], vec![2], vec![2, 3], vec![0, 3]] {
-        let paid = run_resolved(&peak, &[0, 1, 2, 3], true);
-        assert!(paid.iter().zip(IDEAL.iter()).all(|(p, i)| p <= i), "peak {peak:?}: {paid:?} above the ideal");
+    for mask in 0u32..16 {
+        let peak: Vec<usize> = (0..4).filter(|i| mask & (1 << i) != 0).collect();
+        for order in [[0usize, 1, 2, 3], [3, 2, 1, 0]] {
+            assert_eq!(run_resolved(&peak, &order, true), IDEAL, "peak {peak:?}, close order {order:?}");
+        }
     }
 }
 
@@ -420,3 +414,4 @@ fn i457_resolved_pays_the_ideal_when_a_refresh_cohort_completed_before_resolutio
         assert_eq!(run_resolved_model(&peak, &[3, 2, 1, 0], true, true), ideal, "peak {peak:?} reverse close order");
     }
 }
+

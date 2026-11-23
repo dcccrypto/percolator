@@ -258,6 +258,66 @@ The plan MUST be built from every active leg before any newly observed K/F delta
 
 **Resolved-mode settlement over source claims is bounded per call.** A Resolved close MUST NOT settle, in one call, the final K/F of more than `RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL` (2) legs of an account that holds source claims and has a loss among more than that many unsettled legs. Such a call settles that many of the unsettled legs, commits, and returns progress without detaching a leg or paying out; later calls settle the rest, and the last chunk is settled by the ordinary settlement, which then continues with B, fees, negative PnL and detach as before. An account that holds no source claim, or has no loss left to settle, or has at most that many unsettled legs, settles every leg in one call as before. The chunk plan is built from the unsettled legs only and taken in the canonical order above. A settled leg's entry in the full plan has zero net and moves no value, so the chunks followed by the ordinary settlement apply exactly the sequence of settlements one call would apply: an account whose close is not interleaved with another account's ends in the same state, and negative PnL a chunk leaves is settled from principal only after the account's last leg, as in one call. Rationale: with losses over source claims, one call that settles every leg costs work for each losing leg and for each claim its loss burns through. At the largest portfolio shape that does not fit in a transaction, and an account that cannot settle its legs keeps the market's payout blockers set, so no positive PnL anywhere in the market is paid. Resolved mode has no health certificate that needs an account's legs settled together. Live refresh is unchanged: there the plan is built from every active leg and applied in full.
 
+**Resolved-mode placement of stranded loser payments is bounded per call.** A Resolved close MUST NOT make more than `RESOLVED_STRANDED_PLACEMENTS_PER_CALL` (4) placements of stranded loser payments (§5.1.1, "Stranded loser payments (Resolved)") in one call. A placement belongs after the K/F settlement of the leg whose asset holds the payment. When the call has made that many and comes to a leg whose asset may need another, that placement waits for the next call, which passes over every settled leg again. "May" is decided from stored values alone: a side of the asset has no stored leg left unsettled, its twin domain holds at least one whole atom of loser-paid backing beyond its claim bound and its provider's principal, and either the other side has no unsettled stored leg as well or that side's domain is still owed at least one whole atom by losers. The same test, when it fails, is how a call knows without further work that an asset has nothing to place. If the next leg in the canonical order is a loss, the K/F settlement stops before it: a loss can burn face at a rate the waiting placement would change. Otherwise the remaining legs, which are gains or already settled and read no rate, are settled in the same call, so that a waiting placement does not keep the account's other legs unsettled. Either way a call with a placement waiting commits and returns progress without settling B, charging fees, detaching a leg or paying out, so no leg leaves its asset with a placement waiting on it. Placements therefore happen before everything whose outcome they can change, and an account whose close is not interleaved with another account's ends in the same state as with no bound. A call that leaves a placement waiting has made the bound's worth, and a placement only takes stranded backing out of its domain, so the calls end. Rationale: a placement rewrites the ledgers of both domains of an asset, and an account can hold a leg on every asset of its portfolio with a payment stranded on each. Unbounded, that work is added to the settlement of every leg in the same call. The bound is at least twice the number of legs that the smallest multi-asset accounts hold, so that a two-leg account never waits.
+
+The two Resolved-mode rules below are ported from upstream 78d180f2 (its §5.1.1 text; this spec has no such section).
+
+Netting of a loss first settled in Resolved mode. A K/F loss that is first
+settled after resolution is netted by the same rules, with these differences.
+Every payment to `L` is booked by the resolved booking rule of the next
+paragraph instead of being added to `L` as it stands, so `L`'s bucket need not
+be able to take it and what `L` cannot take stays junior residual; only whole
+atoms move. The twin's face is cancelled without a move: whether the twin's
+loser-paid backing answers for the cancelled face depends on whether its losers
+paid before or after the reversal, which a pooled share cannot tell, and the
+settlement of stranded backing below places it once that is known. Partially
+backed face is kept, and the loss paid from free capital, only where the face
+sits in `L` itself at a rate strictly between 0 and 1: there the rate is below
+par because `L`'s losers, this account among them, have not all paid yet, and
+burning the face would spend `x / rate` of it for `x` of loss, so that what the
+holder was paid would depend on which permissionless close ran first. Face in
+any other domain below rate 1, and face with nothing behind it (credit rate 0),
+is not kept: it is left to the support-and-burn path as before, which prices it
+at its domain's rate (a rate that an insolvent payer left below 1 is what that
+face is worth) or, at rate 0, cancels it against the loss one for one.
+Nothing here runs in Recovery mode. While a domain-loss barrier is pending on
+either side of the asset no payment is made; the cancellations, which move
+nothing, still apply.
+
+Stranded loser payments (Resolved). A Resolved close settles K/F leg by leg
+and passes over the legs it finds settled. After each leg it settles or passes
+over, for each side `s` of that leg's asset that has no stored leg left
+unsettled: the
+losers of `s` have paid all they will pay into `D_s = (asset, s)` and the
+winners of `s` have registered every claim they will hold on the twin
+`D_t = (asset, opposite(s))`. Loser-paid backing of `D_t` beyond its claim bound
+and beyond its provider's principal, `max(0, fresh reserved - provider principal
+- claim bound)` capped by the bucket's unliened principal and rounded down to
+whole atoms, is then stranded: it paid for a gain that reversed before its
+winners were settled, or for face that was cancelled against its holder's own
+loss. It MUST move to `D_s`, where the other side's regain is claimed and nobody
+else will fund it, up to what `D_s` is still owed by losers,
+`max(0, claim bound + provider principal - fresh reserved)`; it joins `D_s` as
+loser-paid principal (refilling the provider receivable first) at `D_s`'s expiry
+if its bucket is Fresh and unlapsed, at the lifetime the engine gives the backing
+it creates (never past the resolved backing horizon) if it is Empty or Expired,
+and not at all if it is Impaired, lapsed, or that expiry has already passed.
+Once the other side has no unsettled stored leg either, no claim can still
+appear on either domain, and whatever stranded backing was not moved MUST join
+the junior pool at once instead of when the bucket lapses. Provider principal
+and backing that a claim on `D_t` owns never move; `V`, `C_tot` and `I` are
+flat; the bucket of `D_t` must be Fresh and unlapsed; nothing moves while a
+domain-loss barrier is pending on either side of the asset or once the payout
+snapshot is captured. Without this rule the regain is paid at the junior rate,
+or by a provider in `D_s` that is never repaid, while the stranded payment
+lapses into the junior pool; and while a junior claim is outstanding every
+provider bucket of the market group holds back a reserve for it. One close call
+makes a bounded number of these placements (§2.2).
+
+a K/F loss -- whatever the netting above left to that path -- and, in Resolved
+mode, the backing that netting itself realizes at par, MUST NOT be left in the
+junior pool while `L` can take it. The source
+
 A backing reservation may be funded only by:
 - senior capital `C_i`;
 - already realized nonjunior quote gains;
