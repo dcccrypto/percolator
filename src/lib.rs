@@ -99,6 +99,7 @@ pub use v16::{
     V16PodI128, V16PodU128, V16PodU16, V16PodU32, V16PodU64, V16Result,
     BANKRUPTCY_HLOCK_ACTIVE_BIT, BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS,
     PORTFOLIO_LEG_V16_EMPTY_ACCOUNT, PORTFOLIO_SOURCE_DOMAIN_CAP,
+    PROVIDER_PROTECTION_OBSERVED_ASSET_CAP, PROVIDER_PROTECTION_OBSERVED_MAX_ASSET_INDEX,
     TERMINAL_SLAB_SCAN_ASSETS_PER_CALL, V16_ACCOUNT_VERSION, V16_EMPTY_ACTIVE_BITMAP,
     V16_LAYOUT_DISCRIMINATOR, V16_MAX_ACCRUAL_PATH_STEPS, V16_MAX_PORTFOLIO_ASSETS_N,
 };
@@ -116,8 +117,14 @@ pub use v16::{loss_weight_for_basis_for_test, loss_weight_for_basis_wide_referen
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::{
     kani_adl_effective_quantity_ceil, kani_funding_index_deltas,
-    kani_raw_basis_for_adl_effective_quantity,
+    kani_raw_basis_after_adl_reduction, kani_raw_basis_for_adl_effective_quantity,
+    kani_side_adl_index, kani_sync_side_adl_index,
 };
+
+// #449 (upstream c030aa40): the audit scan's per-side A-index predicate, for
+// tests/adl_side_index_449.rs.
+#[cfg(all(not(kani), feature = "fuzz", feature = "audit-scan"))]
+pub use v16::kani_side_adl_totals_are_coherent;
 
 // Bounded source-credit mul-div kernels + fused claim-burn deltas for the
 // rounding-residue differential fuzz target (upstream 4c4dfb20).

@@ -890,7 +890,7 @@ fn f2_regression_sequential_matched_liquidations_keep_a_one() {
 }
 
 /// On an asset ALREADY latched by a unilateral close, a matched liquidation still works (it is risk-reducing for both
-/// legs, so the #134 gate allows it), does NOT move A any further, and does not lift the latch either: only a side
+/// legs, so the #134 gate allows it), does not deepen A (since #449 it may rise by rounding, below unit), and does not lift the latch either: only a side
 /// reset (one side flat) or tag 104 does. Pinned so nobody reads "matched" as "unlatches".
 #[test]
 fn f2_regression_matched_liquidation_on_a_latched_asset_neither_deepens_nor_lifts_the_latch() {
@@ -902,7 +902,18 @@ fn f2_regression_matched_liquidation_on_a_latched_asset_neither_deepens_nor_lift
     let lp_eff0 = eff_q(&w.markets, &w.lp);
     let o = liquidate_other(&mut w, &mut t2, true);
     assert!(o.closed_q > 0);
-    assert_eq!(w.a(), (al, ash), "A did not move");
+    // #449 (upstream c030aa40): the side's A index is re-derived from its
+    // effective OI and raw-basis sum after every change, so a same-side
+    // reduction can move it by rounding (here 984126888888888 ->
+    // 984126980541821). In this scenario the index does not fall (no deeper
+    // haircut) and stays below unit A; that is what this pins, not a general
+    // rule for every close.
+    let (al1, ash1) = w.a();
+    assert_eq!(al1, al, "the long side's A did not move");
+    assert!(
+        ash1 >= ash && ash1 < ADL_ONE,
+        "matched close: A_short {ash} -> {ash1} neither deepens nor reaches unit A"
+    );
     let lp_eff1 = eff_q(&w.markets, &w.lp);
     // eff_q rounds up per leg; the matched delta is exact up to that rounding
     assert!(

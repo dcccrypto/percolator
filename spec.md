@@ -271,6 +271,31 @@ Provider withdrawals of counterparty backing keep the domain at the full credit 
 
 In Resolved mode a loss booked into a terminal domain (no claim and no creditor leg left) funds the junior pool, except that a domain that is not Impaired first takes, until the payout snapshot is captured, what repays its provider: min(provider receivable, provider principal - fresh reserved backing). The provider that fronted a winner's gain is owed the loser's payment whichever account closes first. (upstream 5e3af071)
 
+**Provider-protection floor.** (upstream e18a3b98, percolator-prog#382) Provider protection of a source domain is the provider principal that neither a claim on the domain nor an unrepaid consumption has taken:
+
+```text
+provider_protection_num = min(provider_principal_num,
+                              max(0, fresh_reserved_backing_num - exact_positive_claim_num))
+```
+
+Claims are paid from the domain's fresh reserved backing, and the part of it the domain's losers paid in (`fresh reserved - provider principal`) goes first. The provider is therefore exposed to the exact claims beyond that part, and to principal that was consumed and has not been refilled (`provider principal > fresh reserved`). A realization, in which the same amount leaves the backing and the claims, does not move protection. A gain registered as a claim before its loser has paid lowers it, and the loser's payment restores it, up to the principal.
+
+For each source domain and each generation of its asset (`market_id`) the engine MUST keep a provider-protection floor: the lowest provider protection the domain has had in any state a mutable market view was opened on, moved only by what the provider itself did.
+
+- A provider deposit of `x` raises the floor by `x`.
+- A provider withdrawal of `y` lowers the floor by `y`, to no less than zero, and is not a loss.
+- Nothing else raises the floor. A loser payment that refills protection does not, so a loss the provider fronted stays recorded after it was refilled, and a later claim that spends the refill down to the floor records nothing.
+- Principal forfeited by expiry or impairment is a loss: the floor falls with the protection.
+- Activation, restart and retirement of an asset slot start both of its floors at zero.
+
+The floor is accounting only. It gates nothing, selects no recipient and no amount, and moves no value. It exists so that a program which keeps per-depositor shares over one provider position can charge every provider loss exactly once, whenever it looks: the current source-credit state cannot tell a loss that was refilled and spent again from one that never happened, and no other counter moves when a loss is represented by claim encumbrance alone (`spent_backing_num`, `provider_receivable_num` and the bucket's consumed and impaired amounts stay where they were).
+
+The stored floor MUST be brought up to date when a mutable view first changes what the domain's protection is computed from (its fresh reserved backing, its exact claims or its provider principal), and from the stored state, which is the complete state earlier views left. Later changes of the same view MUST NOT record anything, because a step can be half done between them: a trade that closes a winner against its loser registers the gain and then receives the loss that pays it, and lien face is consumed before its claim is burned. Either would read as a loss that the next write takes back. After a view's last change the stored value can therefore be above the current protection, and a reader MUST take `min(stored floor, provider_protection_num)`. `provider_protection_floor_num` and `EngineAssetSlotV16Account::provider_protection_and_floor_num` do. What a reader sees is therefore exactly the running minimum of provider protection over the states between mutable views, shifted by the provider's deposits and withdrawals. Every instruction boundary is such a state. A wrapper that opens more than one mutable view inside an instruction (around a matcher call, for example) adds the states between them, each of which is a complete engine state that a sequence of separate instructions could also have reached.
+
+Which domains a view has already brought up to date is kept in the view and MUST NOT be stored: no counter, epoch or flag in the market may depend on how many views or instructions a history took. A write that changes neither the backing nor the claims of a domain, and a principal adjustment of zero, is not a change and brings nothing up to date. Two histories that differ only in how the same settlements are split over views therefore leave the same market bytes unless a provider's protection was lower between two of the views, and then they differ in that domain's floor and in nothing else. A view remembers the domains of up to `PROVIDER_PROTECTION_OBSERVED_ASSET_CAP` assets that have a floor above zero: twice `PORTFOLIO_SOURCE_DOMAIN_CAP`, the number of source domains one portfolio's roster can name. A transition that settles a portfolio changes source credit only in the assets of that portfolio's legs and of the domains its roster names, admission keeps the two together within the roster capacity (a leg's favorable domain has a roster place reserved, and the domain its losses are paid into is the other side of the same asset), and no public transition settles more than two portfolios. Every asset such a transition can change is therefore remembered. The terminal slab scan passes more assets under one view (`TERMINAL_SLAB_SCAN_ASSETS_PER_CALL`) and changes them only by expiring lapsed buckets; an expired bucket holds no fresh backing, so the domain's protection is zero between the writes of the expiry as it is after them, and observing it again records nothing more. Past the cap, and for an asset index above `PROVIDER_PROTECTION_OBSERVED_MAX_ASSET_INDEX`, a view forgets a domain and may observe it again in the middle of a step, which can only lower the floor. A wrapper that settles more than two portfolios under one mutable view, or holds one view across unrelated transitions, is outside this bound and MUST NOT treat the floors of the domains it changes as exact.
+
+v2.2 notes. `provider_principal_num` is the S10 provider-principal mirror (`provider_principal_{long,short}`). Its wholly-empty reset in `set_backing_bucket_for_domain` changes principal and therefore brings the floor up to date first, like any other principal change. Because that reset zeroes principal in the middle of a view, a full drain followed by a refill under one view reads as a loss here, which upstream (which keeps principal after a drain) would not record. An S10 rebalance that moves loser cash out of a domain with exact claims can lower that domain's protection (the provider then covers those claims), and the next view records it in the floor. The wrapper writes the mirror directly through `adjust_slot_provider_principal` for vault-pot funding and draws, outside any view; those writes neither bring the floor up to date nor shift it, so a program that reads the floor of a vault-pot domain MUST account for its own pot flows.
+
 ```text
 R_i = scheduled_remaining + pending_remaining
 if sched_present: 0 < sched_remaining <= sched_anchor, cfg_h_min <= sched_horizon <= cfg_h_max, sched_release <= sched_anchor
@@ -726,6 +751,7 @@ Asset {
     A_epoch_start_long, A_epoch_start_short
 
     OI_eff_long, OI_eff_short
+    raw_basis_sum_long, raw_basis_sum_short
     stored_pos_count_long, stored_pos_count_short
     stale_account_count_long, stale_account_count_short
 
@@ -1073,6 +1099,76 @@ OI_short_after = OI_eff_short - old_short_a - old_short_b + new_short_a + new_sh
 
 They MUST be used for both gating and writeback.
 
+### 5.1a Side A index
+
+(Ported from upstream c030aa40, percolator-prog#449.)
+
+A position opens or grows only while `A_long == A_short == ADL_ONE`, so every
+stored leg has `a_basis == ADL_ONE` and a side's exact exposure is
+`raw_basis_sum_side * A_side / ADL_ONE`, where `raw_basis_sum_side` is the sum of
+`abs(basis_pos_q)` over the side's current-epoch legs. `A_side` is not an
+independent state variable: every transition that changes `OI_eff_side` or
+`raw_basis_sum_side` MUST then set
+
+```text
+A_side = ADL_ONE                                                   if OI_eff_side == raw_basis_sum_side > 0
+A_side = max(1, floor(ADL_ONE * OI_eff_side / raw_basis_sum_side))   if raw_basis_sum_side > OI_eff_side
+A_side unchanged                                                   if raw_basis_sum_side == 0
+```
+
+and MUST fail if `OI_eff_side > raw_basis_sum_side > 0`. A side left with
+effective OI at `A_side < MIN_A_SIDE` becomes DrainOnly. A side with no
+current-epoch basis keeps its index, so a haircut side still shows
+`A_side != ADL_ONE` until it resets. The index MUST NOT be obtained by scaling
+its previous value: the rounding of each scaling would accumulate.
+
+For a side with `R = raw_basis_sum_side <= MAX_OI_SIDE_Q` and
+`OI = OI_eff_side > 0` this gives, after every transition and whatever the
+history:
+
+```text
+OI - R / ADL_ONE < R * A_side / ADL_ONE <= OI          exact exposure; R / ADL_ONE <= 1/10 raw unit
+OI <= sum(abs(effective_pos_q)) < OI + legs            legs = current-epoch legs with basis
+abs(effective_pos_q) <= OI for every leg, with equality for a side's only leg
+A_side >= 10
+```
+
+A same-side reduction of a leg from effective quantity `e` to `e'`
+(`1 <= e' < e`) removes `d = e - e'` from `OI_eff_side`. With `r` the leg's raw
+basis, `S = R - r` the other legs' raw basis and `OI' = OI - d`, the leg keeps
+
+```text
+c1 = r - ceil(d * R / OI)
+c2 = floor(e' * S / (OI' - e'))   if OI' > e', else r
+r' = max(min(c1, c2), OI' - S, 1)
+```
+
+then `raw_basis_sum_side = S + r'` and `A_side` is re-derived. `r'` is the largest
+raw basis for which the reducing leg's share of the side (`raw * OI / R`) falls by
+at least `d` and its new share is at most `e'`, but not less than the side needs to
+carry `OI'` at `A_side <= ADL_ONE`, and not less than one unit; `r' = e'` at
+`A_side == ADL_ONE`. The rounding of a reduction is taken from the reducing leg,
+whose effective quantity afterwards is at most `e'` and can be lower by rounding.
+A full close, or a conversion to a pending obligation, removes the leg's
+`abs(effective_pos_q)` from the side's effective OI (this fork clamps it to
+`OI_eff_side` only for a side's last stored leg, GH#290) and the leg's whole raw
+basis from `raw_basis_sum_side`. `begin_full_drain_reset` zeroes
+`raw_basis_sum_side` and sets `A_side = ADL_ONE`.
+
+Upstream bounds `R` through a trade side-OI cap; this fork checks
+`MAX_OI_SIDE_Q` only in the audit scan, so the bounds above assume it.
+A side whose raw basis exceeds `ADL_ONE * OI_eff_side` is held at `A_side = 1`.
+
+Because `A_side` is re-derived on same-side transitions, a leg's
+`effective_pos_q` can change by one unit through another leg's reduction or
+close. A haircut side whose effective OI again equals its raw basis is at
+`A_side == ADL_ONE` without a reset and accepts new positions. A falling
+`A_side` only lowers effective quantities, so an earlier health certificate stays
+conservative. Whenever a transition leaves `A_side` higher than it found it
+while the side holds raw basis beyond the leg that changed, `risk_epoch` MUST
+advance in the same transition. The incremental certificate after a single fill
+MUST be computed from the leg's `effective_pos_q` as stored after the fill.
+
 ### 5.2 Settlement of side effects
 
 Live touch settlement:
@@ -1141,6 +1237,8 @@ F_short_num += A_short * fund_num_total
 
 Persistent K/F overflow fails conservatively. Finally set `slot_last = now_slot`, `P_last = oracle_price`, and `fund_px_last = oracle_price`.
 
+Price-cap anchor (INV-045, upstream 71076137): the path accrual moves the effective price toward its target by at most `fund_px_last * max_price_move_bps_per_slot / MAX_MARGIN_BPS` per slot (plus the carried remainder), where `fund_px_last` is the mark when the current target took effect. A target takes effect either when the path accrual is given a target different from the stored one, or when `set_asset_raw_oracle_targets_not_atomic` stages a changed target; both restart the anchor at the current effective price. Re-staging the target already in force keeps the anchor. Kani: `proof_v16_changed_raw_target_restarts_the_cap_anchor`. Tests: `tests/v16_staged_target_cap_anchor.rs`.
+
 ### 5.4 ADL / bankrupt liquidation socialization
 
 `enqueue_adl(ctx, liq_side, q_close_q, D)`:
@@ -1164,10 +1262,11 @@ Then:
 
 ```text
 OI_post = OI_before - q_close_q
-A_candidate = floor(A_old * OI_post / OI_before)
+OI_eff_opp = OI_post
+A_opp re-derived from OI_eff_opp and raw_basis_sum_opp (§5.1a)
 ```
 
-If `OI_post == 0`, zero opposing OI and schedule reset. If `A_candidate > 0`, set `A_opp`, set `OI_eff_opp`, add the exact ADL dust bound, and enter `DrainOnly` if `A_opp < MIN_A_SIDE`. If `A_candidate == 0` while `OI_post > 0`, zero both OI sides and schedule both resets.
+If `OI_post == 0`, schedule the opposing side's reset. Otherwise the derived index is at least 10 while any effective OI remains, and the side enters `DrainOnly` if `A_opp < MIN_A_SIDE`. The index is never scaled from `A_old` (upstream c030aa40, percolator-prog#449): the rounding of each scaling would accumulate.
 
 ### 5.5 End-of-instruction reset scheduling
 
