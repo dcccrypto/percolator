@@ -125,6 +125,10 @@ pub use v16::{
     kani_source_credit_state_realizable_support_for_claim_num,
 };
 
+// Source-credit rate u128 path vs. the U256 computation it replaced (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::{source_credit_rate_num_for_test, source_credit_rate_num_wide_reference_for_test};
+
 // v17 fork-facade re-exports — present only when the fork-facade feature is enabled (the wrapper
 // opts in on its engine dep). Keeps the production frozen surface minimal by default. Under kani the
 // blanket `pub use v16::*` above already covers these.

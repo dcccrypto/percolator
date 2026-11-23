@@ -3454,12 +3454,40 @@ impl V16Core {
         if available == 0 {
             return Ok(0);
         }
-        let rate = U256::from_u128(available)
-            .checked_mul(U256::from_u128(CREDIT_RATE_SCALE))
-            .and_then(|v| v.checked_div(U256::from_u128(state.positive_claim_bound_num)))
-            .and_then(|v| v.try_into_u128())
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        Self::source_credit_rate_num(available, state.positive_claim_bound_num)
+    }
+
+    /// min(floor(available * CREDIT_RATE_SCALE / positive_claim_bound_num), CREDIT_RATE_SCALE),
+    /// with positive_claim_bound_num != 0 (checked by the caller). The U256 multiply + divide
+    /// costs ~1.8k CU on SBF; when the product fits u128, `mul_div_floor_u128_or_wide` computes
+    /// the same quotient natively and otherwise runs the same U256 code with the same error.
+    /// Kani keeps the U256 code (dual-mode, like wide_math); tests/source_credit_rate_u128.rs
+    /// pins the two together.
+    #[inline]
+    fn source_credit_rate_num(available: u128, positive_claim_bound_num: u128) -> V16Result<u128> {
+        #[cfg(not(kani))]
+        let rate = Self::mul_div_floor_u128_or_wide(
+            available,
+            CREDIT_RATE_SCALE,
+            positive_claim_bound_num,
+        )?;
+        #[cfg(kani)]
+        let rate = Self::source_credit_rate_num_wide(available, positive_claim_bound_num)?;
         Ok(core::cmp::min(rate, CREDIT_RATE_SCALE))
+    }
+
+    /// The original U256 computation (before the cap): the Kani path above and the
+    /// differential-test reference.
+    #[cfg(any(kani, feature = "fuzz"))]
+    fn source_credit_rate_num_wide(
+        available: u128,
+        positive_claim_bound_num: u128,
+    ) -> V16Result<u128> {
+        U256::from_u128(available)
+            .checked_mul(U256::from_u128(CREDIT_RATE_SCALE))
+            .and_then(|v| v.checked_div(U256::from_u128(positive_claim_bound_num)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)
     }
 
     fn validate_source_credit_state_shape_static(state: SourceCreditStateV16) -> V16Result<()> {
@@ -4245,11 +4273,9 @@ impl V16Core {
         if denominator == 0 || available >= denominator {
             return Ok(CREDIT_RATE_SCALE);
         }
-        let rate = U256::from_u128(available)
-            .checked_mul(U256::from_u128(CREDIT_RATE_SCALE))
-            .and_then(|v| v.checked_div(U256::from_u128(denominator)))
-            .and_then(|v| v.try_into_u128())
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        // denominator != 0 and available < denominator, so the rate is below CREDIT_RATE_SCALE
+        // and the helper's cap does not change it.
+        let rate = Self::source_credit_rate_num(available, denominator)?;
         Ok(core::cmp::min(
             CREDIT_RATE_SCALE,
             core::cmp::max(state.credit_rate_num, rate),
@@ -4418,6 +4444,27 @@ pub fn kani_validate_positive_pnl_source_attribution(
     source_claim_sum_num: u128,
 ) -> V16Result<()> {
     V16Core::validate_positive_pnl_source_attribution(pnl, source_claim_sum_num)
+}
+
+/// Test hooks for tests/source_credit_rate_u128.rs (`--features fuzz`): the production rate
+/// (u128 path) and the original U256 computation, both capped at CREDIT_RATE_SCALE. Only for
+/// positive_claim_bound_num != 0 (the caller returns early at 0; there the two report different
+/// errors, InvalidConfig vs ArithmeticOverflow, and neither is reachable).
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn source_credit_rate_num_for_test(
+    available: u128,
+    positive_claim_bound_num: u128,
+) -> V16Result<u128> {
+    V16Core::source_credit_rate_num(available, positive_claim_bound_num)
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn source_credit_rate_num_wide_reference_for_test(
+    available: u128,
+    positive_claim_bound_num: u128,
+) -> V16Result<u128> {
+    let rate = V16Core::source_credit_rate_num_wide(available, positive_claim_bound_num)?;
+    Ok(core::cmp::min(rate, CREDIT_RATE_SCALE))
 }
 
 #[cfg(kani)]
