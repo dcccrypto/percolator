@@ -43,8 +43,9 @@ fn empty_encoding_and_every_single_byte_change() {
             }
         }
     }
-    // inactive non-empty images decode to HiddenLeg; only a flipped active byte decodes non-empty
-    assert!(decoded_non_empty <= 4, "{decoded_non_empty}");
+    // no single-byte change of the empty encoding decodes to a non-empty leg: inactive ones are
+    // refused (HiddenLeg / InvalidConfig), active=1 fails validate_active_leg (loss_weight 0)
+    assert_eq!(decoded_non_empty, 0);
 }
 
 #[test]
