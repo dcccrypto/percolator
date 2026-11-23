@@ -26,7 +26,9 @@ use percolator::v16::{
     kani_loss_stale_trade_scope_allowed, kani_mark_kf_stale_cohorts,
     kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_change_requires_unit_adl, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_refresh_detached_selected_leg,
+    kani_prepare_asset_recovery_transition, kani_provider_protection_floor_observe,
+    kani_provider_protection_floor_shift, kani_provider_protection_num,
+    kani_refresh_detached_selected_leg,
     kani_select_auto_crank_plan, kani_settle_kf_stale_cohort,
     kani_settle_resolved_pnl_after_booking, kani_should_clear_prior_reset_obligation,
     kani_source_claim_domain_first_burn_partition,
@@ -4488,7 +4490,9 @@ fn proof_v16_live_market_shape_rejects_long_short_oi_mismatch() {
     asset.oi_eff_long_q = long_units_raw as u128 * POS_SCALE;
     asset.oi_eff_short_q = short_units_raw as u128 * POS_SCALE;
     asset.loss_weight_sum_long = long_units_raw as u128 * POS_SCALE;
+    asset.raw_basis_sum_long_q = long_units_raw as u128 * POS_SCALE;
     asset.loss_weight_sum_short = short_units_raw as u128 * POS_SCALE;
+    asset.raw_basis_sum_short_q = short_units_raw as u128 * POS_SCALE;
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -6568,6 +6572,374 @@ fn proof_v16_public_counterparty_backing_withdraw_rejects_underbacking_source_cl
     assert_eq!(result, Err(V16Error::LockActive));
 }
 
+// ---------------------------------------------------------------------------
+// Provider-protection floor (percolator-prog#382; upstream e18a3b98).
+//
+// Provider protection of a source domain is min(P, R - exact claims), floored at
+// 0, with P the provider principal and R the fresh reserved backing. The engine
+// keeps the lowest protection a domain has had, moved only by the provider's own
+// deposits and principal withdrawals.
+
+// The protection kernel, for all inputs: it never exceeds principal or the
+// backing beyond the claims; a realization (the same amount leaves the backing
+// and the claims) does not move it; a loser payment (backing rises) and a burnt
+// claim never lower it; a new claim never raises it.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_provider_protection_kernel_laws() {
+    let principal: u128 = kani::any();
+    let reserved: u128 = kani::any();
+    let claim: u128 = kani::any();
+    let protection = kani_provider_protection_num(principal, reserved, claim);
+    assert!(protection <= principal);
+    assert!(protection <= reserved.saturating_sub(claim));
+    assert!(protection == principal || protection == reserved.saturating_sub(claim));
+
+    let realized: u128 = kani::any();
+    kani::assume(realized <= reserved && realized <= claim);
+    assert_eq!(
+        kani_provider_protection_num(principal, reserved - realized, claim - realized),
+        protection
+    );
+
+    let paid: u128 = kani::any();
+    kani::assume(paid <= u128::MAX - reserved);
+    let refilled = kani_provider_protection_num(principal, reserved + paid, claim);
+    assert!(refilled >= protection && refilled <= principal);
+    kani::cover!(refilled > protection, "a loser payment refills protection");
+    kani::cover!(
+        refilled == protection && paid != 0 && protection == principal,
+        "a loser payment beyond the principal is not protection"
+    );
+
+    let claimed: u128 = kani::any();
+    kani::assume(claimed <= u128::MAX - claim);
+    let fronted = kani_provider_protection_num(principal, reserved, claim + claimed);
+    assert!(fronted <= protection);
+    kani::cover!(
+        fronted < protection,
+        "a new claim is fronted by the provider"
+    );
+    kani::cover!(
+        fronted == protection && claimed != 0 && protection != 0,
+        "a new claim inside the loser-paid backing costs the provider nothing"
+    );
+}
+
+// The floor is a running minimum: an observation never raises it, lowers it
+// exactly to a protection below it, and the result of several observations is
+// the least of the floor and the protections, in any order. So a refill
+// (a higher protection) leaves it, and spending the refill down to it leaves it.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_provider_protection_floor_is_a_running_minimum() {
+    let floor: u128 = kani::any();
+    let first: u128 = kani::any();
+    let second: u128 = kani::any();
+    let after_first = kani_provider_protection_floor_observe(floor, first);
+    let after_both = kani_provider_protection_floor_observe(after_first, second);
+    assert!(after_first <= floor && after_both <= after_first);
+    assert_eq!(after_both, floor.min(first).min(second));
+    assert_eq!(
+        after_both,
+        kani_provider_protection_floor_observe(
+            kani_provider_protection_floor_observe(floor, second),
+            first
+        )
+    );
+    assert_eq!(
+        kani_provider_protection_floor_observe(after_both, second),
+        after_both
+    );
+    // loss, refill above the floor, the refill spent again: the low is recorded once
+    if first < floor && second > first {
+        assert_eq!(after_both, first);
+        assert_eq!(
+            kani_provider_protection_floor_observe(after_both, first),
+            first
+        );
+    }
+    kani::cover!(
+        first < floor && second > first,
+        "a refilled low stays recorded"
+    );
+}
+
+// Upstream's `kani::ensures` contract of kernel_provider_protection_floor_shift
+// (this fork has no `contracts` feature), for all u128 inputs: a deposit raises
+// the floor by exactly the amount or saturates at u128::MAX; a withdrawal lowers
+// it by exactly the amount or leaves zero.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_provider_protection_floor_shift_contract() {
+    let floor: u128 = kani::any();
+    let amount: u128 = kani::any();
+    let raised = kani_provider_protection_floor_shift(floor, amount, true);
+    assert!(raised >= floor && (raised - floor == amount || raised == u128::MAX));
+    let lowered = kani_provider_protection_floor_shift(floor, amount, false);
+    assert!(lowered <= floor && (floor - lowered == amount || lowered == 0));
+    kani::cover!(raised == u128::MAX && raised - floor != amount, "a deposit saturates");
+    kani::cover!(lowered == 0 && floor - lowered != amount, "a withdrawal beyond the floor");
+}
+
+// A provider deposit and a principal withdrawal move the floor with the
+// principal. From a floor at or below the protection: after a deposit of x the
+// floor is x higher, still at or below the protection whenever the backing
+// covered the claims, and the loss on record (principal less floor) is what it
+// was; after a withdrawal of y that leaves the claims covered, which the
+// withdrawal gate requires, the floor is y lower or zero, still at or below the
+// protection, and the loss on record is what it was whenever the floor covered
+// the withdrawal.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_provider_flows_move_the_floor_with_the_principal() {
+    let principal: u128 = kani::any::<u64>() as u128;
+    let reserved: u128 = kani::any::<u64>() as u128;
+    let claim: u128 = kani::any::<u64>() as u128;
+    let floor: u128 = kani::any::<u64>() as u128;
+    let amount: u128 = kani::any::<u64>() as u128;
+    let protection = kani_provider_protection_num(principal, reserved, claim);
+    kani::assume(floor <= protection);
+
+    let raised = kani_provider_protection_floor_shift(floor, amount, true);
+    assert_eq!(raised, floor + amount);
+    assert_eq!((principal + amount) - raised, principal - floor);
+    if reserved >= claim {
+        assert!(
+            raised <= kani_provider_protection_num(principal + amount, reserved + amount, claim)
+        );
+    }
+    kani::cover!(
+        reserved < claim && amount != 0,
+        "a deposit into a domain whose claims exceed its backing is partly taken at once"
+    );
+
+    kani::assume(amount <= reserved && reserved - amount >= claim);
+    let principal_after = principal.saturating_sub(amount);
+    let lowered = kani_provider_protection_floor_shift(floor, amount, false);
+    assert_eq!(lowered, floor.saturating_sub(amount));
+    assert!(lowered <= kani_provider_protection_num(principal_after, reserved - amount, claim));
+    if amount <= floor {
+        assert_eq!(principal_after - lowered, principal - floor);
+    }
+    kani::cover!(
+        amount > floor && amount != 0,
+        "a withdrawal beyond the floor leaves zero"
+    );
+    kani::cover!(
+        amount <= floor && amount != 0 && floor < principal,
+        "a withdrawal with a loss on record"
+    );
+}
+
+// The provider exit, with the floor: under a new view the route brings the stored
+// floor up to date from the state it finds, exactly once although it changes the
+// domain's backing and then its principal, and then lowers it by the withdrawal. Backing
+// 1..=4 with exact claims 0..=backing at the full rate, any principal and any
+// stored floor 0..=6 (so also a stored floor above the protection, which is what
+// an earlier view leaves when its last write lowered protection), withdrawal
+// 1..=backing. A refused withdrawal touches nothing, the floor included.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_backing_withdraw_brings_the_floor_up_to_date_once_then_lowers_it() {
+    let backing_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    let principal_raw: u8 = kani::any();
+    let floor_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    kani::assume((1..=4).contains(&backing_raw));
+    kani::assume(claim_raw <= backing_raw);
+    kani::assume(principal_raw <= 6 && floor_raw <= 6);
+    kani::assume((1..=4).contains(&withdraw_raw) && withdraw_raw <= backing_raw);
+    let backing_num = backing_raw as u128 * BOUND_SCALE;
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let principal_num = principal_raw as u128 * BOUND_SCALE;
+    let floor_num = floor_raw as u128 * BOUND_SCALE;
+    let withdraw = withdraw_raw as u128;
+    let withdraw_num = withdraw * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(backing_raw as u128 + claim_raw as u128);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.pnl_pos_tot = V16PodU128::new(claim_raw as u128);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim_raw as u128);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.provider_principal_long = V16PodU128::new(principal_num);
+    markets[0].engine.provider_protection_floor_long_num = V16PodU128::new(floor_num);
+    let h0 = header;
+    let s0 = markets[0].engine;
+    assert_eq!(
+        MarketGroupV16ViewMut::new(&mut header, &mut markets).validate_shape(),
+        Ok(())
+    );
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .withdraw_fresh_counterparty_backing_not_atomic(0, withdraw);
+
+    let protection_before = principal_num.min(backing_num - claim_num);
+    let covered_after = backing_raw - withdraw_raw >= claim_raw;
+    kani::cover!(
+        covered_after && floor_num > protection_before,
+        "a stored floor above the protection is lowered to it first"
+    );
+    kani::cover!(
+        covered_after && floor_num <= protection_before && floor_num >= withdraw_num,
+        "a floor that is up to date falls by the withdrawal"
+    );
+    kani::cover!(
+        covered_after && floor_num.min(protection_before) < withdraw_num,
+        "a withdrawal beyond the floor leaves zero"
+    );
+    kani::cover!(!covered_after, "the claim watermark refuses");
+    if covered_after {
+        assert_eq!(result, Ok(()));
+        let engine = &markets[0].engine;
+        assert_eq!(
+            engine.provider_protection_floor_long_num.get(),
+            floor_num
+                .min(protection_before)
+                .saturating_sub(withdraw_num)
+        );
+        // v2.2: a withdrawal that empties the bucket also resets the S10 principal mirror
+        // (`set_backing_bucket_for_domain`, wholly-empty reset).
+        let principal_after = if withdraw_raw == backing_raw {
+            0
+        } else {
+            principal_num.saturating_sub(withdraw_num)
+        };
+        assert_eq!(engine.provider_principal_long.get(), principal_after);
+        // What a reader sees afterwards is at or below the protection that is left.
+        let (protection_after, floor_seen) =
+            engine.provider_protection_and_floor_num(SideV16::Long);
+        assert_eq!(
+            protection_after,
+            principal_after.min(backing_num - withdraw_num - claim_num)
+        );
+        assert_eq!(floor_seen, engine.provider_protection_floor_long_num.get());
+        // The twin domain is not touched.
+        assert!(
+            engine.provider_protection_floor_short_num.get() == 0
+                && engine.source_credit_short == s0.source_credit_short
+        );
+    } else {
+        assert_eq!(result, Err(V16Error::LockActive));
+        assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &s0,
+            &markets[0].engine
+        ));
+    }
+}
+
+// The provider deposit, with the floor: the stored floor is brought up to date
+// from the state the view finds, once, and then raised by the deposit, so the
+// deposit is protected in full and no earlier loss is forgotten. Backing 0..=4
+// (0 is the empty bucket) with exact claims up to the backing, any principal and
+// stored floor 0..=6, deposit 1..=4.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_backing_deposit_brings_the_floor_up_to_date_once_then_raises_it() {
+    let backing_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    let principal_raw: u8 = kani::any();
+    let floor_raw: u8 = kani::any();
+    let deposit_raw: u8 = kani::any();
+    kani::assume(backing_raw <= 4 && claim_raw <= backing_raw);
+    kani::assume(principal_raw <= 6 && floor_raw <= 6);
+    kani::assume((1..=4).contains(&deposit_raw));
+    let backing_num = backing_raw as u128 * BOUND_SCALE;
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let principal_num = principal_raw as u128 * BOUND_SCALE;
+    let floor_num = floor_raw as u128 * BOUND_SCALE;
+    let deposit = deposit_raw as u128;
+    let deposit_num = deposit * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(backing_raw as u128 + claim_raw as u128);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.pnl_pos_tot = V16PodU128::new(claim_raw as u128);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim_raw as u128);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    if backing_raw != 0 {
+        markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            fresh_unliened_backing_num: backing_num,
+            expiry_slot: 10,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+        markets[0].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                positive_claim_bound_num: claim_num,
+                exact_positive_claim_num: claim_num,
+                fresh_reserved_backing_num: backing_num,
+                credit_rate_num: CREDIT_RATE_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            });
+    }
+    markets[0].engine.provider_principal_long = V16PodU128::new(principal_num);
+    markets[0].engine.provider_protection_floor_long_num = V16PodU128::new(floor_num);
+    assert_eq!(
+        MarketGroupV16ViewMut::new(&mut header, &mut markets).validate_shape(),
+        Ok(())
+    );
+
+    MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .deposit_fresh_counterparty_backing_not_atomic(0, deposit, 10)
+        .unwrap();
+
+    let protection_before = principal_num.min(backing_num - claim_num);
+    kani::cover!(
+        floor_num > protection_before,
+        "a stored floor above the protection is lowered to it before the deposit is added"
+    );
+    kani::cover!(
+        floor_num < protection_before,
+        "a loss on record is still on record after the deposit"
+    );
+    let engine = &markets[0].engine;
+    assert_eq!(
+        engine.provider_protection_floor_long_num.get(),
+        floor_num.min(protection_before) + deposit_num
+    );
+    assert_eq!(
+        engine.provider_principal_long.get(),
+        principal_num + deposit_num
+    );
+    let (protection_after, floor_seen) = engine.provider_protection_and_floor_num(SideV16::Long);
+    assert_eq!(protection_after, protection_before + deposit_num);
+    assert_eq!(floor_seen, engine.provider_protection_floor_long_num.get());
+    assert_eq!(
+        header.vault.get(),
+        backing_raw as u128 + claim_raw as u128 + deposit
+    );
+    assert_eq!(engine.provider_protection_floor_short_num.get(), 0);
+}
+
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
@@ -7119,6 +7491,7 @@ fn proof_v16_retire_nonempty_asset_rejects() {
     asset.oi_eff_long_q = units_raw as u128 * POS_SCALE;
     asset.stored_pos_count_long = 1;
     asset.loss_weight_sum_long = units_raw as u128 * POS_SCALE;
+    asset.raw_basis_sum_long_q = units_raw as u128 * POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -9519,7 +9892,9 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
@@ -9576,7 +9951,9 @@ fn proof_v16_price_move_cap_rejects_before_accrual_mutation() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let header_before = header;
     let market_before = markets[0];
@@ -9611,7 +9988,9 @@ fn proof_v16_funding_rate_cap_rejects_before_accrual_mutation() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let header_before = header;
     let market_before = markets[0];
@@ -9682,7 +10061,9 @@ fn proof_v16_live_residual_booking_to_loss_bearing_side_is_bounded_and_exact() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     asset.social_loss_remainder_short_num = rem;
     let b_short_before = asset.b_short_num;
 
@@ -9742,7 +10123,9 @@ fn proof_v16_bankruptcy_residual_capacity_is_nonzero_and_bounded_with_headroom()
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     asset.social_loss_remainder_short_num = rem_raw as u128;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
 
@@ -9782,7 +10165,9 @@ fn proof_v16_liquidation_preflight_accepts_only_fully_durable_residual() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let header_before = header;
     let market_before = markets[0];
@@ -9825,7 +10210,9 @@ fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_reco
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
@@ -15924,6 +16311,7 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
             asset.stored_pos_count_long = stored_count;
             asset.pending_obligation_count_long = 0;
             asset.loss_weight_sum_long = loss_weight;
+            asset.raw_basis_sum_long_q = loss_weight;
             asset.social_loss_remainder_long_num = remainder;
             asset.social_loss_dust_long_num = dust;
             asset.explicit_unallocated_loss_long = explicit_loss;
@@ -15939,6 +16327,7 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
             asset.stored_pos_count_short = stored_count;
             asset.pending_obligation_count_short = 0;
             asset.loss_weight_sum_short = loss_weight;
+            asset.raw_basis_sum_short_q = loss_weight;
             asset.social_loss_remainder_short_num = remainder;
             asset.social_loss_dust_short_num = dust;
             asset.explicit_unallocated_loss_short = explicit_loss;
@@ -15967,6 +16356,7 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
             expected_reset.f_long_num = 0;
             expected_reset.b_long_num = 0;
             expected_reset.loss_weight_sum_long = 0;
+            expected_reset.raw_basis_sum_long_q = 0;
             expected_reset.social_loss_remainder_long_num = 0;
             expected_reset.social_loss_dust_long_num = normalized_dust;
             expected_reset.explicit_unallocated_loss_long = normalized_explicit;
@@ -15982,6 +16372,7 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
             expected_reset.f_short_num = 0;
             expected_reset.b_short_num = 0;
             expected_reset.loss_weight_sum_short = 0;
+            expected_reset.raw_basis_sum_short_q = 0;
             expected_reset.social_loss_remainder_short_num = 0;
             expected_reset.social_loss_dust_short_num = normalized_dust;
             expected_reset.explicit_unallocated_loss_short = normalized_explicit;
@@ -16894,7 +17285,9 @@ fn proof_v16_canonical_accrual_path_is_partition_invariant() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     delayed_markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let mut split_header = delayed_header;
     let mut split_markets = delayed_markets;
@@ -20531,6 +20924,32 @@ fn proof_v16_asset_wire_only_validation_matches_full_decode() {
     kani::cover!(full.is_ok(), "valid image");
     kani::cover!(full.is_err(), "invalid image");
     assert_eq!(asset.validate_wire_only().err(), full.err());
+}
+
+/// For every leg image that decodes, the decoded leg is empty exactly when the raw image is the
+/// empty encoding, so `validate_with_market` / the refresh loop can test the raw bytes instead of
+/// the 22 decoded fields. `active == 1` images are not decoded here (that would run
+/// `validate_active_leg`'s wide arithmetic): there `leg.active` is true, so `is_empty()` is false,
+/// and `is_empty_encoding()` is false because it requires `active == 0`.
+#[kani::proof]
+#[kani::unwind(220)]
+#[kani::solver(cadical)]
+fn proof_v16_decoded_leg_is_empty_matches_encoding() {
+    let image: [u8; core::mem::size_of::<PortfolioLegV16Account>()] = kani::any();
+    let leg: PortfolioLegV16Account = bytemuck::pod_read_unaligned(&image);
+    if leg.active == 1 {
+        kani::cover!(true, "active image");
+        assert!(!leg.is_empty_encoding());
+        return;
+    }
+    match leg.try_to_runtime() {
+        Ok(decoded) => {
+            kani::cover!(decoded.is_empty(), "inactive image that decodes");
+            let raw_empty = percolator::v16::decoded_leg_slot_is_empty_for_test(&leg);
+            assert_eq!(decoded.is_empty(), raw_empty);
+        }
+        Err(_) => kani::cover!(!leg.is_empty_encoding(), "inactive non-empty image is refused"),
+    }
 }
 
 // INV-045 (program charter): the path accrual moves the mark toward its target by at most

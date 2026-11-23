@@ -84,6 +84,25 @@ pub fn bound_num_is_atom_aligned_for_test(value: u128) -> bool {
     bound_num_is_atom_aligned(value)
 }
 
+/// `a * b / denominator` when one factor equals the (non-zero) denominator: the other factor,
+/// exactly, for floor and ceil alike, and it always fits u128. `None` otherwise. Used by the u128
+/// mul-div helpers before any multiply or divide.
+#[inline(always)]
+fn mul_div_cancelled_factor(a: u128, b: u128, denominator: u128) -> Option<u128> {
+    if b == denominator {
+        Some(a)
+    } else if a == denominator {
+        Some(b)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn mul_div_cancelled_factor_for_test(a: u128, b: u128, denominator: u128) -> Option<u128> {
+    mul_div_cancelled_factor(a, b, denominator)
+}
+
 pub fn backing_domain_fee_split_for_lien_delta_num(
     lien_delta_num: u128,
     fee_bps: u16,
@@ -1075,6 +1094,10 @@ fn add_open_interest_for_new_position(
                 .oi_eff_long_q
                 .checked_add(abs_q)
                 .ok_or(V16Error::ArithmeticOverflow)?;
+            asset.raw_basis_sum_long_q = asset
+                .raw_basis_sum_long_q
+                .checked_add(abs_q)
+                .ok_or(V16Error::ArithmeticOverflow)?;
             asset.loss_weight_sum_long = asset
                 .loss_weight_sum_long
                 .checked_add(loss_weight)
@@ -1087,6 +1110,10 @@ fn add_open_interest_for_new_position(
                 .ok_or(V16Error::CounterOverflow)?;
             asset.oi_eff_short_q = asset
                 .oi_eff_short_q
+                .checked_add(abs_q)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            asset.raw_basis_sum_short_q = asset
+                .raw_basis_sum_short_q
                 .checked_add(abs_q)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             asset.loss_weight_sum_short = asset
@@ -1129,10 +1156,16 @@ impl V16Core {
         if denominator == 0 {
             return Err(V16Error::InvalidConfig);
         }
+        // The common case is an unscaled ADL index (current_a == a_basis): no software divide.
+        if let Some(value) = mul_div_cancelled_factor(a, b, denominator) {
+            return Ok(value);
+        }
         if let Some(product) = a.checked_mul(b) {
             let quotient = product / denominator;
+            // quotient * denominator <= product, so the multiply is exact; comparing it with the
+            // product is the remainder test without a second software divide (`__umodti3`).
             return quotient
-                .checked_add(u128::from(product % denominator != 0))
+                .checked_add(u128::from(quotient.wrapping_mul(denominator) != product))
                 .ok_or(V16Error::ArithmeticOverflow);
         }
         checked_mul_div_ceil_u256(
@@ -1434,10 +1467,14 @@ impl V16Core {
     ) -> V16Result<(PortfolioLegV16, AssetStateV16)> {
         let mut leg = leg;
         let mut asset = asset;
+        let old_raw_abs = leg.basis_pos_q.unsigned_abs();
+        let new_raw_abs = new_signed.unsigned_abs();
         match leg.side {
             SideV16::Long => {
                 asset.oi_eff_long_q =
                     adjust_u128(asset.oi_eff_long_q, old_effective_abs, new_effective_abs)?;
+                asset.raw_basis_sum_long_q =
+                    adjust_u128(asset.raw_basis_sum_long_q, old_raw_abs, new_raw_abs)?;
                 if !preserve_pending_obligation_weight {
                     asset.loss_weight_sum_long =
                         adjust_u128(asset.loss_weight_sum_long, leg.loss_weight, new_weight)?;
@@ -1446,6 +1483,8 @@ impl V16Core {
             SideV16::Short => {
                 asset.oi_eff_short_q =
                     adjust_u128(asset.oi_eff_short_q, old_effective_abs, new_effective_abs)?;
+                asset.raw_basis_sum_short_q =
+                    adjust_u128(asset.raw_basis_sum_short_q, old_raw_abs, new_raw_abs)?;
                 if !preserve_pending_obligation_weight {
                     asset.loss_weight_sum_short =
                         adjust_u128(asset.loss_weight_sum_short, leg.loss_weight, new_weight)?;
@@ -1742,8 +1781,8 @@ impl V16Core {
     }
 
     /// PRODUCTION KERNEL: the attach-leg core — snapshot the side's basis
-    /// anchors, gate the a-basis range, add open interest, and construct the
-    /// new leg. Pure on (AssetStateV16, scalars); the attach glue calls
+    /// anchors, require unit A, add open interest and raw basis, and construct
+    /// the new leg. Pure on (AssetStateV16, scalars); the attach glue calls
     /// exactly this. loss_weight is caller-supplied (division-bearing).
     pub(crate) fn kernel_attach_leg(
         mut asset: AssetStateV16,
@@ -1772,7 +1811,10 @@ impl V16Core {
                 asset.epoch_short,
             ),
         };
-        if !(MIN_A_SIDE..=ADL_ONE).contains(&a_basis) {
+        // A position opens only at unit A. `raw_basis_sum` and the A index
+        // derived from it rest on every current-epoch leg sharing this basis
+        // (upstream c030aa40, percolator-prog#449).
+        if a_basis != ADL_ONE {
             return Err(V16Error::InvalidLeg);
         }
         if loss_weight == 0 {
@@ -2019,11 +2061,18 @@ impl V16Core {
         {
             return Err(V16Error::InvalidLeg);
         }
+        // The leg's raw basis leaves the side's raw basis sum (#449); the
+        // caller re-derives the side A index afterwards.
+        let raw_abs_q = leg.basis_pos_q.unsigned_abs();
         match leg.side {
             SideV16::Long => {
                 asset.oi_eff_long_q = asset
                     .oi_eff_long_q
                     .checked_sub(retained_effective_oi_q)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                asset.raw_basis_sum_long_q = asset
+                    .raw_basis_sum_long_q
+                    .checked_sub(raw_abs_q)
                     .ok_or(V16Error::CounterUnderflow)?;
                 asset.pending_obligation_count_long = asset
                     .pending_obligation_count_long
@@ -2034,6 +2083,10 @@ impl V16Core {
                 asset.oi_eff_short_q = asset
                     .oi_eff_short_q
                     .checked_sub(retained_effective_oi_q)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                asset.raw_basis_sum_short_q = asset
+                    .raw_basis_sum_short_q
+                    .checked_sub(raw_abs_q)
                     .ok_or(V16Error::CounterUnderflow)?;
                 asset.pending_obligation_count_short = asset
                     .pending_obligation_count_short
@@ -2799,8 +2852,10 @@ impl V16Core {
     /// PRODUCTION KERNEL: the clear-leg asset transform — decrement the
     /// side's stored-position count (and pending-obligation count for a
     /// zero-basis obligation leg), and unless the leg predates a side reset,
-    /// fold its social-loss dust and remove its OI and loss weight. Pure on
-    /// (PortfolioLegV16, AssetStateV16); the clear-leg glue calls exactly this.
+    /// fold its social-loss dust and remove its OI, raw basis and loss weight.
+    /// Pure on (PortfolioLegV16, AssetStateV16); the clear-leg glue calls
+    /// exactly this and re-derives the side A index afterwards
+    /// (`kernel_sync_side_adl_index`, #449).
     pub(crate) fn kernel_clear_leg(
         leg: PortfolioLegV16,
         mut asset: AssetStateV16,
@@ -2867,6 +2922,10 @@ impl V16Core {
                         .oi_eff_long_q
                         .checked_sub(clear_effective_oi_q)
                         .ok_or(V16Error::CounterUnderflow)?;
+                    asset.raw_basis_sum_long_q = asset
+                        .raw_basis_sum_long_q
+                        .checked_sub(raw_abs_q)
+                        .ok_or(V16Error::CounterUnderflow)?;
                     asset.loss_weight_sum_long = asset
                         .loss_weight_sum_long
                         .checked_sub(leg.loss_weight)
@@ -2892,6 +2951,10 @@ impl V16Core {
                     asset.oi_eff_short_q = asset
                         .oi_eff_short_q
                         .checked_sub(clear_effective_oi_q)
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    asset.raw_basis_sum_short_q = asset
+                        .raw_basis_sum_short_q
+                        .checked_sub(raw_abs_q)
                         .ok_or(V16Error::CounterUnderflow)?;
                     asset.loss_weight_sum_short = asset
                         .loss_weight_sum_short
@@ -2960,6 +3023,7 @@ impl V16Core {
                 asset.f_long_num = 0;
                 asset.b_long_num = 0;
                 asset.loss_weight_sum_long = 0;
+                asset.raw_basis_sum_long_q = 0;
                 asset.a_long = ADL_ONE;
                 asset.epoch_long = asset
                     .epoch_long
@@ -2989,6 +3053,7 @@ impl V16Core {
                 asset.f_short_num = 0;
                 asset.b_short_num = 0;
                 asset.loss_weight_sum_short = 0;
+                asset.raw_basis_sum_short_q = 0;
                 asset.a_short = ADL_ONE;
                 asset.epoch_short = asset
                     .epoch_short
@@ -3132,6 +3197,9 @@ impl V16Core {
         if denominator == 0 {
             return Err(V16Error::InvalidConfig);
         }
+        if let Some(value) = mul_div_cancelled_factor(a, b, denominator) {
+            return Ok(value);
+        }
         if let Some(product) = a.checked_mul(b) {
             return Ok(product / denominator);
         }
@@ -3219,9 +3287,10 @@ impl V16Core {
     }
 
     /// Choose the largest retained raw basis whose conservative effective
-    /// quantity is `effective_abs_q`. This is the inverse used after a partial
-    /// reduction: `ceil(raw * current_a / a_basis) == effective` while the
-    /// account remains on the same side.
+    /// quantity is `effective_abs_q`: `ceil(raw * current_a / a_basis) ==
+    /// effective`. The position-delta plan uses it for same-side growth, which
+    /// is admitted only at unit A, where it returns `effective_abs_q` itself.
+    /// A same-side reduction uses `kernel_raw_basis_after_adl_reduction`.
     pub(crate) fn kernel_raw_basis_for_adl_effective_quantity(
         effective_abs_q: u128,
         a_basis: u128,
@@ -3238,6 +3307,170 @@ impl V16Core {
             return Err(V16Error::InvalidLeg);
         }
         Ok(raw_abs_q)
+    }
+
+    /// PRODUCTION KERNEL: the side A index implied by the side's two totals,
+    /// `floor(ADL_ONE * oi_eff / raw_basis_sum)`. Every current-epoch leg has
+    /// `a_basis == ADL_ONE`, so `raw_basis_sum * A / ADL_ONE` is the side's
+    /// exact exposure. Deriving A from the totals after every change, instead
+    /// of scaling the previous A, keeps that exposure within
+    /// `raw_basis_sum / ADL_ONE` of `oi_eff` (under a tenth of a raw unit at
+    /// `MAX_OI_SIDE_Q`) whatever the history of reductions (percolator-prog
+    /// #449; ported from upstream c030aa40).
+    ///
+    /// Upstream bounds a side's raw basis through its trade side-OI cap; this
+    /// fork checks `MAX_OI_SIDE_Q` only in the audit scan. A side whose raw
+    /// basis exceeds `ADL_ONE * oi_eff` (more than ten maximum-size legs at a
+    /// near-total haircut) is held at index 1, where its exact exposure
+    /// `raw_basis_sum / ADL_ONE` is above `oi_eff`. Porting the cap is a
+    /// follow-up.
+    ///
+    /// - No current-epoch basis: the index is unused and keeps its value, so a
+    ///   haircut side still shows `A != ADL_ONE` until it resets.
+    /// - `oi_eff == raw_basis_sum`: unit A, without a division.
+    /// - `oi_eff == 0` with basis left: the smallest valid index, 1. The side
+    ///   is exhausted and its legs own nothing.
+    ///
+    /// More effective OI than raw basis has no index (`A <= ADL_ONE`).
+    #[inline]
+    pub(crate) fn kernel_side_adl_index(
+        oi_eff_q: u128,
+        raw_basis_sum_q: u128,
+        current_a: u128,
+    ) -> V16Result<u128> {
+        if raw_basis_sum_q == 0 {
+            return Ok(current_a);
+        }
+        if oi_eff_q > raw_basis_sum_q {
+            return Err(V16Error::InvalidLeg);
+        }
+        if oi_eff_q == raw_basis_sum_q {
+            return Ok(ADL_ONE);
+        }
+        // `oi_eff < raw_basis_sum`; a checked product (an overflow needs an
+        // effective OI above 3e23 and fails closed).
+        let derived = ADL_ONE
+            .checked_mul(oi_eff_q)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            / raw_basis_sum_q;
+        Ok(derived.max(1))
+    }
+
+    /// PRODUCTION KERNEL: bring one side's A index in line with its totals
+    /// after its effective OI or raw basis changed. A side that keeps
+    /// effective OI at an index below `MIN_A_SIDE` becomes DrainOnly, as after
+    /// any deep haircut. Nothing else in the asset changes.
+    pub(crate) fn kernel_sync_side_adl_index(
+        mut asset: AssetStateV16,
+        side: SideV16,
+    ) -> V16Result<AssetStateV16> {
+        match side {
+            SideV16::Long => {
+                asset.a_long = Self::kernel_side_adl_index(
+                    asset.oi_eff_long_q,
+                    asset.raw_basis_sum_long_q,
+                    asset.a_long,
+                )?;
+                if asset.oi_eff_long_q != 0
+                    && asset.a_long < MIN_A_SIDE
+                    && asset.mode_long == SideModeV16::Normal
+                {
+                    asset.mode_long = SideModeV16::DrainOnly;
+                }
+            }
+            SideV16::Short => {
+                asset.a_short = Self::kernel_side_adl_index(
+                    asset.oi_eff_short_q,
+                    asset.raw_basis_sum_short_q,
+                    asset.a_short,
+                )?;
+                if asset.oi_eff_short_q != 0
+                    && asset.a_short < MIN_A_SIDE
+                    && asset.mode_short == SideModeV16::Normal
+                {
+                    asset.mode_short = SideModeV16::DrainOnly;
+                }
+            }
+        }
+        Ok(asset)
+    }
+
+    /// PRODUCTION KERNEL: the raw basis a leg keeps after a same-side
+    /// reduction of its effective quantity from `effective_abs_q` to
+    /// `next_effective_abs_q`, on a side with `oi_eff_q` effective OI and
+    /// `raw_basis_sum_q` raw basis (this leg's `raw_abs_q` included).
+    ///
+    /// The reduction takes `d = effective - next_effective` out of the side's
+    /// effective OI and the A index is then re-derived from the new totals
+    /// (`kernel_side_adl_index`), so the raw basis chosen here decides how the
+    /// rounding is shared with the side's other legs. Writing a leg's share
+    /// of the side as `raw * oi_eff / raw_basis_sum`, the result is the
+    /// largest raw basis for which
+    ///
+    /// - the leg's share falls by at least `d`, so the rounding is taken from
+    ///   the reducing leg and no other leg's share falls, and
+    /// - the leg's new share is at most `next_effective`, so its effective
+    ///   quantity does not end above the quantity it asked for,
+    ///
+    /// but never less than one unit (the leg stays open) and never less than
+    /// the side needs to carry its remaining effective OI (`A <= ADL_ONE`).
+    /// At unit A all of these coincide with `next_effective`.
+    ///
+    /// The earlier rule kept the largest raw basis whose own ceiling equalled
+    /// the target at the unchanged A. A leg could then give up less exposure
+    /// than the effective OI it removed, and the difference compounded across
+    /// reductions (percolator-prog #449).
+    pub(crate) fn kernel_raw_basis_after_adl_reduction(
+        raw_abs_q: u128,
+        effective_abs_q: u128,
+        next_effective_abs_q: u128,
+        oi_eff_q: u128,
+        raw_basis_sum_q: u128,
+    ) -> V16Result<u128> {
+        if next_effective_abs_q == 0
+            || next_effective_abs_q >= effective_abs_q
+            || effective_abs_q > oi_eff_q
+            || effective_abs_q > raw_abs_q
+            || oi_eff_q > raw_basis_sum_q
+            || raw_abs_q > raw_basis_sum_q
+        {
+            return Err(V16Error::InvalidLeg);
+        }
+        if oi_eff_q == raw_basis_sum_q {
+            // Unit A: every leg's raw basis is its effective quantity.
+            if effective_abs_q != raw_abs_q {
+                return Err(V16Error::InvalidLeg);
+            }
+            return Ok(next_effective_abs_q);
+        }
+        let reduce_q = effective_abs_q - next_effective_abs_q;
+        let oi_after = oi_eff_q - reduce_q;
+        let other_raw = raw_basis_sum_q - raw_abs_q;
+        // Every operand is at most `raw_basis_sum`; the products are checked
+        // and fail closed on overflow.
+        //
+        // Share falls by at least `reduce_q`: give up ceil(reduce * R / OI).
+        let given_up_num = reduce_q
+            .checked_mul(raw_basis_sum_q)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let raw_given_up = given_up_num / oi_eff_q + u128::from(given_up_num % oi_eff_q != 0);
+        let by_share = raw_abs_q.saturating_sub(raw_given_up);
+        // New share at most `next_effective`:
+        // raw * oi_after <= next_effective * (other_raw + raw).
+        let by_target = if oi_after > next_effective_abs_q {
+            next_effective_abs_q
+                .checked_mul(other_raw)
+                .ok_or(V16Error::ArithmeticOverflow)?
+                / (oi_after - next_effective_abs_q)
+        } else {
+            raw_abs_q
+        };
+        let side_floor = oi_after.saturating_sub(other_raw);
+        let next_raw = by_share.min(by_target).max(side_floor).max(1);
+        if next_raw >= raw_abs_q {
+            return Err(V16Error::InvalidLeg);
+        }
+        Ok(next_raw)
     }
 
     /// Applies the uncovered tail of a loss after source support has already
@@ -4219,6 +4452,54 @@ impl V16Core {
         (state.fresh_reserved_backing_num - state.valid_liened_backing_num)
             .checked_add(state.insurance_credit_reserved_num - insurance_encumbered)
             .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    /// PRODUCTION KERNEL: provider protection of a source domain, BOUND_SCALE-scaled: the
+    /// provider principal that is still the provider's own.
+    ///
+    /// Claims on a domain are paid from its fresh reserved backing, and the part of that
+    /// backing its losers paid in (`reserved - principal`) goes first. The provider is
+    /// therefore exposed to the exact claims beyond that part, and to principal that was
+    /// consumed and has not been repaid (`principal > reserved`). Both cases are
+    /// `min(principal, reserved - exact claims)`, floored at 0.
+    ///
+    /// Upstream (e18a3b98) states the postcondition as a `kani::ensures` contract behind its
+    /// `contracts` feature, which this fork does not have: out <= principal, out <= reserved -
+    /// claims (0 when the claims exceed the backing), and out is one of the two. It is asserted
+    /// over all u128 inputs by `proof_v16_provider_protection_kernel_laws`.
+    fn kernel_provider_protection_num(
+        provider_principal_num: u128,
+        fresh_reserved_backing_num: u128,
+        exact_positive_claim_num: u128,
+    ) -> u128 {
+        provider_principal_num
+            .min(fresh_reserved_backing_num.saturating_sub(exact_positive_claim_num))
+    }
+
+    /// PRODUCTION KERNEL: the provider-protection floor after observing a state whose
+    /// protection is `protection_num`. An observation never raises the floor, and lowers it
+    /// exactly to a protection below it. (Upstream's `kani::ensures` contract, out <= both
+    /// and equal to one of them, is asserted by
+    /// `proof_v16_provider_protection_floor_is_a_running_minimum`.)
+    fn kernel_provider_protection_floor_observe(floor_num: u128, protection_num: u128) -> u128 {
+        floor_num.min(protection_num)
+    }
+
+    /// PRODUCTION KERNEL: the provider-protection floor after the provider deposited
+    /// (`add`) or withdrew `amount_num` of principal. The floor moves with the principal,
+    /// so neither is recorded as a gain or a loss; a withdrawal beyond the floor leaves 0.
+    /// (Upstream's `kani::ensures` contract is asserted over all u128 inputs by
+    /// `proof_v16_provider_protection_floor_shift_contract`.)
+    fn kernel_provider_protection_floor_shift(
+        floor_num: u128,
+        amount_num: u128,
+        add: bool,
+    ) -> u128 {
+        if add {
+            floor_num.saturating_add(amount_num)
+        } else {
+            floor_num.saturating_sub(amount_num)
+        }
     }
 
     /// Claim bound that the domain's unliened backing is owed to: every claim except the
@@ -5290,6 +5571,30 @@ pub fn kani_available_backing_num_for_source_credit_state(
     state: SourceCreditStateV16,
 ) -> V16Result<u128> {
     V16Core::available_backing_num_for_source_credit_state(state)
+}
+
+// upstream e18a3b98: provider-protection floor kernels.
+#[cfg(kani)]
+pub fn kani_provider_protection_num(
+    provider_principal_num: u128,
+    fresh_reserved_backing_num: u128,
+    exact_positive_claim_num: u128,
+) -> u128 {
+    V16Core::kernel_provider_protection_num(
+        provider_principal_num,
+        fresh_reserved_backing_num,
+        exact_positive_claim_num,
+    )
+}
+
+#[cfg(kani)]
+pub fn kani_provider_protection_floor_observe(floor_num: u128, protection_num: u128) -> u128 {
+    V16Core::kernel_provider_protection_floor_observe(floor_num, protection_num)
+}
+
+#[cfg(kani)]
+pub fn kani_provider_protection_floor_shift(floor_num: u128, amount_num: u128, add: bool) -> u128 {
+    V16Core::kernel_provider_protection_floor_shift(floor_num, amount_num, add)
 }
 
 /// REALIZABILITY — the no-DoS auto-crank dispatch-seam invariant.
@@ -6692,6 +6997,12 @@ pub struct AssetStateV16 {
     pub b_epoch_start_short_num: u128,
     pub oi_eff_long_q: u128,
     pub oi_eff_short_q: u128,
+    /// Sum of `abs(basis_pos_q)` over the side's current-epoch legs. Every
+    /// such leg has `a_basis == ADL_ONE`, so the side's exact exposure is
+    /// `raw_basis_sum * A / ADL_ONE`, and `A` is derived from
+    /// `oi_eff / raw_basis_sum` (`kernel_side_adl_index`, #449).
+    pub raw_basis_sum_long_q: u128,
+    pub raw_basis_sum_short_q: u128,
     pub stored_pos_count_long: u64,
     pub stored_pos_count_short: u64,
     pub stale_account_count_long: u64,
@@ -6761,6 +7072,8 @@ impl Default for AssetStateV16 {
             b_epoch_start_short_num: 0,
             oi_eff_long_q: 0,
             oi_eff_short_q: 0,
+            raw_basis_sum_long_q: 0,
+            raw_basis_sum_short_q: 0,
             stored_pos_count_long: 0,
             stored_pos_count_short: 0,
             stale_account_count_long: 0,
@@ -7020,10 +7333,23 @@ pub struct MarketGroupV16View<'a, T> {
 pub struct MarketGroupV16ViewMut<'a, T> {
     pub header: &'a mut MarketGroupV16HeaderAccount,
     pub markets: &'a mut [Market<T>],
+    /// The source domains whose provider-protection floor this view has brought up to date
+    /// and that still have a floor above zero: the view records nothing more for them (see
+    /// `EngineAssetSlotV16Account::provider_protection_floor_long_num`). Not stored, so two
+    /// histories that differ only in how their calls are split over views leave the same
+    /// bytes unless a provider's protection was lower between two of the views.
+    ///
+    /// One entry per asset, filled from the front: the asset index plus one in the low
+    /// fourteen bits (zero is an empty entry) and one bit per side above them. The view lives
+    /// in the stack frame of whoever opened it, so this is two bytes an asset.
+    protection_observed: [u16; PROVIDER_PROTECTION_OBSERVED_ASSET_CAP],
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(core::mem::size_of::<MarketGroupV16ViewMut<'static, u8>>() == 24, "the S10 budget is a threaded &mut u8, never view state (SBF frame budget)");
+// header + markets (24 B) + the provider-protection observed set (upstream e18a3b98, 2 B per
+// asset for PROVIDER_PROTECTION_OBSERVED_ASSET_CAP assets). Nothing else: the S10 budget is a
+// threaded &mut u8, never view state (SBF frame budget).
+const _: () = assert!(core::mem::size_of::<MarketGroupV16ViewMut<'static, u8>>() == 24 + 2 * PROVIDER_PROTECTION_OBSERVED_ASSET_CAP, "the view is header + markets + the protection observed set; the S10 budget is a threaded &mut u8, never view state (SBF frame budget)");
 
 /// Moves the refresh crank may fire per instruction (+33k CU each).
 pub const S10_MAX_MOVES_PER_INSTRUCTION: u8 = 2;
@@ -7065,6 +7391,29 @@ pub fn adjust_slot_provider_principal(
     Ok(())
 }
 
+/// How many assets with a provider-protection floor one mutable view can change and still
+/// record each of their domains exactly once.
+///
+/// A transition that settles a portfolio changes source credit only in the assets of that
+/// portfolio's legs and of the domains its source roster names, and admission keeps the two
+/// together within `PORTFOLIO_SOURCE_DOMAIN_CAP` domains (a leg's favorable domain has a
+/// roster place reserved, and the domain its losses are paid into is the other side of the
+/// same asset). No public transition settles more than two portfolios, so twice the roster
+/// capacity covers every one of them. The terminal slab scan passes more assets under one
+/// view, and changes them only by expiring a lapsed bucket, after which the domain has no
+/// fresh backing and its protection is zero in the middle of the step as at its end.
+///
+/// Beyond the cap, and for an asset index above `PROVIDER_PROTECTION_OBSERVED_MAX_ASSET_INDEX`,
+/// a view forgets the domain: a later change of that view to it is observed again, which can
+/// only lower the floor.
+pub const PROVIDER_PROTECTION_OBSERVED_ASSET_CAP: usize = 2 * PORTFOLIO_SOURCE_DOMAIN_CAP;
+/// The largest asset index whose domains a mutable view can remember.
+pub const PROVIDER_PROTECTION_OBSERVED_MAX_ASSET_INDEX: usize =
+    PROVIDER_PROTECTION_OBSERVED_ASSET_MASK as usize - 1;
+const PROVIDER_PROTECTION_OBSERVED_ASSET_MASK: u16 = (1 << 14) - 1;
+const PROVIDER_PROTECTION_OBSERVED_LONG: u16 = 1 << 14;
+const PROVIDER_PROTECTION_OBSERVED_SHORT: u16 = 1 << 15;
+
 impl<'a, T> MarketGroupV16View<'a, T> {
     pub fn new(header: &'a MarketGroupV16HeaderAccount, markets: &'a [Market<T>]) -> Self {
         Self { header, markets }
@@ -7073,7 +7422,11 @@ impl<'a, T> MarketGroupV16View<'a, T> {
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     pub fn new(header: &'a mut MarketGroupV16HeaderAccount, markets: &'a mut [Market<T>]) -> Self {
-        Self { header, markets }
+        Self {
+            header,
+            markets,
+            protection_observed: [0; PROVIDER_PROTECTION_OBSERVED_ASSET_CAP],
+        }
     }
 
     pub fn as_view(&self) -> MarketGroupV16View<'_, T> {
@@ -7379,7 +7732,7 @@ impl<'a> PortfolioV16View<'a> {
             let bit = active_bitmap_get(bitmap, slot);
             let leg = self.header.legs[slot].try_to_runtime()?;
             if slot >= active_leg_cap {
-                if bit || !leg.is_empty() {
+                if bit || !decoded_leg_slot_is_empty(&self.header.legs[slot]) {
                     return Err(V16Error::HiddenLeg);
                 }
                 slot += 1;
@@ -7389,7 +7742,7 @@ impl<'a> PortfolioV16View<'a> {
                 return Err(V16Error::HiddenLeg);
             }
             if !leg.active {
-                if !leg.is_empty() {
+                if !decoded_leg_slot_is_empty(&self.header.legs[slot]) {
                     return Err(V16Error::HiddenLeg);
                 }
                 slot += 1;
@@ -8327,6 +8680,35 @@ impl PositionSlotMapV16 {
                 out.assets[slot] = leg.asset_index;
                 out.positions[slot] = signed_position(leg);
                 out.a_basis[slot] = leg.a_basis;
+            } else if leg.active || !decoded_leg_slot_is_empty(&account.header.legs[slot]) {
+                return Err(V16Error::HiddenLeg);
+            }
+            slot += 1;
+        }
+        Ok(out)
+    }
+
+    /// The pre-change loop (`!leg.is_empty()` on the decoded leg), kept verbatim as the reference
+    /// for tests/position_slot_map_from_account.rs.
+    #[cfg(all(not(kani), feature = "fuzz"))]
+    fn from_account_reference(account: &PortfolioV16View<'_>) -> V16Result<Self> {
+        let mut out = Self {
+            assets: [u32::MAX; V16_MAX_PORTFOLIO_ASSETS_N],
+            positions: [0; V16_MAX_PORTFOLIO_ASSETS_N],
+            a_basis: [0; V16_MAX_PORTFOLIO_ASSETS_N],
+        };
+        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let in_bitmap = active_bitmap_get(bitmap, slot);
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if in_bitmap {
+                if !leg.active || out.assets[..slot].contains(&leg.asset_index) {
+                    return Err(V16Error::HiddenLeg);
+                }
+                out.assets[slot] = leg.asset_index;
+                out.positions[slot] = signed_position(leg);
+                out.a_basis[slot] = leg.a_basis;
             } else if leg.active || !leg.is_empty() {
                 return Err(V16Error::HiddenLeg);
             }
@@ -8381,14 +8763,31 @@ impl PositionSlotMapV16 {
                     } else {
                         asset.a_short
                     };
-                    let mut next_abs = V16Core::kernel_raw_basis_for_adl_effective_quantity(
-                        next_effective_q.unsigned_abs(),
-                        self.a_basis[slot],
-                        current_a,
-                    )?;
-                    if next_effective_q.unsigned_abs() <= current_effective_q.unsigned_abs() {
-                        next_abs = next_abs.min(current_q.unsigned_abs());
-                    }
+                    let next_abs =
+                        if next_effective_q.unsigned_abs() < current_effective_q.unsigned_abs() {
+                            // A reduction shares its rounding with the side through
+                            // the re-derived A index (#449, upstream c030aa40).
+                            let (oi_eff_q, raw_basis_sum_q) = if next_effective_q > 0 {
+                                (asset.oi_eff_long_q, asset.raw_basis_sum_long_q)
+                            } else {
+                                (asset.oi_eff_short_q, asset.raw_basis_sum_short_q)
+                            };
+                            V16Core::kernel_raw_basis_after_adl_reduction(
+                                current_q.unsigned_abs(),
+                                current_effective_q.unsigned_abs(),
+                                next_effective_q.unsigned_abs(),
+                                oi_eff_q,
+                                raw_basis_sum_q,
+                            )?
+                        } else {
+                            // Growth is admitted only at unit A, where raw basis and
+                            // effective quantity coincide.
+                            V16Core::kernel_raw_basis_for_adl_effective_quantity(
+                                next_effective_q.unsigned_abs(),
+                                self.a_basis[slot],
+                                current_a,
+                            )?
+                        };
                     let next_abs =
                         i128::try_from(next_abs).map_err(|_| V16Error::ArithmeticOverflow)?;
                     if next_effective_q > 0 {
@@ -9732,6 +10131,8 @@ pub struct AssetStateV16Account {
     pub b_epoch_start_short_num: V16PodU128,
     pub oi_eff_long_q: V16PodU128,
     pub oi_eff_short_q: V16PodU128,
+    pub raw_basis_sum_long_q: V16PodU128,
+    pub raw_basis_sum_short_q: V16PodU128,
     pub stored_pos_count_long: V16PodU64,
     pub stored_pos_count_short: V16PodU64,
     pub stale_account_count_long: V16PodU64,
@@ -9791,6 +10192,8 @@ impl AssetStateV16Account {
             b_epoch_start_short_num: V16PodU128::new(value.b_epoch_start_short_num),
             oi_eff_long_q: V16PodU128::new(value.oi_eff_long_q),
             oi_eff_short_q: V16PodU128::new(value.oi_eff_short_q),
+            raw_basis_sum_long_q: V16PodU128::new(value.raw_basis_sum_long_q),
+            raw_basis_sum_short_q: V16PodU128::new(value.raw_basis_sum_short_q),
             stored_pos_count_long: V16PodU64::new(value.stored_pos_count_long),
             stored_pos_count_short: V16PodU64::new(value.stored_pos_count_short),
             stale_account_count_long: V16PodU64::new(value.stale_account_count_long),
@@ -9870,6 +10273,8 @@ impl AssetStateV16Account {
             b_epoch_start_short_num: self.b_epoch_start_short_num.get(),
             oi_eff_long_q: self.oi_eff_long_q.get(),
             oi_eff_short_q: self.oi_eff_short_q.get(),
+            raw_basis_sum_long_q: self.raw_basis_sum_long_q.get(),
+            raw_basis_sum_short_q: self.raw_basis_sum_short_q.get(),
             stored_pos_count_long: self.stored_pos_count_long.get(),
             stored_pos_count_short: self.stored_pos_count_short.get(),
             stale_account_count_long: self.stale_account_count_long.get(),
@@ -9955,6 +10360,33 @@ pub struct EngineAssetSlotV16Account {
     /// bucket, so a provider can end below where the base engine would have left it.
     pub provider_principal_long: V16PodU128,
     pub provider_principal_short: V16PodU128,
+    /// upstream e18a3b98 (percolator-prog#382): per source domain, BOUND_SCALE-scaled, the
+    /// provider-protection floor of the asset's current generation (`asset.market_id`; a
+    /// restarted or retired slot starts at zero). Appended LAST (+32 B per slot).
+    ///
+    /// Provider protection is the provider principal that neither a claim on the domain nor
+    /// an unrepaid consumption has taken: `min(P, R - exact claims)`, floored at 0, with `P`
+    /// the provider-principal mirror above (`provider_principal_{long,short}`) and `R` the
+    /// domain's fresh reserved backing. The floor is the lowest protection the domain has had
+    /// in any state a mutable view was opened on, moved only by what the provider itself did:
+    /// a deposit raises it by the deposit, a principal withdrawal lowers it by the withdrawal,
+    /// and nothing else raises it. A loss that a later loser payment refills is recorded once
+    /// and for good, and spending that refill again down to the floor records nothing.
+    ///
+    /// The stored value is brought up to date when a mutable view first changes what the
+    /// domain's protection is computed from, and it is brought up to date from the state the
+    /// earlier views left. A later change by the same view can see a half-done step (a trade
+    /// that closes a winner against its loser registers the gain before it receives the loss
+    /// that pays it), so it records nothing; the view remembers which domains it has done,
+    /// and nothing about that is stored. After a view's last change the stored value can
+    /// therefore be above the current protection: read it through
+    /// `provider_protection_floor_num`, which returns the lower of the two.
+    ///
+    /// Accounting only: it gates nothing, selects no recipient or amount and moves no value.
+    /// The wrapper's direct `adjust_slot_provider_principal` calls (vault-pot funding and
+    /// draws) do not move it.
+    pub provider_protection_floor_long_num: V16PodU128,
+    pub provider_protection_floor_short_num: V16PodU128,
 }
 
 /// fix/v21-funding-scale: per-side K/F drift generation, the state behind the O(1) bound on
@@ -10087,6 +10519,22 @@ fn slot_resolved_payout_blockers_v16(slot: &EngineAssetSlotV16Account) -> V16Res
         .ok_or(V16Error::CounterOverflow)
 }
 
+/// Which sides `begin_zero_oi_residue_resets` resets: zero effective OI, no pending
+/// obligation, not already ResetPending, and either a stored position or a scaled A index.
+fn zero_oi_reset_sides(asset: &AssetStateV16Account) -> V16Result<(bool, bool)> {
+    let (mode_long, mode_short) =
+        (decode_side_mode(asset.mode_long)?, decode_side_mode(asset.mode_short)?);
+    let reset_long = asset.oi_eff_long_q.get() == 0
+        && asset.pending_obligation_count_long.get() == 0
+        && mode_long != SideModeV16::ResetPending
+        && (asset.stored_pos_count_long.get() != 0 || asset.a_long.get() != ADL_ONE);
+    let reset_short = asset.oi_eff_short_q.get() == 0
+        && asset.pending_obligation_count_short.get() == 0
+        && mode_short != SideModeV16::ResetPending
+        && (asset.stored_pos_count_short.get() != 0 || asset.a_short.get() != ADL_ONE);
+    Ok((reset_long, reset_short))
+}
+
 pub trait MarketSlotV16View {
     fn engine_slot(&self) -> &EngineAssetSlotV16Account;
 }
@@ -10136,7 +10584,38 @@ impl EngineAssetSlotV16Account {
             && self.kf_pending_credit_long.get() == 0
             && self.kf_pending_credit_short.get() == 0
             && self.provider_principal_long.get() == 0
-            && self.provider_principal_short.get() == 0)
+            && self.provider_principal_short.get() == 0
+            && self.provider_protection_floor_long_num.get() == 0
+            && self.provider_protection_floor_short_num.get() == 0)
+    }
+
+    /// `(protection, floor)` of one of the asset's two source domains, BOUND_SCALE-scaled:
+    /// the provider protection of the stored state, and the provider-protection floor of the
+    /// asset's current generation, which is the stored floor or the protection if that is
+    /// lower (see `provider_protection_floor_long_num`). Reads four stored amounts and
+    /// validates nothing; for a state that passes the shape checks.
+    pub fn provider_protection_and_floor_num(&self, side: SideV16) -> (u128, u128) {
+        let (source, principal_num, floor_num) = match side {
+            SideV16::Long => (
+                &self.source_credit_long,
+                self.provider_principal_long.get(),
+                self.provider_protection_floor_long_num.get(),
+            ),
+            SideV16::Short => (
+                &self.source_credit_short,
+                self.provider_principal_short.get(),
+                self.provider_protection_floor_short_num.get(),
+            ),
+        };
+        let protection_num = V16Core::kernel_provider_protection_num(
+            principal_num,
+            source.fresh_reserved_backing_num.get(),
+            source.exact_positive_claim_num.get(),
+        );
+        (
+            protection_num,
+            V16Core::kernel_provider_protection_floor_observe(floor_num, protection_num),
+        )
     }
 
     fn validate_market_id_binding(&self) -> V16Result<()> {
@@ -10180,6 +10659,8 @@ impl EngineAssetSlotV16Account {
             kf_pending_credit_short: V16PodI128::new(0),
             provider_principal_long: V16PodU128::new(0),
             provider_principal_short: V16PodU128::new(0),
+            provider_protection_floor_long_num: V16PodU128::new(0),
+            provider_protection_floor_short_num: V16PodU128::new(0),
         }
     }
 
@@ -10244,6 +10725,8 @@ impl EngineAssetSlotV16Account {
             && asset.b_epoch_start_short_num.get() == 0
             && asset.oi_eff_long_q.get() == 0
             && asset.oi_eff_short_q.get() == 0
+            && asset.raw_basis_sum_long_q.get() == 0
+            && asset.raw_basis_sum_short_q.get() == 0
             && asset.stored_pos_count_long.get() == 0
             && asset.stored_pos_count_short.get() == 0
             && asset.stale_account_count_long.get() == 0
@@ -10300,6 +10783,8 @@ impl EngineAssetSlotV16Account {
             && asset.b_epoch_start_short_num == 0
             && asset.oi_eff_long_q == 0
             && asset.oi_eff_short_q == 0
+            && asset.raw_basis_sum_long_q == 0
+            && asset.raw_basis_sum_short_q == 0
             && asset.stored_pos_count_long == 0
             && asset.stored_pos_count_short == 0
             && asset.stale_account_count_long == 0
@@ -10846,6 +11331,8 @@ impl MarketGroupV16HeaderAccount {
             kf_pending_credit_short: V16PodI128::new(0),
             provider_principal_long: V16PodU128::new(0),
             provider_principal_short: V16PodU128::new(0),
+            provider_protection_floor_long_num: V16PodU128::new(0),
+            provider_protection_floor_short_num: V16PodU128::new(0),
         };
         self.next_market_id = V16PodU64::new(next_market_id);
         self.current_slot = V16PodU64::new(now_slot);
@@ -11223,10 +11710,85 @@ impl<'a, T> MarketGroupV16View<'a, T> {
             || (asset.oi_eff_short_q != 0 && asset.loss_weight_sum_short == 0)
             || (asset.loss_weight_sum_long != 0 && asset.stored_pos_count_long == 0)
             || (asset.loss_weight_sum_short != 0 && asset.stored_pos_count_short == 0)
+            || !Self::side_adl_totals_are_coherent(
+                asset.oi_eff_long_q,
+                asset.raw_basis_sum_long_q,
+                asset.a_long,
+                asset.loss_weight_sum_long,
+                asset.mode_long,
+            )
+            || !Self::side_adl_totals_are_coherent(
+                asset.oi_eff_short_q,
+                asset.raw_basis_sum_short_q,
+                asset.a_short,
+                asset.loss_weight_sum_short,
+                asset.mode_short,
+            )
         {
             return Err(V16Error::InvalidConfig);
         }
         Ok(())
+    }
+
+    /// One side's raw basis, effective OI and A index agree (#449): the raw
+    /// basis of the current-epoch legs is bounded by their loss weight and
+    /// carries all of the side's effective OI, and while there is raw basis
+    /// the A index is exactly the one derived from the two totals. A side
+    /// without current-epoch basis holds no effective OI except the unowned
+    /// residue `drop_unowned_side_oi` removes, and keeps whatever index it had.
+    ///
+    /// The index is checked against `kernel_side_adl_index` by multiplication
+    /// instead of by calling the kernel: `a` is `floor(n / r)` exactly when
+    /// `a * r <= n < (a + 1) * r`. That keeps the scan independent of the
+    /// kernel it audits and keeps a wide division out of every proof that
+    /// validates a market. `tests/adl_side_index_449.rs` holds the two
+    /// formulations equal. The three quantities are bounded far below 64
+    /// bits (`MAX_OI_SIDE_Q`, `ADL_ONE`); a side where one of them is not is
+    /// not coherent.
+    #[cfg(any(test, kani, feature = "audit-scan"))]
+    pub(crate) fn side_adl_totals_are_coherent(
+        oi_eff_q: u128,
+        raw_basis_sum_q: u128,
+        a_side: u128,
+        loss_weight_sum: u128,
+        mode: SideModeV16,
+    ) -> bool {
+        if raw_basis_sum_q > loss_weight_sum {
+            return false;
+        }
+        if raw_basis_sum_q == 0 {
+            return true;
+        }
+        if oi_eff_q > raw_basis_sum_q {
+            return false;
+        }
+        if mode == SideModeV16::Normal && oi_eff_q != 0 && a_side < MIN_A_SIDE {
+            return false;
+        }
+        if oi_eff_q == raw_basis_sum_q {
+            return a_side == ADL_ONE;
+        }
+        // `oi_eff < raw_basis_sum`: the index is `max(1, floor(ADL_ONE * oi_eff /
+        // raw_basis_sum))`, at least 1 and strictly below `ADL_ONE`.
+        let (Ok(raw), Ok(oi), Ok(a)) = (
+            u64::try_from(raw_basis_sum_q),
+            u64::try_from(oi_eff_q),
+            u64::try_from(a_side),
+        ) else {
+            return false;
+        };
+        if a == 0 || a_side >= ADL_ONE {
+            return false;
+        }
+        // `ADL_ONE < 2^50` and both factors of each product fit 64 bits, so
+        // neither product can overflow a u128.
+        let target = ADL_ONE * u128::from(oi);
+        if target < u128::from(raw) {
+            // The floor is zero; the index is held at its minimum.
+            return a == 1;
+        }
+        let low = u128::from(a) * u128::from(raw);
+        low <= target && target - low < u128::from(raw)
     }
 
     #[cfg(any(test, kani, feature = "audit-scan"))]
@@ -11597,6 +12159,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<()> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
         let old_source = self.source_credit_for_domain_shape(domain)?;
+        if source.fresh_reserved_backing_num != old_source.fresh_reserved_backing_num
+            || source.exact_positive_claim_num != old_source.exact_positive_claim_num
+        {
+            self.observe_provider_protection_before_change(
+                asset_index,
+                side,
+                old_source.fresh_reserved_backing_num,
+                old_source.exact_positive_claim_num,
+            );
+        }
         self.update_source_credit_aggregate_totals(old_source, source)?;
         let slot = self.markets[asset_index].engine_slot_mut();
         match side {
@@ -11608,6 +12180,152 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         Ok(())
+    }
+
+    /// Brings a domain's provider-protection floor up to date before this view first changes
+    /// what the domain's protection is computed from: its fresh reserved backing, its exact
+    /// claims or its provider principal. `fresh_reserved_backing_num` and
+    /// `exact_positive_claim_num` are the stored values. At a view's first change they are the
+    /// state earlier views left, which is a complete state. Later changes of the same view
+    /// record nothing, because a step can be half done between them: a trade that closes a
+    /// winner against its loser registers the gain and then receives the loss that pays it,
+    /// and lien face is consumed before its claim is burned. Either would read as a loss that
+    /// the next write takes back.
+    ///
+    /// Nothing but the floor is written, and only when it falls. A floor of zero cannot fall,
+    /// so a domain without one costs one read here.
+    #[inline(never)]
+    fn observe_provider_protection_before_change(
+        &mut self,
+        asset_index: usize,
+        side: SideV16,
+        fresh_reserved_backing_num: u128,
+        exact_positive_claim_num: u128,
+    ) {
+        let slot = self.markets[asset_index].engine_slot();
+        let (principal_num, floor_num) = match side {
+            SideV16::Long => (
+                slot.provider_principal_long.get(),
+                slot.provider_protection_floor_long_num.get(),
+            ),
+            SideV16::Short => (
+                slot.provider_principal_short.get(),
+                slot.provider_protection_floor_short_num.get(),
+            ),
+        };
+        if floor_num == 0 || self.provider_protection_is_observed(asset_index, side) {
+            return;
+        }
+        let observed_num = V16Core::kernel_provider_protection_floor_observe(
+            floor_num,
+            V16Core::kernel_provider_protection_num(
+                principal_num,
+                fresh_reserved_backing_num,
+                exact_positive_claim_num,
+            ),
+        );
+        if observed_num != floor_num {
+            let slot = self.markets[asset_index].engine_slot_mut();
+            match side {
+                SideV16::Long => {
+                    slot.provider_protection_floor_long_num = V16PodU128::new(observed_num)
+                }
+                SideV16::Short => {
+                    slot.provider_protection_floor_short_num = V16PodU128::new(observed_num)
+                }
+            }
+        }
+        if observed_num != 0 {
+            self.remember_provider_protection_observed(asset_index, side);
+        }
+    }
+
+    fn provider_protection_is_observed(&self, asset_index: usize, side: SideV16) -> bool {
+        let side_bit = match side {
+            SideV16::Long => PROVIDER_PROTECTION_OBSERVED_LONG,
+            SideV16::Short => PROVIDER_PROTECTION_OBSERVED_SHORT,
+        };
+        let mut i = 0usize;
+        while i < PROVIDER_PROTECTION_OBSERVED_ASSET_CAP && self.protection_observed[i] != 0 {
+            let entry = self.protection_observed[i];
+            if (entry & PROVIDER_PROTECTION_OBSERVED_ASSET_MASK) as usize == asset_index + 1 {
+                return entry & side_bit != 0;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn remember_provider_protection_observed(&mut self, asset_index: usize, side: SideV16) {
+        if asset_index > PROVIDER_PROTECTION_OBSERVED_MAX_ASSET_INDEX {
+            return;
+        }
+        let key = (asset_index + 1) as u16;
+        let side_bit = match side {
+            SideV16::Long => PROVIDER_PROTECTION_OBSERVED_LONG,
+            SideV16::Short => PROVIDER_PROTECTION_OBSERVED_SHORT,
+        };
+        let mut i = 0usize;
+        while i < PROVIDER_PROTECTION_OBSERVED_ASSET_CAP && self.protection_observed[i] != 0 {
+            if self.protection_observed[i] & PROVIDER_PROTECTION_OBSERVED_ASSET_MASK == key {
+                self.protection_observed[i] |= side_bit;
+                return;
+            }
+            i += 1;
+        }
+        if i < PROVIDER_PROTECTION_OBSERVED_ASSET_CAP {
+            self.protection_observed[i] = key | side_bit;
+        }
+    }
+
+    /// A provider deposit or principal withdrawal moves the provider-protection floor with
+    /// the principal. Called by exactly those two paths, after the source credit and the
+    /// principal moved (so the floor was brought up to date first): what the provider puts in
+    /// is protected until a claim takes it, and what it takes out is not a loss. Expiry and
+    /// impairment also take principal, and are losses: they do not call this.
+    fn shift_provider_protection_floor_num(
+        &mut self,
+        domain: usize,
+        amount_num: u128,
+        add: bool,
+    ) -> V16Result<()> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot_mut();
+        let floor = match side {
+            SideV16::Long => &mut slot.provider_protection_floor_long_num,
+            SideV16::Short => &mut slot.provider_protection_floor_short_num,
+        };
+        let shifted_num =
+            V16Core::kernel_provider_protection_floor_shift(floor.get(), amount_num, add);
+        *floor = V16PodU128::new(shifted_num);
+        // The provider's own step is done and the domain has been observed for this view: a
+        // later change of the view must not take the state in between as a low.
+        if shifted_num != 0 {
+            self.remember_provider_protection_observed(asset_index, side);
+        }
+        Ok(())
+    }
+
+    /// Provider protection of `domain` in the stored state, BOUND_SCALE-scaled (see
+    /// `EngineAssetSlotV16Account::provider_protection_floor_long_num`).
+    pub fn provider_protection_num(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        Ok(self.markets[asset_index]
+            .engine_slot()
+            .provider_protection_and_floor_num(side)
+            .0)
+    }
+
+    /// Provider-protection floor of `domain` for its asset's current generation,
+    /// BOUND_SCALE-scaled: the lowest protection the domain has had, net of the provider's own
+    /// deposits and withdrawals (see
+    /// `EngineAssetSlotV16Account::provider_protection_floor_long_num`).
+    pub fn provider_protection_floor_num(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        Ok(self.markets[asset_index]
+            .engine_slot()
+            .provider_protection_and_floor_num(side)
+            .1)
     }
 
     fn backing_bucket_for_domain(&self, domain: usize) -> V16Result<BackingBucketV16> {
@@ -11644,13 +12362,35 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
         let old_bucket = self.backing_bucket_for_domain(domain)?;
         self.update_backing_aggregate_totals(old_bucket, bucket)?;
-        let slot = self.markets[asset_index].engine_slot_mut();
-        let account = BackingBucketV16Account::from_runtime(&bucket);
         // a wholly empty bucket owes nothing to a provider: the principal mirror resets
         let wholly_empty = bucket.fresh_unliened_backing_num == 0
             && bucket.valid_liened_backing_num == 0
             && bucket.consumed_liened_backing_num == 0
             && bucket.impaired_liened_backing_num == 0;
+        if wholly_empty {
+            // upstream e18a3b98: the reset changes provider principal, which protection is
+            // computed from, so the floor is brought up to date from the stored state first
+            // (as `adjust_provider_principal_for_domain` does).
+            let slot = self.markets[asset_index].engine_slot();
+            let (principal_num, source) = match side {
+                SideV16::Long => (slot.provider_principal_long.get(), &slot.source_credit_long),
+                SideV16::Short => (slot.provider_principal_short.get(), &slot.source_credit_short),
+            };
+            let (fresh_reserved_backing_num, exact_positive_claim_num) = (
+                source.fresh_reserved_backing_num.get(),
+                source.exact_positive_claim_num.get(),
+            );
+            if principal_num != 0 {
+                self.observe_provider_protection_before_change(
+                    asset_index,
+                    side,
+                    fresh_reserved_backing_num,
+                    exact_positive_claim_num,
+                );
+            }
+        }
+        let slot = self.markets[asset_index].engine_slot_mut();
+        let account = BackingBucketV16Account::from_runtime(&bucket);
         match side {
             SideV16::Long => {
                 slot.backing_long = account;
@@ -11712,6 +12452,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         add: bool,
     ) -> V16Result<()> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
+        // upstream e18a3b98: protection is computed from provider principal too. Every engine
+        // caller has changed the domain's fresh backing first, so this records nothing today;
+        // it keeps the floor right if a path ever moves principal before it writes source
+        // credit.
+        if delta != 0 {
+            let (fresh_reserved_backing_num, exact_positive_claim_num) = {
+                let slot = self.markets[asset_index].engine_slot();
+                let source = match side {
+                    SideV16::Long => &slot.source_credit_long,
+                    SideV16::Short => &slot.source_credit_short,
+                };
+                (
+                    source.fresh_reserved_backing_num.get(),
+                    source.exact_positive_claim_num.get(),
+                )
+            };
+            self.observe_provider_protection_before_change(
+                asset_index,
+                side,
+                fresh_reserved_backing_num,
+                exact_positive_claim_num,
+            );
+        }
         let slot = self.markets[asset_index].engine_slot_mut();
         adjust_slot_provider_principal(slot, side == SideV16::Short, delta, add)
     }
@@ -11943,6 +12706,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
         // S10: a deposit is provider principal (never moved by the rebalance)
         self.adjust_provider_principal_for_domain(domain, backing_num, true)?;
+        self.shift_provider_protection_floor_num(domain, backing_num, true)?;
         self.header.vault = V16PodU128::new(
             self.header
                 .vault
@@ -12031,6 +12795,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_source_credit_for_domain(domain, source)?;
         // S10: principal leaves (saturating: a shutdown drain may take loser cash too)
         self.adjust_provider_principal_for_domain(domain, backing_num, false)?;
+        self.shift_provider_protection_floor_num(domain, backing_num, false)?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         self.header.vault = V16PodU128::new(next_vault);
         self.validate_source_domain_ledger(domain)?;
@@ -16246,7 +17011,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset_index: usize,
     ) -> V16Result<()> {
         let config = self.header.config.try_to_runtime_shape()?;
-        let price = self.asset_state(asset_index)?.effective_price;
+        let price = self.asset_state_wire(asset_index)?.effective_price.get();
         let long_principal = Self::increased_initial_margin_principal(
             config,
             trade_preflight.long_old_abs_q,
@@ -18771,7 +19536,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let leg = account.header.legs[slot].try_to_runtime()?;
             let bit = active_bitmap_get(bitmap, slot);
             if slot >= active_leg_cap {
-                if bit || !leg.is_empty() {
+                if bit || !decoded_leg_slot_is_empty(&account.header.legs[slot]) {
                     return Err(V16Error::HiddenLeg);
                 }
                 slot += 1;
@@ -18781,7 +19546,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 return Err(V16Error::HiddenLeg);
             }
             if !leg.active {
-                if !leg.is_empty() {
+                if !decoded_leg_slot_is_empty(&account.header.legs[slot]) {
                     return Err(V16Error::HiddenLeg);
                 }
                 slot += 1;
@@ -19300,14 +20065,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn require_asset_accruable(&self, asset_index: usize) -> V16Result<()> {
-        match self.asset_state(asset_index)?.lifecycle {
+        match decode_asset_lifecycle(self.asset_state_wire(asset_index)?.lifecycle)? {
             AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => Ok(()),
             _ => Err(V16Error::LockActive),
         }
     }
 
     fn require_asset_mark_pushable(&self, asset_index: usize) -> V16Result<()> {
-        match self.asset_state(asset_index)?.lifecycle {
+        match decode_asset_lifecycle(self.asset_state_wire(asset_index)?.lifecycle)? {
             AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => Ok(()),
             _ => Err(V16Error::LockActive),
         }
@@ -19418,7 +20183,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 }
                 prior += 1;
             }
-            changed |= self.asset_state(asset_index)?.raw_oracle_target_price != target;
+            changed |= self.asset_state_wire(asset_index)?.raw_oracle_target_price.get() != target;
             i += 1;
         }
 
@@ -20808,7 +21573,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if let Some(asset_index) = released_obligation_asset {
                 self.validate_unconfigured_market_tail()?;
                 let advanced =
-                    if self.asset_state(asset_index)?.lifecycle == AssetLifecycleV16::Recovery {
+                    if decode_asset_lifecycle(self.asset_state_wire(asset_index)?.lifecycle)?
+                        == AssetLifecycleV16::Recovery
+                    {
                         self.forfeit_recovery_leg_not_atomic(
                             account,
                             asset_index,
@@ -20899,7 +21666,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 // the first supplied observation to give the refresh a price.
                 let (ai, obs) = match asset_index {
                     Some(i) => {
-                        if self.asset_state(i)?.lifecycle == AssetLifecycleV16::Recovery {
+                        if decode_asset_lifecycle(self.asset_state_wire(i)?.lifecycle)?
+                            == AssetLifecycleV16::Recovery
+                        {
                             return Ok(AutoCrankResultV16 {
                                 selected: plan,
                                 outcome: AutoCrankOutcomeV16::Progressed(
@@ -21212,7 +21981,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         self.validate_unconfigured_market_tail()?;
         if now_slot < self.header.current_slot.get()
-            || self.asset_state(asset_index)?.lifecycle != AssetLifecycleV16::Recovery
+            || decode_asset_lifecycle(self.asset_state_wire(asset_index)?.lifecycle)?
+                != AssetLifecycleV16::Recovery
             || Self::active_leg_slot_for_asset(&account.as_view(), asset_index)?.is_none()
         {
             return Err(V16Error::NonProgress);
@@ -21410,10 +22180,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if self.header.config.band_bps.get() == 0 || cap == 0 {
             return Ok(false);
         }
-        let asset = self.asset_state(asset_index)?;
+        let asset = self.asset_state_wire(asset_index)?;
         let count = match side {
-            SideV16::Long => asset.stored_pos_count_long,
-            SideV16::Short => asset.stored_pos_count_short,
+            SideV16::Long => asset.stored_pos_count_long.get(),
+            SideV16::Short => asset.stored_pos_count_short.get(),
         };
         Ok(count >= cap)
     }
@@ -21445,6 +22215,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(notional.saturating_mul(2) < min)
     }
 
+    /// The ADL-effective quantity of a current-epoch leg with signed raw
+    /// basis `raw_q` on `asset`: zero without a position. Every stored leg is
+    /// based at `ADL_ONE` (#449).
+    fn effective_abs_q_for_raw_basis(asset: AssetStateV16, raw_q: i128) -> V16Result<u128> {
+        let current_a = match raw_q.signum() {
+            1 => asset.a_long,
+            -1 => asset.a_short,
+            _ => return Ok(0),
+        };
+        V16Core::kernel_adl_effective_quantity_ceil(raw_q.unsigned_abs(), ADL_ONE, current_a)
+    }
+
     fn asset_state(&self, asset_index: usize) -> V16Result<AssetStateV16> {
         if asset_index >= self.header.config.max_market_slots.get() as usize
             || asset_index >= self.markets.len()
@@ -21452,6 +22234,110 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::InvalidLeg);
         }
         self.markets[asset_index].engine.asset.try_to_runtime()
+    }
+
+    /// `asset_state` without building the 54-field runtime value: the same bounds check and
+    /// the same validation errors (`validate_wire_only`), for readers that need a few raw fields.
+    fn asset_state_wire(&self, asset_index: usize) -> V16Result<&AssetStateV16Account> {
+        if asset_index >= self.header.config.max_market_slots.get() as usize
+            || asset_index >= self.markets.len()
+        {
+            return Err(V16Error::InvalidLeg);
+        }
+        let asset = &self.markets[asset_index].engine.asset;
+        asset.validate_wire_only()?;
+        Ok(asset)
+    }
+
+    /// Test hook for tests/asset_state_wire_readers.rs (`--features fuzz`): six of the readers
+    /// that moved to `asset_state_wire` (the risk-change gate, live-reducible, side mode, band
+    /// side full, target lag, and the zero-OI reset predicate), each next to its old body on the
+    /// full `asset_state` decode. The remaining converted sites are single raw field reads.
+    /// Returns (new, old) pairs as debug strings so the test can compare whole `Result`s.
+    #[cfg(all(not(kani), feature = "fuzz"))]
+    pub fn asset_wire_readers_vs_reference_for_test(
+        &self,
+        asset_index: usize,
+    ) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)> {
+        use alloc::format;
+        let mut out = alloc::vec::Vec::new();
+        out.push((
+            format!("{:?}", self.require_asset_risk_change_allowed(asset_index, true)),
+            format!(
+                "{:?}",
+                self.asset_state(asset_index).and_then(|asset| {
+                    if asset.a_long != ADL_ONE || asset.a_short != ADL_ONE {
+                        return Err(V16Error::AdlReduceOnly);
+                    }
+                    asset_risk_increase_gate(asset.lifecycle, asset.mode_long, asset.mode_short)
+                })
+            ),
+        ));
+        out.push((
+            format!("{:?}", self.require_asset_live_reducible(asset_index)),
+            format!(
+                "{:?}",
+                self.asset_state(asset_index).and_then(|asset| match asset.lifecycle {
+                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => Ok(()),
+                    _ => Err(V16Error::LockActive),
+                })
+            ),
+        ));
+        for side in [SideV16::Long, SideV16::Short] {
+            out.push((
+                format!("{:?}", self.side_mode_for(asset_index, side)),
+                format!(
+                    "{:?}",
+                    self.asset_state(asset_index).map(|asset| match side {
+                        SideV16::Long => asset.mode_long,
+                        SideV16::Short => asset.mode_short,
+                    })
+                ),
+            ));
+            let cap = self.header.config.band_max_positions_per_side.get();
+            out.push((
+                format!("{:?}", self.band_side_is_full(asset_index, side)),
+                format!(
+                    "{:?}",
+                    if self.header.config.band_bps.get() == 0 || cap == 0 {
+                        Ok(false)
+                    } else {
+                        self.asset_state(asset_index).map(|asset| {
+                            (match side {
+                                SideV16::Long => asset.stored_pos_count_long,
+                                SideV16::Short => asset.stored_pos_count_short,
+                            }) >= cap
+                        })
+                    }
+                ),
+            ));
+        }
+        out.push((
+            format!("{:?}", self.asset_state_wire(asset_index).and_then(zero_oi_reset_sides)),
+            format!(
+                "{:?}",
+                self.asset_state(asset_index).map(|asset| {
+                    let reset_long = asset.oi_eff_long_q == 0
+                        && asset.pending_obligation_count_long == 0
+                        && asset.mode_long != SideModeV16::ResetPending
+                        && (asset.stored_pos_count_long != 0 || asset.a_long != ADL_ONE);
+                    let reset_short = asset.oi_eff_short_q == 0
+                        && asset.pending_obligation_count_short == 0
+                        && asset.mode_short != SideModeV16::ResetPending
+                        && (asset.stored_pos_count_short != 0 || asset.a_short != ADL_ONE);
+                    (reset_long, reset_short)
+                })
+            ),
+        ));
+        out.push((
+            format!("{:?}", self.asset_has_target_effective_lag(asset_index)),
+            format!(
+                "{:?}",
+                self.asset_state(asset_index)
+                    .map(|asset| asset.raw_oracle_target_price != asset.effective_price)
+            ),
+        ));
+        out
     }
 
     fn set_asset_state(&mut self, asset_index: usize, asset: AssetStateV16) -> V16Result<()> {
@@ -21486,12 +22372,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !risk_increasing {
             return Ok(());
         }
-        let asset = self.asset_state(asset_index)?;
-        if asset.a_long != ADL_ONE || asset.a_short != ADL_ONE {
+        let asset = self.asset_state_wire(asset_index)?;
+        if asset.a_long.get() != ADL_ONE || asset.a_short.get() != ADL_ONE {
             // P2b E7: distinct from LockActive so clients can say "close-only (ADL)".
             return Err(V16Error::AdlReduceOnly);
         }
-        asset_risk_increase_gate(asset.lifecycle, asset.mode_long, asset.mode_short)
+        asset_risk_increase_gate(
+            decode_asset_lifecycle(asset.lifecycle)?,
+            decode_side_mode(asset.mode_long)?,
+            decode_side_mode(asset.mode_short)?,
+        )
     }
 
     fn require_position_route_adl_safe(
@@ -21666,8 +22556,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn require_asset_live_reducible(&self, asset_index: usize) -> V16Result<()> {
-        let asset = self.asset_state(asset_index)?;
-        match asset.lifecycle {
+        let asset = self.asset_state_wire(asset_index)?;
+        match decode_asset_lifecycle(asset.lifecycle)? {
             AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => Ok(()),
             _ => Err(V16Error::LockActive),
         }
@@ -21734,6 +22624,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || asset.b_epoch_start_short_num != 0
             || asset.oi_eff_long_q != 0
             || asset.oi_eff_short_q != 0
+            || asset.raw_basis_sum_long_q != 0
+            || asset.raw_basis_sum_short_q != 0
             || asset.stored_pos_count_long != 0
             || asset.stored_pos_count_short != 0
             || asset.stale_account_count_long != 0
@@ -21773,8 +22665,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn side_mode_for(&self, asset_index: usize, side: SideV16) -> V16Result<SideModeV16> {
-        let asset = self.asset_state(asset_index)?;
-        Ok(match side {
+        let asset = self.asset_state_wire(asset_index)?;
+        decode_side_mode(match side {
             SideV16::Long => asset.mode_long,
             SideV16::Short => asset.mode_short,
         })
@@ -22164,8 +23056,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn asset_has_target_effective_lag(&self, asset_index: usize) -> V16Result<bool> {
-        let asset = self.asset_state(asset_index)?;
-        Ok(asset.raw_oracle_target_price != asset.effective_price)
+        let asset = self.asset_state_wire(asset_index)?;
+        Ok(asset.raw_oracle_target_price.get() != asset.effective_price.get())
     }
 
     fn asset_is_loss_stale(&self, asset_index: usize) -> V16Result<bool> {
@@ -22604,6 +23496,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.header.config.band_bps.get(),
                 self.header.config.band_max_positions_per_side.get(),
             )?;
+        let asset = self.sync_side_adl_index(asset, side, basis_pos_q.unsigned_abs())?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&new_leg);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
         active_bitmap_set(&mut bitmap, leg_slot)?;
@@ -22669,6 +23562,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let effective_abs_q = V16Core::effective_abs_quantity_for_detach(asset, leg)?;
         let (leg, asset) =
             V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
+        let asset = self.sync_side_adl_index(asset, leg.side, 0)?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)
@@ -22771,6 +23665,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             None => V16Core::effective_abs_quantity_for_detach(asset, leg)?,
         };
         let asset = V16Core::kernel_clear_leg(leg, asset, clear_effective_oi_q)?;
+        let asset = self.sync_side_adl_index(asset, leg.side, 0)?;
         account.header.legs[leg_slot] =
             PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
@@ -22891,14 +23786,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if route == PositionRouteV16::Clear {
             let leg = current_leg;
             if leg.active && self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
-                let asset = self.asset_state(asset_index)?;
-                let effective_abs_q = V16Core::effective_abs_quantity_for_detach(asset, leg)?;
-                let (obligation, asset) =
-                    V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
-                account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&obligation);
-                account.header.health_cert.valid = 0;
-                self.set_asset_state(asset_index, asset)?;
-                return Ok(());
+                return self.retain_cleared_leg_as_pending_obligation_at_slot(
+                    account,
+                    asset_index,
+                    leg_slot,
+                    leg,
+                );
             }
             return self.clear_leg_at_slot_inner(
                 account,
@@ -22964,10 +23857,53 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             old_effective_abs,
             new_effective_abs,
         )?;
-        account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&new_leg);
+        self.store_leg_and_synced_asset(
+            account,
+            asset_index,
+            leg_slot,
+            &new_leg,
+            new_asset,
+            new.unsigned_abs(),
+        )
+    }
+
+    /// The Clear route of a position change while the leg's side has a pending
+    /// domain-loss barrier: the leg stays as a pending obligation. Out of line
+    /// so its asset-state copies stay out of the position-delta frame (SBF
+    /// 4096-byte stack frame).
+    #[inline(never)]
+    fn retain_cleared_leg_as_pending_obligation_at_slot(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        leg_slot: usize,
+        leg: PortfolioLegV16,
+    ) -> V16Result<()> {
+        let asset = self.asset_state(asset_index)?;
+        let effective_abs_q = V16Core::effective_abs_quantity_for_detach(asset, leg)?;
+        let (obligation, asset) =
+            V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
+        self.store_leg_and_synced_asset(account, asset_index, leg_slot, &obligation, asset, 0)
+    }
+
+    /// Re-derive the changed leg's side A index, then write the leg (clearing the
+    /// account's health certificate) and the asset, in that order. Out of line so
+    /// the asset copies of the A sync and the write stay out of the callers'
+    /// frames (SBF 4096-byte stack frame).
+    #[inline(never)]
+    fn store_leg_and_synced_asset(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        leg_slot: usize,
+        leg: &PortfolioLegV16,
+        asset: AssetStateV16,
+        acting_raw_after_q: u128,
+    ) -> V16Result<()> {
+        let asset = self.sync_side_adl_index(asset, leg.side, acting_raw_after_q)?;
+        account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(leg);
         account.header.health_cert.valid = 0;
-        self.set_asset_state(asset_index, new_asset)?;
-        Ok(())
+        self.set_asset_state(asset_index, asset)
     }
 
     fn set_pending_domain_loss_barrier_count(
@@ -23074,7 +24010,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if asset_index < self.header.config.max_market_slots.get() as usize
             && V16Core::kernel_open_close_snapshot_is_stale(
                 Self::active_leg_slot_for_asset(account, asset_index)?.is_some(),
-                self.asset_state(asset_index)?.slot_last,
+                self.asset_state_wire(asset_index)?.slot_last.get(),
                 ledger.drift_reference_slot,
             )
         {
@@ -23616,6 +24552,46 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(outcome)
     }
 
+    /// Bring one side's A index in line with its totals after a position change
+    /// or a haircut (`kernel_sync_side_adl_index`, #449), and keep cached health
+    /// certificates sound.
+    ///
+    /// A lower index only shrinks the effective quantity of the side's legs, so
+    /// a certificate issued before it stays conservative. A higher index can
+    /// raise the effective quantity of the side's other legs by a unit without
+    /// any action of their owners, so it advances the risk epoch and no
+    /// certificate issued before the change is current. `acting_raw_after_q` is
+    /// the raw basis the leg that just changed keeps on this side: zero if it
+    /// left, and zero for a haircut, which changes no leg of this side. The
+    /// caller invalidates that leg's own account, so the epoch moves only when
+    /// the side holds raw basis beyond it.
+    fn sync_side_adl_index(
+        &mut self,
+        asset: AssetStateV16,
+        side: SideV16,
+        acting_raw_after_q: u128,
+    ) -> V16Result<AssetStateV16> {
+        let a_before = match side {
+            SideV16::Long => asset.a_long,
+            SideV16::Short => asset.a_short,
+        };
+        let asset = V16Core::kernel_sync_side_adl_index(asset, side)?;
+        let (a_after, raw_basis_sum_q) = match side {
+            SideV16::Long => (asset.a_long, asset.raw_basis_sum_long_q),
+            SideV16::Short => (asset.a_short, asset.raw_basis_sum_short_q),
+        };
+        if a_after > a_before && raw_basis_sum_q > acting_raw_after_q {
+            self.header.risk_epoch = V16PodU64::new(
+                self.header
+                    .risk_epoch
+                    .get()
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?,
+            );
+        }
+        Ok(asset)
+    }
+
     fn begin_full_drain_reset_inner(&mut self, asset_index: usize, side: SideV16) -> V16Result<()> {
         self.validate_configured_asset_index(asset_index)?;
         if self.has_pending_domain_loss_barrier(asset_index, side)? {
@@ -23635,15 +24611,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     fn begin_zero_oi_residue_resets(&mut self, asset_index: usize) -> V16Result<()> {
         self.drop_unowned_side_oi(asset_index)?;
-        let asset = self.asset_state(asset_index)?;
-        let reset_long = asset.oi_eff_long_q == 0
-            && asset.pending_obligation_count_long == 0
-            && asset.mode_long != SideModeV16::ResetPending
-            && (asset.stored_pos_count_long != 0 || asset.a_long != ADL_ONE);
-        let reset_short = asset.oi_eff_short_q == 0
-            && asset.pending_obligation_count_short == 0
-            && asset.mode_short != SideModeV16::ResetPending
-            && (asset.stored_pos_count_short != 0 || asset.a_short != ADL_ONE);
+        let (reset_long, reset_short) = zero_oi_reset_sides(self.asset_state_wire(asset_index)?)?;
         if reset_long {
             self.begin_full_drain_reset_inner(asset_index, SideV16::Long)?;
         }
@@ -23653,10 +24621,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    // Effective OI on a side with no stored leg belongs to no one: residue of the
-    // floored A index. It breaks spec.md:953 (OI with no loss weight), keeps the
-    // side from its zero-OI reset, and cannot leave through a leg clear, which
-    // refuses more than the leg's raw basis. Before resolution it is dropped only
+    // Effective OI on a side with no stored leg belongs to no one. Before #449
+    // it was the residue of an A index scaled by floor; with the index derived
+    // from the side's totals (upstream c030aa40), a side's last leg removes the
+    // side's whole effective OI and no transition of this engine leaves any
+    // behind, so this is a fail-safe. Such OI breaks spec.md:953 (OI with no
+    // loss weight), keeps the side from its zero-OI reset, and cannot leave
+    // through a leg clear, which refuses more than the leg's raw basis. Before
+    // resolution it is dropped only
     // once the whole asset is legless and neither side has a pending loss
     // barrier, so both sides reach zero together and Live OI stays equal; after
     // resolution each legless side without a barrier drops its own. A barrier
@@ -23749,42 +24721,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let opp = opposite_side(closed_side);
         let mut asset = self.asset_state(asset_index)?;
-        let (opp_oi_before, opp_a_before) = match opp {
-            SideV16::Long => (asset.oi_eff_long_q, asset.a_long),
-            SideV16::Short => (asset.oi_eff_short_q, asset.a_short),
+        let opp_oi_before = match opp {
+            SideV16::Long => asset.oi_eff_long_q,
+            SideV16::Short => asset.oi_eff_short_q,
         };
         if close_q > opp_oi_before {
             return Err(V16Error::InvalidLeg);
         }
         let opp_oi_after = opp_oi_before - close_q;
-        let opp_a_after = if opp_oi_after == 0 {
-            ADL_ONE
-        } else {
-            let candidate = wide_mul_div_floor_u128(opp_a_before, opp_oi_after, opp_oi_before);
-            if candidate == 0 {
-                self.declare_permissionless_recovery(
-                    PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
-                )?;
-                return Err(V16Error::RecoveryRequired);
-            }
-            candidate
-        };
         match opp {
-            SideV16::Long => {
-                asset.oi_eff_long_q = opp_oi_after;
-                asset.a_long = opp_a_after;
-                if opp_oi_after != 0 && asset.a_long < MIN_A_SIDE {
-                    asset.mode_long = SideModeV16::DrainOnly;
-                }
-            }
-            SideV16::Short => {
-                asset.oi_eff_short_q = opp_oi_after;
-                asset.a_short = opp_a_after;
-                if opp_oi_after != 0 && asset.a_short < MIN_A_SIDE {
-                    asset.mode_short = SideModeV16::DrainOnly;
-                }
-            }
+            SideV16::Long => asset.oi_eff_long_q = opp_oi_after,
+            SideV16::Short => asset.oi_eff_short_q = opp_oi_after,
         }
+        // The haircut is the side's effective OI falling against unchanged raw
+        // basis: A is re-derived from the two totals, never scaled from its
+        // previous value, so its rounding cannot accumulate (#449, upstream
+        // c030aa40). With raw basis at most `MAX_OI_SIDE_Q` the derived index
+        // is at least 10 while any effective OI remains (this fork does not
+        // enforce that bound on fills; see `kernel_side_adl_index`).
+        let asset = self.sync_side_adl_index(asset, opp, 0)?;
         self.set_asset_state(asset_index, asset)?;
         if opp_oi_after == 0 {
             self.begin_full_drain_reset_inner(asset_index, opp)?;
@@ -24821,8 +25776,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::InvalidConfig);
         }
-        let asset = self.asset_state(asset_index)?;
-        if asset.raw_oracle_target_price != asset.effective_price {
+        let asset = self.asset_state_wire(asset_index)?;
+        if asset.raw_oracle_target_price.get() != asset.effective_price.get() {
             let cert = self.compute_account_health_cert_with_price_override(
                 &account.as_view(),
                 false,
@@ -25141,19 +26096,34 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             request.asset_index,
         )?;
         if recertify_after_fill {
-            let price = self.asset_state(request.asset_index)?.effective_price;
+            let post_fill_asset = self.asset_state(request.asset_index)?;
+            let price = post_fill_asset.effective_price;
+            // The incremental certificate has to describe the position the fill
+            // left. A reduction on a haircut side is settled by the side rule, so
+            // the leg's effective quantity can end below the quantity the fill
+            // asked for (#449): take it from the raw basis the fill stored and
+            // the index its side has now, not from the request. Both are at
+            // hand; looking the leg up again would scan the account.
+            let long_new_abs_q = Self::effective_abs_q_for_raw_basis(
+                post_fill_asset,
+                trade_preflight.long_lookup.next_q,
+            )?;
+            let short_new_abs_q = Self::effective_abs_q_for_raw_basis(
+                post_fill_asset,
+                trade_preflight.short_lookup.next_q,
+            )?;
             self.recertify_account_after_trade_delta(
                 long_account,
                 request.asset_index,
                 trade_preflight.long_old_abs_q,
-                trade_preflight.long_new_abs_q,
+                long_new_abs_q,
                 price,
             )?;
             self.recertify_account_after_trade_delta(
                 short_account,
                 request.asset_index,
                 trade_preflight.short_old_abs_q,
-                trade_preflight.short_new_abs_q,
+                short_new_abs_q,
                 price,
             )?;
         }
@@ -29348,6 +30318,33 @@ pub struct PortfolioLegV16Account {
     pub rent_carry: V16PodU64,
 }
 
+/// `leg.is_empty()` for a slot whose `try_to_runtime()` returned `leg`, read from the raw
+/// bytes: the decode is one-to-one (bools and side accept 0/1 only, everything else is a Pod
+/// read, no padding) and `PORTFOLIO_LEG_V16_EMPTY_ACCOUNT` encodes `PortfolioLegV16::EMPTY`, so
+/// this is one memcmp instead of 22 field compares. Only valid after a successful decode.
+/// Pinned by `proof_v16_decoded_leg_is_empty_matches_encoding` and tests/leg_is_empty_encoding.rs.
+#[inline(always)]
+fn decoded_leg_slot_is_empty(raw: &PortfolioLegV16Account) -> bool {
+    raw.is_empty_encoding()
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn decoded_leg_slot_is_empty_for_test(raw: &PortfolioLegV16Account) -> bool {
+    decoded_leg_slot_is_empty(raw)
+}
+
+/// Test hook for tests/position_slot_map_from_account.rs (`--features fuzz`): the slot map built
+/// from `account` by the production loop and by the pre-change reference, as debug strings.
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub fn position_slot_map_from_account_vs_reference_for_test(
+    account: &PortfolioV16View<'_>,
+) -> (alloc::string::String, alloc::string::String) {
+    (
+        alloc::format!("{:?}", PositionSlotMapV16::from_account(account)),
+        alloc::format!("{:?}", PositionSlotMapV16::from_account_reference(account)),
+    )
+}
+
 /// The account encoding of `PortfolioLegV16::EMPTY` (pinned by a unit test).
 /// v2.2 CU: an empty slot is recognised with one byte comparison instead of a
 /// field-by-field decode; any other bytes still take the full decode below,
@@ -30263,6 +31260,57 @@ pub fn kani_raw_basis_for_adl_effective_quantity(
     V16Core::kernel_raw_basis_for_adl_effective_quantity(effective_abs_q, a_basis, current_a)
 }
 
+/// #449 (upstream c030aa40): the side A index derived from the side's totals.
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn kani_side_adl_index(
+    oi_eff_q: u128,
+    raw_basis_sum_q: u128,
+    current_a: u128,
+) -> V16Result<u128> {
+    V16Core::kernel_side_adl_index(oi_eff_q, raw_basis_sum_q, current_a)
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn kani_sync_side_adl_index(asset: AssetStateV16, side: SideV16) -> V16Result<AssetStateV16> {
+    V16Core::kernel_sync_side_adl_index(asset, side)
+}
+
+/// The audit scan's per-side predicate, exposed so a test can hold it
+/// against `kernel_side_adl_index`.
+#[cfg(any(kani, all(feature = "fuzz", feature = "audit-scan")))]
+pub fn kani_side_adl_totals_are_coherent(
+    oi_eff_q: u128,
+    raw_basis_sum_q: u128,
+    a_side: u128,
+    loss_weight_sum: u128,
+    mode: SideModeV16,
+) -> bool {
+    MarketGroupV16View::<'_, u64>::side_adl_totals_are_coherent(
+        oi_eff_q,
+        raw_basis_sum_q,
+        a_side,
+        loss_weight_sum,
+        mode,
+    )
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn kani_raw_basis_after_adl_reduction(
+    raw_abs_q: u128,
+    effective_abs_q: u128,
+    next_effective_abs_q: u128,
+    oi_eff_q: u128,
+    raw_basis_sum_q: u128,
+) -> V16Result<u128> {
+    V16Core::kernel_raw_basis_after_adl_reduction(
+        raw_abs_q,
+        effective_abs_q,
+        next_effective_abs_q,
+        oi_eff_q,
+        raw_basis_sum_q,
+    )
+}
+
 #[cfg(any(kani, feature = "fuzz"))]
 pub fn kani_funding_index_deltas(
     funding_num: i128,
@@ -30510,6 +31558,8 @@ pub fn kani_eq_asset_state_v16_account(a: &AssetStateV16Account, b: &AssetStateV
         && a.b_epoch_start_short_num.get() == b.b_epoch_start_short_num.get()
         && a.oi_eff_long_q.get() == b.oi_eff_long_q.get()
         && a.oi_eff_short_q.get() == b.oi_eff_short_q.get()
+        && a.raw_basis_sum_long_q.get() == b.raw_basis_sum_long_q.get()
+        && a.raw_basis_sum_short_q.get() == b.raw_basis_sum_short_q.get()
         && a.stored_pos_count_long.get() == b.stored_pos_count_long.get()
         && a.stored_pos_count_short.get() == b.stored_pos_count_short.get()
         && a.stale_account_count_long.get() == b.stale_account_count_long.get()
@@ -30604,6 +31654,11 @@ pub fn kani_eq_engine_asset_slot_v16_account(
         && a.kf_drift_short == b.kf_drift_short
         && a.kf_pending_credit_long == b.kf_pending_credit_long
         && a.kf_pending_credit_short == b.kf_pending_credit_short
+        && a.provider_principal_long.get() == b.provider_principal_long.get()
+        && a.provider_principal_short.get() == b.provider_principal_short.get()
+        && a.provider_protection_floor_long_num.get() == b.provider_protection_floor_long_num.get()
+        && a.provider_protection_floor_short_num.get()
+            == b.provider_protection_floor_short_num.get()
 }
 
 #[cfg(kani)]
@@ -31043,7 +32098,9 @@ fn validate_active_leg(leg: PortfolioLegV16) -> V16Result<()> {
         validate_basis(leg.basis_pos_q)?;
         loss_weight_for_basis(leg.basis_pos_q.unsigned_abs(), leg.a_basis)?
     };
-    if !(MIN_A_SIDE..=ADL_ONE).contains(&leg.a_basis)
+    // Positions open only at unit A; the side's raw basis sum and the A index
+    // derived from it (#449) rest on every leg sharing that basis.
+    if leg.a_basis != ADL_ONE
         || leg.loss_weight == 0
         || leg.loss_weight < current_loss_weight
         || leg.loss_weight > SOCIAL_LOSS_DEN
@@ -32270,7 +33327,14 @@ mod attach_writer_cross_side_oi_tripwire_tests {
     /// pins that it is a scale at which an A-scaled contribution rounds apart
     /// from the untouched short side. Most scales do not, so do not reduce this
     /// to a round number without re-checking that test.
-    const A_LONG: u128 = 656_160_904_301_049;
+    ///
+    /// #449 (upstream c030aa40): a side's A index is now derived from its
+    /// totals, `floor(ADL_ONE * oi_eff / raw_basis_sum)`, so the fixture's A
+    /// must be one some raw-basis sum produces for `BALANCED_OI`. It is the
+    /// index of `LONG_RAW_BASIS_SUM` (the earlier 656_160_904_301_049 is the
+    /// index of no integer raw-basis sum for this OI) and still trips.
+    const A_LONG: u128 = 656_160_898_624_952;
+    const LONG_RAW_BASIS_SUM: u128 = 94_909_450;
     const BALANCED_OI: u128 = 62_275_870;
     const ATTACH_Q: u128 = 8_513_359;
 
@@ -32292,9 +33356,26 @@ mod attach_writer_cross_side_oi_tripwire_tests {
         asset.oi_eff_short_q = BALANCED_OI;
         asset.loss_weight_sum_long = loss_weight_for_basis(BALANCED_OI, A_LONG).unwrap();
         asset.loss_weight_sum_short = loss_weight_for_basis(BALANCED_OI, ADL_ONE).unwrap();
+        asset.raw_basis_sum_long_q = LONG_RAW_BASIS_SUM;
+        asset.raw_basis_sum_short_q = BALANCED_OI;
         asset.stored_pos_count_long = 1;
         asset.stored_pos_count_short = 1;
         asset
+    }
+
+    /// Re-derive both sides' A index from their totals, as the attach glue
+    /// does after the writer (`sync_side_adl_index`, #449).
+    fn sync_both_sides(asset: &mut AssetStateV16) {
+        *asset = V16Core::kernel_sync_side_adl_index(*asset, SideV16::Long).unwrap();
+        *asset = V16Core::kernel_sync_side_adl_index(*asset, SideV16::Short).unwrap();
+    }
+
+    /// The one-atom cross-side divergence an A-scaled writer would produce on
+    /// this fixture, with the long side's index re-derived so the side stays
+    /// coherent and only the cross-side equality is broken.
+    fn diverge_one_atom(asset: &mut AssetStateV16) {
+        asset.oi_eff_long_q += 1;
+        sync_both_sides(asset);
     }
 
     fn audit_scan(asset: AssetStateV16) -> V16Result<()> {
@@ -32320,6 +33401,7 @@ mod attach_writer_cross_side_oi_tripwire_tests {
         let w_short = loss_weight_for_basis(ATTACH_Q, a_short).unwrap();
         add_open_interest_for_new_position(asset, SideV16::Long, ATTACH_Q, w_long).unwrap();
         add_open_interest_for_new_position(asset, SideV16::Short, ATTACH_Q, w_short).unwrap();
+        sync_both_sides(asset);
     }
 
     /// The fixture must be a state the engine could actually be in, or every
@@ -32343,6 +33425,15 @@ mod attach_writer_cross_side_oi_tripwire_tests {
             telescoped_oi(asset.a_short, asset.loss_weight_sum_short),
             asset.oi_eff_short_q,
             "short side must satisfy oi_eff == floor(a * sum_w / SCALE)"
+        );
+        assert_eq!(
+            V16Core::kernel_side_adl_index(
+                asset.oi_eff_long_q,
+                asset.raw_basis_sum_long_q,
+                ADL_ONE
+            ),
+            Ok(asset.a_long),
+            "long side's A must be the index derived from its totals (#449)"
         );
         audit_scan(asset).expect("asymmetric `a` with balanced OI is a legal Live state");
     }
@@ -32429,7 +33520,7 @@ mod attach_writer_cross_side_oi_tripwire_tests {
     fn audit_scanner_rejects_a_one_atom_cross_side_divergence() {
         let mut asset = asset_with_asymmetric_a();
         attach_one_fill(&mut asset);
-        asset.oi_eff_long_q += 1;
+        diverge_one_atom(&mut asset);
 
         assert!(
             matches!(audit_scan(asset), Err(V16Error::InvalidConfig)),
@@ -32449,7 +33540,7 @@ mod attach_writer_cross_side_oi_tripwire_tests {
         // Same one-atom divergence the negative control rejects for an Active asset.
         let mut asset = asset_with_asymmetric_a();
         attach_one_fill(&mut asset);
-        asset.oi_eff_long_q += 1;
+        diverge_one_atom(&mut asset);
 
         // Active: still rejected (the #457 defense the negative control guards).
         assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);

@@ -101,6 +101,7 @@ pub use v16::{
     V16PodI128, V16PodU128, V16PodU16, V16PodU32, V16PodU64, V16Result,
     BANKRUPTCY_HLOCK_ACTIVE_BIT, BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS,
     PORTFOLIO_LEG_V16_EMPTY_ACCOUNT, PORTFOLIO_SOURCE_DOMAIN_CAP,
+    PROVIDER_PROTECTION_OBSERVED_ASSET_CAP, PROVIDER_PROTECTION_OBSERVED_MAX_ASSET_INDEX,
     TERMINAL_SLAB_SCAN_ASSETS_PER_CALL, V16_ACCOUNT_VERSION, V16_EMPTY_ACTIVE_BITMAP,
     V16_LAYOUT_DISCRIMINATOR, V16_MAX_ACCRUAL_PATH_STEPS, V16_MAX_PORTFOLIO_ASSETS_N,
 };
@@ -118,8 +119,14 @@ pub use v16::{loss_weight_for_basis_for_test, loss_weight_for_basis_wide_referen
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::{
     kani_adl_effective_quantity_ceil, kani_funding_index_deltas,
-    kani_raw_basis_for_adl_effective_quantity,
+    kani_raw_basis_after_adl_reduction, kani_raw_basis_for_adl_effective_quantity,
+    kani_side_adl_index, kani_sync_side_adl_index,
 };
+
+// #449 (upstream c030aa40): the audit scan's per-side A-index predicate, for
+// tests/adl_side_index_449.rs.
+#[cfg(all(not(kani), feature = "fuzz", feature = "audit-scan"))]
+pub use v16::kani_side_adl_totals_are_coherent;
 
 // Bounded source-credit mul-div kernels + fused claim-burn deltas for the
 // rounding-residue differential fuzz target (upstream 4c4dfb20).
@@ -160,6 +167,18 @@ pub use v16::source_domain_tail_is_zero_for_test;
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::bound_num_is_atom_aligned_for_test;
 
+// Raw-byte emptiness of a decoded leg slot vs. PortfolioLegV16::is_empty (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::decoded_leg_slot_is_empty_for_test;
+
 // Source-domain compaction skip predicate vs. the full compaction (differential test only).
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::{compact_source_domain_table_for_test, source_domain_table_already_compact_for_test};
+
+// u128 mul-div cancelled-factor shortcut (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::mul_div_cancelled_factor_for_test;
+
+// PositionSlotMapV16::from_account vs. its pre-change loop (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::position_slot_map_from_account_vs_reference_for_test;

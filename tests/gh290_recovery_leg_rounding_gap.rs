@@ -53,6 +53,16 @@ impl World {
     }
 }
 
+/// #449 (upstream c030aa40): a side's A index is now derived from its effective OI and raw-basis
+/// sum, so a side's only leg carries exactly the side's OI and no history reaches the gap these
+/// tests write by hand (`tests/adl_side_index_449.rs` pins the sole-leg equality). The GH#290
+/// clamp in `effective_abs_quantity_for_detach` stays as a fail-safe and these tests keep
+/// exercising it, but the audit scan refuses the written state (its A is not the derived index
+/// of `LEG_BASIS` and the written OI), so under `audit-scan` they stop before it.
+fn written_gap_state_is_refused_by_audit_scan() -> bool {
+    cfg!(feature = "audit-scan")
+}
+
 /// Real deposits + a real opening trade of `LEG_BASIS`, then the side is put in the
 /// post-haircut state by writing the asset aggregate (a_long, oi_eff_long) exactly as the
 /// `oi_eff == floor(a * sum_w / SCALE)` relation requires, and the asset is forced to Recovery.
@@ -106,6 +116,9 @@ fn world(oi_eff_long: u128) -> World {
 
 #[test]
 fn the_fixture_has_a_one_atom_ceil_over_floor_gap() {
+    if written_gap_state_is_refused_by_audit_scan() {
+        return;
+    }
     let mut w = world(OI_EFF_LONG);
     let asset = w.asset();
     let leg = w.long.legs[0].try_to_runtime().unwrap();
@@ -132,6 +145,9 @@ fn forfeit_short(w: &mut World) {
 /// RED on base: forfeit returns CounterUnderflow and the capital is stranded.
 #[test]
 fn forfeit_then_withdraw_succeed_on_a_one_atom_gap() {
+    if written_gap_state_is_refused_by_audit_scan() {
+        return;
+    }
     let mut w = world(OI_EFF_LONG);
     forfeit_short(&mut w);
     // retained as a zero-basis pending obligation: no real position left on the short side
@@ -160,6 +176,9 @@ fn forfeit_then_withdraw_succeed_on_a_one_atom_gap() {
 /// Control: a gap larger than the side's leg count is NOT absorbed (fail loud, not silent).
 #[test]
 fn controls_a_gap_wider_than_the_leg_count_still_fails_closed() {
+    if written_gap_state_is_refused_by_audit_scan() {
+        return;
+    }
     let mut w = world(OI_EFF_LONG - 5);
     forfeit_short(&mut w);
     let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
@@ -174,6 +193,9 @@ fn controls_a_gap_wider_than_the_leg_count_still_fails_closed() {
 /// quantity is subtracted and the residue stays visible for #238's owner to handle.
 #[test]
 fn controls_oi_exceeding_the_leg_is_not_touched() {
+    if written_gap_state_is_refused_by_audit_scan() {
+        return;
+    }
     let mut w = world(OI_EFF_LONG + 1_000);
     forfeit_short(&mut w);
     let before = w.asset().oi_eff_long_q;

@@ -57,6 +57,7 @@
       "proof_v16_credit_account_from_insurance_is_value_neutral_and_pool_isolated",
       "proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus",
       "proof_v16_cross_account_source_support_sum_capped_by_shared_backing",
+      "proof_v16_decoded_leg_is_empty_matches_encoding",
       "proof_v16_detached_refresh_leg_skips_post_refresh_accrual",
       "proof_v16_domain_insurance_budget_delta_cannot_overallocate_pooled_insurance",
       "proof_v16_domain_insurance_deposit_updates_o1_remaining_total",
@@ -301,6 +302,7 @@
       "proof_v16_k_pair_zero_cases_return_zero",
       "proof_v16_mul_div_ceil_u256_is_floor_plus_remainder_indicator",
       "proof_v16_mul_div_floor_u256_matches_small_reference",
+      "proof_v16_mul_div_u128_or_wide_matches_small_reference",
       "proof_v16_risk_notional_ceil_unaligned_ceil_is_correct",
       "proof_v16_scaled_adl_delta_fast_matches_aligned_reference_and_fails_closed",
       "proof_v16_trade_fee_notional_ceil_strictly_exceeds_floor_when_unaligned",
@@ -346,7 +348,7 @@
   "contract-harnesses": {},
   "contracts": [],
   "totals": {
-    "standard-harnesses": 332,
+    "standard-harnesses": 334,
     "contract-harnesses": 0,
     "functions-under-contract": 0
   }
