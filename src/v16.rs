@@ -9206,11 +9206,6 @@ pub struct V16ConfigAccount {
     pub max_bankrupt_close_chunks: V16PodU64,
     pub max_bankrupt_close_lifetime_slots: V16PodU64,
     pub asset_activation_cooldown_slots: V16PodU64,
-    /// Was `public_b_chunk_atoms`. Since upstream 083a0d08 the chunk is the constant
-    /// `PUBLIC_B_CHUNK_ATOMS`; upstream drops the 16 bytes, this fork keeps them so the market
-    /// header (and every offset the wrapper, stake program and SDK read after it) does not
-    /// move. Written as zero, never read: an existing market's old value is ignored.
-    pub reserved_public_b_chunk_atoms: V16PodU128,
     pub max_recovery_fallback_deviation_bps: V16PodU64,
     pub backing_fee_base_rate_e9_per_slot: V16PodU64,
     pub backing_fee_kink_util_bps: V16PodU64,
@@ -9260,7 +9255,6 @@ impl V16ConfigAccount {
                 value.max_bankrupt_close_lifetime_slots,
             ),
             asset_activation_cooldown_slots: V16PodU64::new(value.asset_activation_cooldown_slots),
-            reserved_public_b_chunk_atoms: V16PodU128::new(0),
             max_recovery_fallback_deviation_bps: V16PodU64::new(
                 value.max_recovery_fallback_deviation_bps,
             ),

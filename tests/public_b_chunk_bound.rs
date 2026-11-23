@@ -32,12 +32,10 @@ fn the_public_b_chunk_is_the_largest_vault_and_never_overflows_a_step() {
 /// Opens a long and a short position, books a social loss of 50 atoms onto the
 /// long side, cranks the long account until the engine has nothing left to do for
 /// it, and then lets it sell its position back.
-fn close_after_social_loss(old_chunk_bytes: u128) -> Result<(), V16Error> {
+fn close_after_social_loss() -> Result<u128, V16Error> {
     let market_id = [1u8; 32];
     let owner = [4u8; 32];
     let mut header = create_market()?;
-    // Fork: the 16 bytes that held `public_b_chunk_atoms` stay in the header, unread.
-    header.config.reserved_public_b_chunk_atoms = V16PodU128::new(old_chunk_bytes);
     let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
     header
         .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
@@ -102,21 +100,12 @@ fn close_after_social_loss(old_chunk_bytes: u128) -> Result<(), V16Error> {
         }
     }
     market
-        .execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut short, &mut long, fill, false)
-        .map(|_| ())
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut short, &mut long, fill, false)?;
+    Ok(long.header.capital.get())
 }
 
 #[test]
 fn an_account_on_a_side_with_a_social_loss_can_close() {
-    assert_eq!(close_after_social_loss(0), Ok(()));
-}
-
-/// A market created before the chunk became a constant still holds its old chunk in the
-/// reserved bytes. The engine never reads them: a one-atom or an overflowing old chunk
-/// changes nothing.
-#[test]
-fn an_old_chunk_left_in_the_reserved_bytes_is_ignored() {
-    for old in [1u128, 1_000_000_000_000, u128::MAX] {
-        assert_eq!(close_after_social_loss(old), Ok(()), "old chunk {old}");
-    }
+    // The 50-atom social loss is charged to the long before it closes flat at the entry price.
+    assert_eq!(close_after_social_loss(), Ok(10_000 - 50));
 }
