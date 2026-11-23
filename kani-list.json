@@ -348,7 +348,7 @@
   "contract-harnesses": {},
   "contracts": [],
   "totals": {
-    "standard-harnesses": 333,
+    "standard-harnesses": 334,
     "contract-harnesses": 0,
     "functions-under-contract": 0
   }
