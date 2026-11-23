@@ -1132,7 +1132,8 @@ fn lien_heavy_provider_world(seed: u64, ntr: usize, legs: usize, p: u64, pt: u64
 /// fresh against a 2,925,000 principal: allowed, fresh stays above principal). Claims keep
 /// consuming that bucket identically on both engines, and at operation 113 the provider's bucket
 /// holds 3,257,400 against a ledger principal of 3,632,500: 375,100 atoms (10 percent) short,
-/// where the base engine, which kept the loser cash as a cushion, holds 5,699,125.
+/// where the base engine, which kept the loser cash as a cushion, holds 5,599,922 (5,699,125
+/// before upstream's K/F netting chain, #387).
 ///
 /// Accepted residual pending the founder's rule-A decision (rule A versus "never worse than
 /// base", i.e. no move out of a bucket in which a provider holds principal). A change of rule
@@ -1152,7 +1153,7 @@ fn rule_a_residual_provider_ends_short_of_principal_where_base_stays_above_seed_
     assert_eq!(base[op82][0], (10_124_675, 2_925_000), "the base engine moved nothing");
     // later consumption: the provider is short on S10 and not on base
     assert_eq!(s10[op113][0], (3_257_400, 3_632_500), "S10: fresh 375,100 below the ledger principal");
-    assert_eq!(base[op113][0], (5_699_125, 3_632_500), "base: fresh above the ledger principal");
+    assert_eq!(base[op113][0], (5_599_922, 3_632_500), "base: fresh above the ledger principal");
     let (f, p) = s10[op113][0];
     assert_eq!(p - f, 375_100, "the accepted residual, in atoms");
     assert!(base[op113][0].0 >= base[op113][0].1, "base stays above");

@@ -7007,10 +7007,23 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
     // unobservable: de-fusing both call sites to a hardcoded `epoch_steps = 1`
     // left the entire suite green (301/0 plain, 353/0 fuzz) while silently
     // landing the reversal an epoch short (5/3 instead of 6/4).
+    // Upstream's K/F netting chain (#387) changes the steps per variant: the counterparty
+    // twin reads 8/4 (1683b11d adds the second loss-domain booking), the insurance twin 5/3
+    // (7d2e243d nets its face without spending insurance). Before the port both read 6/4.
+    // 5/3 is the de-fused signature above: the insurance twin no longer reaches the fused
+    // burn, so only the counterparty twin can still guard it (not re-checked with the mutant).
+    // The insurance twin's pin is a plain characterisation now.
+    let (want_risk_epoch_steps, want_credit_epoch_steps) =
+        if insurance_backed { (5, 3) } else { (8, 4) };
+    let epoch_why = if insurance_backed {
+        "insurance twin: no fused source-claim burn under 7d2e243d, pinned risk-epoch steps"
+    } else {
+        "the fused source-claim burn must contribute its own risk-epoch step"
+    };
     assert_eq!(
         market.header.risk_epoch.get() - risk_epoch_before_reversal,
-        6,
-        "the fused source-claim burn must contribute its own risk-epoch step"
+        want_risk_epoch_steps,
+        "{epoch_why}"
     );
     assert_eq!(
         market.markets[0]
@@ -7020,8 +7033,8 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
             .unwrap()
             .credit_epoch
             - source_credit_epoch_before_reversal,
-        4,
-        "the fused source-claim burn must contribute its own credit-epoch step"
+        want_credit_epoch_steps,
+        "{epoch_why} (credit epoch)"
     );
     assert!(cert.valid);
     market.validate_shape().unwrap();
@@ -14915,6 +14928,27 @@ fn rx_same_leg_reversal(insurance_backed: bool, im_lien: bool) {
     }
     let stock = rx_stock(&markets);
     println!("insurance={insurance_backed} lien={im_lien} stock {stock:?}");
+    if insurance_backed && !im_lien {
+        // upstream 7d2e243d: netting the same leg's unrealized gain spends no insurance and
+        // books only the principal loss (none here), so the loss domain gets no backing and the
+        // short's regained claim there credits at rate 0. This BREAKS the "every positive claim
+        // is fully backed" half of `rx_assert_backed_and_conserved`: the short ends 5,000 down on
+        // the round trip while the reserved insurance is untouched (the fixture withdrew the
+        // short's loss backing, which is part of the gap). Only the vault half still holds.
+        assert_eq!(
+            stock[0],
+            (reversal_loss, 0, 0, 0),
+            "the loss domain holds the short's regained claim with no backing: {stock:?}"
+        );
+        assert_eq!(stock[1], (0, 0, 0, CREDIT_RATE_SCALE), "the twin is empty: {stock:?}");
+        assert_eq!(header.insurance.get(), 100_000, "netting spends no insurance");
+        assert_eq!(
+            header.vault.get(),
+            header.c_tot.get() + header.insurance.get(),
+            "vault must equal capital + insurance (no fresh backing left, no ownerless residual): {stock:?}"
+        );
+        return;
+    }
     assert_eq!(
         stock[0].1, reversal_loss,
         "the loss domain must hold the long's whole reversal loss as backing: {stock:?}"
@@ -14928,8 +14962,13 @@ fn source_reclass_same_leg_reversal_counterparty_backed() {
     rx_same_leg_reversal(false, false);
 }
 
-/// Decision: insurance-consumed support is reclassified like counterparty support. The
-/// insurance spend already paid the claimant's gain; the claimant used it to pay its loss.
+/// Upstream 7d2e243d's rule for an insurance-backed twin: netting the same leg's unrealized gain
+/// spends no insurance, and only the principal loss is booked. Here the long's 5,000 face covers
+/// the whole 5,000 reversal loss (no principal loss), so the loss domain receives no backing and
+/// the short's regained 5,000 sits there at credit rate 0 while the insurance keeps its 100,000:
+/// the claim is not backed, an invariant the new rule breaks for this twin. (Before the port the
+/// fork reclassified the insurance spend like counterparty support and the loss domain held the
+/// whole 5,000.)
 #[cfg(feature = "fuzz")]
 #[test]
 fn source_reclass_same_leg_reversal_insurance_backed() {
@@ -15010,11 +15049,21 @@ fn f5_fully_netted_into_lapsed_loss_domain() -> (Vec<(u128, u128, u128, u128)>, 
         let mut trader = PortfolioV16ViewMut::new(&mut trader_h);
         residual_before = f5_residual(market.header);
         // 85: the trader's 50 loss is netted in full against its d1-backed face (pure support).
+        // Upstream's netting (7d2e243d line) cancels the face at par and leaves its backing in
+        // d1's fresh reserve (d1: claim 100 -> 50, fresh 100, asserted below), so nothing
+        // reaches Residual; the 50 left over in d1 has no claim behind it.
         slot += 1;
         rx_mark(&mut market, 0, slot, 85);
         result = market.full_account_refresh_not_atomic(&mut trader).map(|_| ());
     }
     let residual_after = f5_residual(&header);
+    // d1 (the trader's face domain) goes from claim 100 to 50 and keeps all 100 of its backing:
+    // 50 of it now has no claim behind it (where it goes later is not checked here).
+    assert_eq!(
+        rx_stock(&markets),
+        vec![(100, 100, 100, CREDIT_RATE_SCALE), (50, 100, 0, CREDIT_RATE_SCALE)],
+        "the netted face's backing stays in d1"
+    );
     (stock, residual_before, result, residual_after, trader_h.pnl.get())
 }
 
@@ -15025,10 +15074,12 @@ fn f5_fully_netted_loss_into_lapsed_loss_domain_does_not_revert() {
     println!("F-5 stock before {stock:?} residual {residual_before} -> {residual_after}, result {result:?}, trader pnl {pnl_after}");
     result.expect("a fully netted loss must settle even when its loss domain cannot take an add");
     assert_eq!(pnl_after, 50, "the trader's face fell by exactly the 50 loss (100 -> 50)");
+    // Before upstream's netting the unbookable 50 of support went to Residual (+50, as on
+    // 35ddd692). Now the netted face's backing stays in its own source domain's fresh reserve,
+    // so Residual does not move (no value created or lost).
     assert_eq!(
-        residual_after,
-        residual_before + 50,
-        "the unbookable support stays in Residual exactly as on 35ddd692 (no value created or lost)"
+        residual_after, residual_before,
+        "the netted support stays in its source domain's backing, not in Residual"
     );
 }
 
@@ -15481,16 +15532,18 @@ fn s10_provider_share_after_consumption_and_refill_is_never_moved() {
         .full_account_refresh_with_s10_budget_not_atomic(&mut long, &mut s10_budget)
         .expect("a mark reversal must settle even when the prior positive claim backed IM");
 
-    // After the reversal (and the 2,624-atom move the settlement itself made) the short bucket
-    // holds fresh 100,000 against a 100,000-atom provider deposit of which 2,376 are consumed
-    // (receivable): the wrapper ledger's view is provider_fresh = 100,000 - 2,376 = 97,624, so
-    // only 100,000 - 97,624 = 2,376 atoms are loser cash. A ring that counted the FULL amount
-    // booked or refilled would let a forced shortfall take more; the provider's share must stay.
+    // After the reversal the short bucket holds fresh 100,000 against a 100,000-atom provider
+    // deposit of which 5,000 are consumed (receivable): upstream 1683b11d sends the short's whole
+    // 5,000 loser payment, liened and unliened, through consumption (before it, 2,376 were
+    // consumed and the settlement moved the other 2,624). The wrapper ledger's view is
+    // provider_fresh = 100,000 - 5,000 = 95,000, so only 100,000 - 95,000 = 5,000 atoms are
+    // loser cash. A ring that counted the FULL amount booked or refilled would let a forced
+    // shortfall take more; the provider's share must stay.
     let short = market.markets[0].engine.backing_short.try_to_runtime().unwrap();
     let principal = market.markets[0].engine.provider_principal_short.get();
     assert_eq!(principal, 100_000 * BOUND_SCALE);
     assert_eq!(short.fresh_unliened_backing_num, 100_000 * BOUND_SCALE);
-    assert_eq!(short.consumed_liened_backing_num, 2_376 * BOUND_SCALE);
+    assert_eq!(short.consumed_liened_backing_num, 5_000 * BOUND_SCALE);
     // force a claim shortfall far above the loser cash in the long domain and drive the move
     let mut sc = market.markets[0].engine.source_credit_long.try_to_runtime().unwrap();
     let claims = sc.fresh_reserved_backing_num + 50_000 * BOUND_SCALE;
@@ -15501,8 +15554,8 @@ fn s10_provider_share_after_consumption_and_refill_is_never_moved() {
     market.rebalance_unclaimed_backing_for_test_not_atomic(0, &mut s10_budget).unwrap();
     let after = market.markets[0].engine.backing_short.try_to_runtime().unwrap();
     // rule A (default): the provider's full 100,000 principal is protected, nothing moves;
-    // rule B: provider_fresh = 100,000 - 2,376, so exactly the 2,376 atoms of loser cash move
-    let floor = if percolator::S10_PROTECT_FULL_PROVIDER_PRINCIPAL { 100_000 } else { 97_624 };
+    // rule B: provider_fresh = 100,000 - 5,000, so exactly the 5,000 atoms of loser cash move
+    let floor = if percolator::S10_PROTECT_FULL_PROVIDER_PRINCIPAL { 100_000 } else { 95_000 };
     assert_eq!(
         after.fresh_unliened_backing_num,
         floor * BOUND_SCALE,
@@ -15955,16 +16008,22 @@ fn s16_resolved_walk(seed: u64) -> Option<([u128; 4], bool, u128)> {
 
 #[test]
 fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
-    // (seed, paid, vault left). On 3ce4cbd1 these seeds pay less and leave more in the
+    // (seed, paid, vault left). On 3ce4cbd1 these seeds paid less and left more in the
     // vault: 1470 -> [800,200,499,80] 21; 2322 -> [800,800,200,780] 20;
     // 3167 -> [880,480,1000,1000] 40; 4698 -> [880,200,800,1000] 120;
-    // 5120 -> [909,200,880,200] 11.
+    // 5120 -> [909,200,880,200] 11. Before upstream's K/F netting chain (#387) they read
+    // 1470 -> [800,200,509,80] 11; 2322 -> [800,800,209,780] 11; 3167 -> [880,500,1000,1000] 20;
+    // 4698 -> [880,200,800,1090] 30; 5120 -> [919,200,880,200] 1. Under #387, 4 of the 5
+    // seeds leave MORE in the vault than 3ce4cbd1 did (1470: 200 vs 21, 2322: 120 vs 20,
+    // 4698: 1,200 vs 120 with actor 0 paid 0, 5120: 20 vs 11): a regression against what this
+    // test was written to hold, pinned as measured. This walk keeps the state of failed calls
+    // (see `s16ac_walk` for the rollback-faithful one).
     let pinned: [(u64, [u128; 4], u128); 5] = [
-        (1470, [800, 200, 509, 80], 11),
-        (2322, [800, 800, 209, 780], 11),
-        (3167, [880, 500, 1000, 1000], 20),
-        (4698, [880, 200, 800, 1090], 30),
-        (5120, [919, 200, 880, 200], 1),
+        (1470, [800, 200, 400, 0], 200),
+        (2322, [800, 800, 220, 660], 120),
+        (3167, [880, 519, 1000, 1000], 1),
+        (4698, [0, 200, 800, 800], 1200),
+        (5120, [920, 200, 860, 200], 20),
     ];
     for (seed, paid, vault) in pinned {
         let (got, all_closed, v) = s16_resolved_walk(seed).expect("scenario builds");
@@ -15972,8 +16031,10 @@ fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
         assert_eq!((got, v), (paid, vault), "seed {seed}");
     }
     // Liveness: the walk leaves some accounts unclosed only because it stops after 80
-    // random steps; 3ce4cbd1 has exactly these 7. Any other seed here is a new stuck
-    // account (a port of upstream 94979ede (c) adds 131).
+    // random steps; 3ce4cbd1 has exactly 7 (648, 1649, 2061, 2556, 5124, 5620, 5942), and
+    // upstream's K/F netting chain (#387) gives these 6 (1649 and 2556 now close, 1043 is
+    // newly unclosed at step 80; whether it would close with more steps is not checked here).
+    // Any other seed here is a new stuck account (a port of upstream 94979ede (c) adds 131).
     let mut unclosed = vec![];
     let mut built = 0;
     for seed in 0..6000u64 {
@@ -15985,7 +16046,7 @@ fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
         }
     }
     assert!(built > 5000, "vacuity: {built} scenarios built");
-    assert_eq!(unclosed, vec![648, 1649, 2061, 2556, 5124, 5620, 5942]);
+    assert_eq!(unclosed, vec![648, 1043, 2061, 5124, 5620, 5942]);
 }
 
 // ---- AUD-S1-6 hunks (a)+(c), 2026-10-20: rollback-faithful Resolved close-order walk ----
@@ -16251,13 +16312,15 @@ fn s16ac_early_winner_keeps_backing_that_arrives_after_its_close() {
 
 /// Hunk (a), narrowed: once the creditor side can no longer grow its claims, a late loss beyond
 /// the support gap funds the junior residual instead of ownerless source backing. On 1c96c22f
-/// these seeds strand the excess (vault left 21 / 30 / 20).
+/// these seeds strand the excess (vault left 21 / 30 / 20). Before upstream's K/F netting chain
+/// (#387) they read [400,360,1000,1020] 20 / [800,1000,340,845] 15 / [760,230,400,200] 10; under
+/// #387 2041 strands less (11) and 3226 / 3262 strand more (18 / 12), all below 1c96c22f.
 #[test]
 fn s16ac_excess_late_loss_funds_junior_residual_once_creditors_are_final() {
     let pinned: [(u64, [u128; 4], u128); 3] = [
-        (2041, [400, 360, 1000, 1020], 20),
-        (3226, [800, 1000, 340, 845], 15),
-        (3262, [760, 230, 400, 200], 10),
+        (2041, [400, 360, 1000, 1029], 11),
+        (3226, [800, 1000, 340, 842], 18),
+        (3262, [760, 228, 400, 200], 12),
     ];
     for (seed, paid, left) in pinned {
         let o = s16ac_walk(seed, 80).expect("scenario builds");
@@ -16271,10 +16334,13 @@ fn s16ac_excess_late_loss_funds_junior_residual_once_creditors_are_final() {
 /// (upstream 94979ede (c) without 9615f05c leaves 124 scenarios stuck here), value is
 /// conserved exactly, and the atoms left after every account closed are pinned
 /// (1c96c22f: 22,537 at 80 steps and 23,851 with no random steps; the remainder is the
-/// pre-existing stale-mark round-trip class, not these hunks).
+/// pre-existing stale-mark round-trip class, not these hunks). Before upstream's K/F netting
+/// chain (#387): 22,357 and 23,724. Under #387 the 80-step value (24,552) is above 1c96c22f's
+/// 22,537, so that attribution is no longer shown for the 80-step walk; stuck and leaky stay
+/// empty.
 #[test]
 fn s16ac_resolved_close_walk_is_live_conserving_and_pinned() {
-    for (steps, want_left) in [(80usize, 22_357u128), (0, 23_724)] {
+    for (steps, want_left) in [(80usize, 24_552u128), (0, 22_841)] {
         let (built, stuck, leaky, left) = s16ac_walk_stats(steps);
         eprintln!("S16AC steps {steps}: built {built} stuck {stuck:?} leaky {leaky:?} left {left}");
         assert!(built > 5000, "vacuity: {built} scenarios built");

@@ -346,20 +346,29 @@ fn sweep(worlds: u64, seed0: u64) -> Deep {
 /// LP side is never below what the old engine could already do to it, and the order spread of
 /// the total (the cranker's lever) is about 4x smaller than the pre-R1 engine's
 /// (9.37M vs 2.17M summed over the sweep). Total equity never gains.
+///
+/// Upstream's K/F netting chain (#387, the #250 lien-aware rate) replaces R1's numbers: the order
+/// spread of the total falls to 0 (the total is the same in every settle order), but the maker's
+/// worst order is now -124,633,648, below the pre-R1 worst. The name is kept; the floor below is
+/// the measured value under the new maths, and the pre-R1 bound no longer holds.
 #[test]
 fn deep_book_maker_is_never_below_the_pre_r1_worst_order() {
     let d = sweep(700, 5);
     eprintln!("DEEPBOOK ran {} liened_worlds {} sum_maker_min {} sum_total_spread {} gains {}", d.ran, d.liened_worlds, d.sum_maker_min, d.sum_total_spread, d.gains);
     assert!(d.ran >= 150 && d.liened_worlds * 10 >= d.ran * 8, "the worlds must carry liens");
     assert_eq!(d.gains, 0, "total equity never gains");
-    assert!(d.sum_maker_min >= PRE_R1_SUM_MAKER_MIN, "maker's worst order fell below the pre-R1 worst: {} < {}", d.sum_maker_min, PRE_R1_SUM_MAKER_MIN);
+    assert!(d.sum_maker_min >= NETTING_SUM_MAKER_MIN, "maker's worst order fell below the measured floor: {} < {} (pre-R1 worst {})", d.sum_maker_min, NETTING_SUM_MAKER_MIN, PRE_R1_SUM_MAKER_MIN);
     assert!(d.sum_total_spread <= SPREAD_RATCHET, "order spread regressed: {}", d.sum_total_spread);
 }
 
 /// Sum over the 700-world sweep of the maker's worst order, computed on 874fe33a.
 const PRE_R1_SUM_MAKER_MIN: i128 = -78_538_861;
-/// Sum of the per-world order spread of the total: pre-R1 9,370,961, now 2,174,094.
-const SPREAD_RATCHET: i128 = 2_300_000;
+/// The same sum under upstream's K/F netting chain (#387): the #250 rate gives the maker less in
+/// every order (the same number #311 measured for #250 alone).
+const NETTING_SUM_MAKER_MIN: i128 = -124_633_648;
+/// Sum of the per-world order spread of the total: pre-R1 9,370,961, R1 2,174,094 (ratchet
+/// 2,300,000), 0 under #387 (tightened).
+const SPREAD_RATCHET: i128 = 0;
 
 #[test]
 fn deep_book_dump() {

@@ -461,6 +461,8 @@ fn r1_multi_claimant_solvent_losers_are_settle_order_independent() {
 /// 144,500). Resolved close is order dependent in the pre-R1 engine too (the receipt/bucket-expiry
 /// order of the resolved payout, spec "DISTRIBUTION CHARACTERIZATION"); R1 only lowers the gap.
 /// Tighten when it improves; do not call any of this order independent.
+/// Upstream's K/F netting chain (#387): "resolved solvent" is back at the pre-R1 gap (144,500; R1
+/// had 116,400); every other case is at or below its R1 ratchet.
 #[test]
 fn r1_multi_claimant_residual_ratchets() {
     const CASES: &[(&str, Shape, bool, u64, u64, u64, i128, i128)] = &[
@@ -468,7 +470,7 @@ fn r1_multi_claimant_residual_ratchets() {
         ("live bankrupt losers", Shape::Uniform(420_000), false, 7, 800, 26, 21_800, 67_323),
         ("live adversarial (victim solvent, other losers bankrupt)", Shape::Adversarial(420_000), false, 3, 800, 39, 63_100, 144_500),
         ("live adversarial", Shape::Adversarial(420_000), false, 7, 800, 38, 21_800, 128_035),
-        ("resolved solvent", Shape::Uniform(CAP), true, 3, 800, 800, 116_400, 144_500),
+        ("resolved solvent", Shape::Uniform(CAP), true, 3, 800, 800, 144_500, 144_500),
         ("resolved bankrupt losers", Shape::Uniform(420_000), true, 3, 800, 515, 169_800, 169_790),
         ("resolved adversarial", Shape::Adversarial(420_000), true, 3, 800, 800, 466_700, 466_652),
     ];
@@ -567,11 +569,15 @@ fn mixed_liened_and_rich_flippers_ratchets() {
     assert_eq!(worlds, 173);
     assert_eq!(gains, 0);
     // pre-R1 engine: sum of per-account worst -14,995,914, total spread 4,160,314 (all 173 worlds
-    // order dependent, as they still are here: a liened domain stays order dependent)
-    assert!(sum_worst >= -11_300_000, "per-account worst orders regressed: {sum_worst}");
-    assert!(spread <= 1_750_000, "order spread regressed: {spread}");
-    // the rich UNliened flipper in the locked domain: pre-R1 worst 8,599,318 summed; priced on the
-    // domain's lien state it ends at 10.77M; priced on its own (empty) entry it would get the
-    // neutral windfall (11.31M). Pin the domain-level value.
-    assert!((8_599_318..=10_800_000).contains(&rich_worst), "rich flipper priced outside the protective branch: {rich_worst}");
+    // order dependent). R1 ratchets were -11,300,000 and 1,750,000. Under upstream's K/F netting
+    // chain (#387) no world depends on the settle order (spread 0, sum of worst 0); tightened.
+    assert!(sum_worst >= 0, "per-account worst orders regressed: {sum_worst}");
+    assert!(spread <= 0, "order spread regressed: {spread}");
+    // the rich UNliened flipper in the locked domain: pre-R1 worst 8,599,318 summed; under R1,
+    // priced on the domain's lien state it ended at 10.77M, and priced on its own (empty) entry it
+    // would have got the neutral windfall (11.31M). Under upstream's K/F netting chain (#387)
+    // the total is the same in every settle order (spread 0) and the rich flipper ends at
+    // 15,427,446, above both. Whether the pin still tells domain pricing from own-entry pricing
+    // was not measured. Pinned as measured.
+    assert_eq!(rich_worst, 15_427_446, "rich flipper's summed worst order moved");
 }
