@@ -751,6 +751,7 @@ Asset {
     A_epoch_start_long, A_epoch_start_short
 
     OI_eff_long, OI_eff_short
+    raw_basis_sum_long, raw_basis_sum_short
     stored_pos_count_long, stored_pos_count_short
     stale_account_count_long, stale_account_count_short
 
@@ -1098,6 +1099,76 @@ OI_short_after = OI_eff_short - old_short_a - old_short_b + new_short_a + new_sh
 
 They MUST be used for both gating and writeback.
 
+### 5.1a Side A index
+
+(Ported from upstream c030aa40, percolator-prog#449.)
+
+A position opens or grows only while `A_long == A_short == ADL_ONE`, so every
+stored leg has `a_basis == ADL_ONE` and a side's exact exposure is
+`raw_basis_sum_side * A_side / ADL_ONE`, where `raw_basis_sum_side` is the sum of
+`abs(basis_pos_q)` over the side's current-epoch legs. `A_side` is not an
+independent state variable: every transition that changes `OI_eff_side` or
+`raw_basis_sum_side` MUST then set
+
+```text
+A_side = ADL_ONE                                                   if OI_eff_side == raw_basis_sum_side > 0
+A_side = max(1, floor(ADL_ONE * OI_eff_side / raw_basis_sum_side))   if raw_basis_sum_side > OI_eff_side
+A_side unchanged                                                   if raw_basis_sum_side == 0
+```
+
+and MUST fail if `OI_eff_side > raw_basis_sum_side > 0`. A side left with
+effective OI at `A_side < MIN_A_SIDE` becomes DrainOnly. A side with no
+current-epoch basis keeps its index, so a haircut side still shows
+`A_side != ADL_ONE` until it resets. The index MUST NOT be obtained by scaling
+its previous value: the rounding of each scaling would accumulate.
+
+For a side with `R = raw_basis_sum_side <= MAX_OI_SIDE_Q` and
+`OI = OI_eff_side > 0` this gives, after every transition and whatever the
+history:
+
+```text
+OI - R / ADL_ONE < R * A_side / ADL_ONE <= OI          exact exposure; R / ADL_ONE <= 1/10 raw unit
+OI <= sum(abs(effective_pos_q)) < OI + legs            legs = current-epoch legs with basis
+abs(effective_pos_q) <= OI for every leg, with equality for a side's only leg
+A_side >= 10
+```
+
+A same-side reduction of a leg from effective quantity `e` to `e'`
+(`1 <= e' < e`) removes `d = e - e'` from `OI_eff_side`. With `r` the leg's raw
+basis, `S = R - r` the other legs' raw basis and `OI' = OI - d`, the leg keeps
+
+```text
+c1 = r - ceil(d * R / OI)
+c2 = floor(e' * S / (OI' - e'))   if OI' > e', else r
+r' = max(min(c1, c2), OI' - S, 1)
+```
+
+then `raw_basis_sum_side = S + r'` and `A_side` is re-derived. `r'` is the largest
+raw basis for which the reducing leg's share of the side (`raw * OI / R`) falls by
+at least `d` and its new share is at most `e'`, but not less than the side needs to
+carry `OI'` at `A_side <= ADL_ONE`, and not less than one unit; `r' = e'` at
+`A_side == ADL_ONE`. The rounding of a reduction is taken from the reducing leg,
+whose effective quantity afterwards is at most `e'` and can be lower by rounding.
+A full close, or a conversion to a pending obligation, removes the leg's
+`abs(effective_pos_q)` from the side's effective OI (this fork clamps it to
+`OI_eff_side` only for a side's last stored leg, GH#290) and the leg's whole raw
+basis from `raw_basis_sum_side`. `begin_full_drain_reset` zeroes
+`raw_basis_sum_side` and sets `A_side = ADL_ONE`.
+
+Upstream bounds `R` through a trade side-OI cap; this fork checks
+`MAX_OI_SIDE_Q` only in the audit scan, so the bounds above assume it.
+A side whose raw basis exceeds `ADL_ONE * OI_eff_side` is held at `A_side = 1`.
+
+Because `A_side` is re-derived on same-side transitions, a leg's
+`effective_pos_q` can change by one unit through another leg's reduction or
+close. A haircut side whose effective OI again equals its raw basis is at
+`A_side == ADL_ONE` without a reset and accepts new positions. A falling
+`A_side` only lowers effective quantities, so an earlier health certificate stays
+conservative. Whenever a transition leaves `A_side` higher than it found it
+while the side holds raw basis beyond the leg that changed, `risk_epoch` MUST
+advance in the same transition. The incremental certificate after a single fill
+MUST be computed from the leg's `effective_pos_q` as stored after the fill.
+
 ### 5.2 Settlement of side effects
 
 Live touch settlement:
@@ -1191,10 +1262,11 @@ Then:
 
 ```text
 OI_post = OI_before - q_close_q
-A_candidate = floor(A_old * OI_post / OI_before)
+OI_eff_opp = OI_post
+A_opp re-derived from OI_eff_opp and raw_basis_sum_opp (§5.1a)
 ```
 
-If `OI_post == 0`, zero opposing OI and schedule reset. If `A_candidate > 0`, set `A_opp`, set `OI_eff_opp`, add the exact ADL dust bound, and enter `DrainOnly` if `A_opp < MIN_A_SIDE`. If `A_candidate == 0` while `OI_post > 0`, zero both OI sides and schedule both resets.
+If `OI_post == 0`, schedule the opposing side's reset. Otherwise the derived index is at least 10 while any effective OI remains, and the side enters `DrainOnly` if `A_opp < MIN_A_SIDE`. The index is never scaled from `A_old` (upstream c030aa40, percolator-prog#449): the rounding of each scaling would accumulate.
 
 ### 5.5 End-of-instruction reset scheduling
 

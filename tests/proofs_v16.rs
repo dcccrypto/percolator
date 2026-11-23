@@ -4490,7 +4490,9 @@ fn proof_v16_live_market_shape_rejects_long_short_oi_mismatch() {
     asset.oi_eff_long_q = long_units_raw as u128 * POS_SCALE;
     asset.oi_eff_short_q = short_units_raw as u128 * POS_SCALE;
     asset.loss_weight_sum_long = long_units_raw as u128 * POS_SCALE;
+    asset.raw_basis_sum_long_q = long_units_raw as u128 * POS_SCALE;
     asset.loss_weight_sum_short = short_units_raw as u128 * POS_SCALE;
+    asset.raw_basis_sum_short_q = short_units_raw as u128 * POS_SCALE;
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -7489,6 +7491,7 @@ fn proof_v16_retire_nonempty_asset_rejects() {
     asset.oi_eff_long_q = units_raw as u128 * POS_SCALE;
     asset.stored_pos_count_long = 1;
     asset.loss_weight_sum_long = units_raw as u128 * POS_SCALE;
+    asset.raw_basis_sum_long_q = units_raw as u128 * POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -9889,7 +9892,9 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
@@ -9946,7 +9951,9 @@ fn proof_v16_price_move_cap_rejects_before_accrual_mutation() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let header_before = header;
     let market_before = markets[0];
@@ -9981,7 +9988,9 @@ fn proof_v16_funding_rate_cap_rejects_before_accrual_mutation() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let header_before = header;
     let market_before = markets[0];
@@ -10052,7 +10061,9 @@ fn proof_v16_live_residual_booking_to_loss_bearing_side_is_bounded_and_exact() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     asset.social_loss_remainder_short_num = rem;
     let b_short_before = asset.b_short_num;
 
@@ -10112,7 +10123,9 @@ fn proof_v16_bankruptcy_residual_capacity_is_nonzero_and_bounded_with_headroom()
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     asset.social_loss_remainder_short_num = rem_raw as u128;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
 
@@ -10152,7 +10165,9 @@ fn proof_v16_liquidation_preflight_accepts_only_fully_durable_residual() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let header_before = header;
     let market_before = markets[0];
@@ -10195,7 +10210,9 @@ fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_reco
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
@@ -16294,6 +16311,7 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
             asset.stored_pos_count_long = stored_count;
             asset.pending_obligation_count_long = 0;
             asset.loss_weight_sum_long = loss_weight;
+            asset.raw_basis_sum_long_q = loss_weight;
             asset.social_loss_remainder_long_num = remainder;
             asset.social_loss_dust_long_num = dust;
             asset.explicit_unallocated_loss_long = explicit_loss;
@@ -16309,6 +16327,7 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
             asset.stored_pos_count_short = stored_count;
             asset.pending_obligation_count_short = 0;
             asset.loss_weight_sum_short = loss_weight;
+            asset.raw_basis_sum_short_q = loss_weight;
             asset.social_loss_remainder_short_num = remainder;
             asset.social_loss_dust_short_num = dust;
             asset.explicit_unallocated_loss_short = explicit_loss;
@@ -16337,6 +16356,7 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
             expected_reset.f_long_num = 0;
             expected_reset.b_long_num = 0;
             expected_reset.loss_weight_sum_long = 0;
+            expected_reset.raw_basis_sum_long_q = 0;
             expected_reset.social_loss_remainder_long_num = 0;
             expected_reset.social_loss_dust_long_num = normalized_dust;
             expected_reset.explicit_unallocated_loss_long = normalized_explicit;
@@ -16352,6 +16372,7 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
             expected_reset.f_short_num = 0;
             expected_reset.b_short_num = 0;
             expected_reset.loss_weight_sum_short = 0;
+            expected_reset.raw_basis_sum_short_q = 0;
             expected_reset.social_loss_remainder_short_num = 0;
             expected_reset.social_loss_dust_short_num = normalized_dust;
             expected_reset.explicit_unallocated_loss_short = normalized_explicit;
@@ -17264,7 +17285,9 @@ fn proof_v16_canonical_accrual_path_is_partition_invariant() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     delayed_markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let mut split_header = delayed_header;
     let mut split_markets = delayed_markets;

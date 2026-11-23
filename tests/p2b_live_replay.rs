@@ -50,6 +50,11 @@ const V22_CONFIG_EXTRA: usize = 6 * 8; // band_bps, E, Pmax, rent_max, band_max_
 const V22_ASSET_EXTRA: usize = 8 * 8 + 3 * 16; // 8 band u64 words + 3 rent u128 words
 const V22_LEG_EXTRA: usize = 8 + 1 + 16 + 8; // band_epoch_snap, band_liq_pending, rent_snap, rent_carry
 
+// #449 (upstream c030aa40) inserted the two side raw-basis sums after `oi_eff_short_q`. The old
+// bytes have no such words; `load` fills them from the fixture's own legs (test-only: a deployed
+// slab is never read in the new layout, markets are re-created).
+const RAW_BASIS_SUM_EXTRA: usize = 2 * 16;
+
 fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
     use percolator::{AssetStateV16Account, V16ConfigAccount};
     let new_header_len = core::mem::size_of::<MarketGroupV16HeaderAccount>();
@@ -63,8 +68,10 @@ fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
     let old_config_end = config_off + core::mem::size_of::<V16ConfigAccount>() - V22_CONFIG_EXTRA
         + OLD_CHUNK_LEN;
     let new_slot_len = core::mem::size_of::<EngineAssetSlotV16Account>();
-    let old_slot_len = new_slot_len - V22_ASSET_EXTRA;
-    let old_asset_len = core::mem::size_of::<AssetStateV16Account>() - V22_ASSET_EXTRA;
+    let old_slot_len = new_slot_len - V22_ASSET_EXTRA - RAW_BASIS_SUM_EXTRA;
+    let old_asset_len =
+        core::mem::size_of::<AssetStateV16Account>() - V22_ASSET_EXTRA - RAW_BASIS_SUM_EXTRA;
+    let raw_sum_off = core::mem::offset_of!(AssetStateV16Account, raw_basis_sum_long_q);
     let old_stride = ASSET_ORACLE_WRAPPER_LEN + old_slot_len;
     let mut out = Vec::new();
     out.extend_from_slice(&old[..MARKET_GROUP_OFF]);
@@ -89,7 +96,9 @@ fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
     for slot in rest.chunks(stride) {
         out.extend_from_slice(&slot[..ASSET_ORACLE_WRAPPER_LEN]);
         let engine = &slot[ASSET_ORACLE_WRAPPER_LEN..];
-        out.extend_from_slice(&engine[..old_asset_len]);
+        out.extend_from_slice(&engine[..raw_sum_off]);
+        out.extend_from_slice(&[0u8; RAW_BASIS_SUM_EXTRA]);
+        out.extend_from_slice(&engine[raw_sum_off..old_asset_len]);
         out.extend_from_slice(&[0u8; V22_ASSET_EXTRA]);
         out.extend_from_slice(&engine[old_asset_len..]);
         if bare {
@@ -190,11 +199,65 @@ fn load(name: &'static str) -> LiveMarket {
             account,
         ));
     }
+    fill_raw_basis_sums(name, &mut markets, &portfolios);
     LiveMarket {
         name,
         header,
         markets,
         portfolios,
+    }
+}
+
+/// #449: the deployed bytes predate the side raw-basis sums, which `upgrade_v21_slab` inserts as
+/// zeros. Each side's sum is the absolute raw basis of its current-epoch legs, so it is rebuilt
+/// from the fixture's portfolios (the fixture holds every materialized portfolio, which
+/// `p2b_live_fixtures_load_and_validate` checks). Each side's A index is then re-derived from the
+/// two totals, `max(1, floor(ADL_ONE * oi_eff / raw_basis_sum))`, as the engine does after every
+/// change. The deployed index was scaled by floor on every haircut and sits above the derived
+/// one: on the Percolator fixture the long side's exact exposure is about 2.6 raw units above its
+/// effective OI, the #449 drift this layout removes.
+fn fill_raw_basis_sums(
+    name: &str,
+    markets: &mut [Market<u64>],
+    portfolios: &[(String, PortfolioAccountV16Account)],
+) {
+    use percolator::{AssetStateV16Account, V16_MAX_PORTFOLIO_ASSETS_N};
+    for (i, market) in markets.iter_mut().enumerate() {
+        let mut asset = market.engine.asset.try_to_runtime().unwrap();
+        let (mut long, mut short) = (0u128, 0u128);
+        for (_, p) in portfolios {
+            for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+                let leg = p.legs[slot].try_to_runtime().unwrap();
+                if !leg.active || leg.asset_index as usize != i || leg.basis_pos_q == 0 {
+                    continue;
+                }
+                match leg.side {
+                    SideV16::Long if leg.epoch_snap == asset.epoch_long => {
+                        long += leg.basis_pos_q.unsigned_abs()
+                    }
+                    SideV16::Short if leg.epoch_snap == asset.epoch_short => {
+                        short += leg.basis_pos_q.unsigned_abs()
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if long != 0 || short != 0 {
+            println!(
+                "[{name}] asset {i}: raw basis sum L/S = {long}/{short}, deployed A L/S = {}/{}",
+                asset.a_long, asset.a_short
+            );
+        }
+        asset.raw_basis_sum_long_q = long;
+        asset.raw_basis_sum_short_q = short;
+        let derive = |oi: u128, raw: u128, a: u128| match raw {
+            0 => a,
+            r if oi == r => ADL_ONE,
+            r => (ADL_ONE * oi / r).max(1),
+        };
+        asset.a_long = derive(asset.oi_eff_long_q, long, asset.a_long);
+        asset.a_short = derive(asset.oi_eff_short_q, short, asset.a_short);
+        market.engine.asset = AssetStateV16Account::from_runtime(&asset);
     }
 }
 

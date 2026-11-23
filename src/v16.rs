@@ -1075,6 +1075,10 @@ fn add_open_interest_for_new_position(
                 .oi_eff_long_q
                 .checked_add(abs_q)
                 .ok_or(V16Error::ArithmeticOverflow)?;
+            asset.raw_basis_sum_long_q = asset
+                .raw_basis_sum_long_q
+                .checked_add(abs_q)
+                .ok_or(V16Error::ArithmeticOverflow)?;
             asset.loss_weight_sum_long = asset
                 .loss_weight_sum_long
                 .checked_add(loss_weight)
@@ -1087,6 +1091,10 @@ fn add_open_interest_for_new_position(
                 .ok_or(V16Error::CounterOverflow)?;
             asset.oi_eff_short_q = asset
                 .oi_eff_short_q
+                .checked_add(abs_q)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            asset.raw_basis_sum_short_q = asset
+                .raw_basis_sum_short_q
                 .checked_add(abs_q)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             asset.loss_weight_sum_short = asset
@@ -1434,10 +1442,14 @@ impl V16Core {
     ) -> V16Result<(PortfolioLegV16, AssetStateV16)> {
         let mut leg = leg;
         let mut asset = asset;
+        let old_raw_abs = leg.basis_pos_q.unsigned_abs();
+        let new_raw_abs = new_signed.unsigned_abs();
         match leg.side {
             SideV16::Long => {
                 asset.oi_eff_long_q =
                     adjust_u128(asset.oi_eff_long_q, old_effective_abs, new_effective_abs)?;
+                asset.raw_basis_sum_long_q =
+                    adjust_u128(asset.raw_basis_sum_long_q, old_raw_abs, new_raw_abs)?;
                 if !preserve_pending_obligation_weight {
                     asset.loss_weight_sum_long =
                         adjust_u128(asset.loss_weight_sum_long, leg.loss_weight, new_weight)?;
@@ -1446,6 +1458,8 @@ impl V16Core {
             SideV16::Short => {
                 asset.oi_eff_short_q =
                     adjust_u128(asset.oi_eff_short_q, old_effective_abs, new_effective_abs)?;
+                asset.raw_basis_sum_short_q =
+                    adjust_u128(asset.raw_basis_sum_short_q, old_raw_abs, new_raw_abs)?;
                 if !preserve_pending_obligation_weight {
                     asset.loss_weight_sum_short =
                         adjust_u128(asset.loss_weight_sum_short, leg.loss_weight, new_weight)?;
@@ -1742,8 +1756,8 @@ impl V16Core {
     }
 
     /// PRODUCTION KERNEL: the attach-leg core — snapshot the side's basis
-    /// anchors, gate the a-basis range, add open interest, and construct the
-    /// new leg. Pure on (AssetStateV16, scalars); the attach glue calls
+    /// anchors, require unit A, add open interest and raw basis, and construct
+    /// the new leg. Pure on (AssetStateV16, scalars); the attach glue calls
     /// exactly this. loss_weight is caller-supplied (division-bearing).
     pub(crate) fn kernel_attach_leg(
         mut asset: AssetStateV16,
@@ -1772,7 +1786,10 @@ impl V16Core {
                 asset.epoch_short,
             ),
         };
-        if !(MIN_A_SIDE..=ADL_ONE).contains(&a_basis) {
+        // A position opens only at unit A. `raw_basis_sum` and the A index
+        // derived from it rest on every current-epoch leg sharing this basis
+        // (upstream c030aa40, percolator-prog#449).
+        if a_basis != ADL_ONE {
             return Err(V16Error::InvalidLeg);
         }
         if loss_weight == 0 {
@@ -2019,11 +2036,18 @@ impl V16Core {
         {
             return Err(V16Error::InvalidLeg);
         }
+        // The leg's raw basis leaves the side's raw basis sum (#449); the
+        // caller re-derives the side A index afterwards.
+        let raw_abs_q = leg.basis_pos_q.unsigned_abs();
         match leg.side {
             SideV16::Long => {
                 asset.oi_eff_long_q = asset
                     .oi_eff_long_q
                     .checked_sub(retained_effective_oi_q)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                asset.raw_basis_sum_long_q = asset
+                    .raw_basis_sum_long_q
+                    .checked_sub(raw_abs_q)
                     .ok_or(V16Error::CounterUnderflow)?;
                 asset.pending_obligation_count_long = asset
                     .pending_obligation_count_long
@@ -2034,6 +2058,10 @@ impl V16Core {
                 asset.oi_eff_short_q = asset
                     .oi_eff_short_q
                     .checked_sub(retained_effective_oi_q)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                asset.raw_basis_sum_short_q = asset
+                    .raw_basis_sum_short_q
+                    .checked_sub(raw_abs_q)
                     .ok_or(V16Error::CounterUnderflow)?;
                 asset.pending_obligation_count_short = asset
                     .pending_obligation_count_short
@@ -2799,8 +2827,10 @@ impl V16Core {
     /// PRODUCTION KERNEL: the clear-leg asset transform — decrement the
     /// side's stored-position count (and pending-obligation count for a
     /// zero-basis obligation leg), and unless the leg predates a side reset,
-    /// fold its social-loss dust and remove its OI and loss weight. Pure on
-    /// (PortfolioLegV16, AssetStateV16); the clear-leg glue calls exactly this.
+    /// fold its social-loss dust and remove its OI, raw basis and loss weight.
+    /// Pure on (PortfolioLegV16, AssetStateV16); the clear-leg glue calls
+    /// exactly this and re-derives the side A index afterwards
+    /// (`kernel_sync_side_adl_index`, #449).
     pub(crate) fn kernel_clear_leg(
         leg: PortfolioLegV16,
         mut asset: AssetStateV16,
@@ -2867,6 +2897,10 @@ impl V16Core {
                         .oi_eff_long_q
                         .checked_sub(clear_effective_oi_q)
                         .ok_or(V16Error::CounterUnderflow)?;
+                    asset.raw_basis_sum_long_q = asset
+                        .raw_basis_sum_long_q
+                        .checked_sub(raw_abs_q)
+                        .ok_or(V16Error::CounterUnderflow)?;
                     asset.loss_weight_sum_long = asset
                         .loss_weight_sum_long
                         .checked_sub(leg.loss_weight)
@@ -2892,6 +2926,10 @@ impl V16Core {
                     asset.oi_eff_short_q = asset
                         .oi_eff_short_q
                         .checked_sub(clear_effective_oi_q)
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    asset.raw_basis_sum_short_q = asset
+                        .raw_basis_sum_short_q
+                        .checked_sub(raw_abs_q)
                         .ok_or(V16Error::CounterUnderflow)?;
                     asset.loss_weight_sum_short = asset
                         .loss_weight_sum_short
@@ -2960,6 +2998,7 @@ impl V16Core {
                 asset.f_long_num = 0;
                 asset.b_long_num = 0;
                 asset.loss_weight_sum_long = 0;
+                asset.raw_basis_sum_long_q = 0;
                 asset.a_long = ADL_ONE;
                 asset.epoch_long = asset
                     .epoch_long
@@ -2989,6 +3028,7 @@ impl V16Core {
                 asset.f_short_num = 0;
                 asset.b_short_num = 0;
                 asset.loss_weight_sum_short = 0;
+                asset.raw_basis_sum_short_q = 0;
                 asset.a_short = ADL_ONE;
                 asset.epoch_short = asset
                     .epoch_short
@@ -3219,9 +3259,10 @@ impl V16Core {
     }
 
     /// Choose the largest retained raw basis whose conservative effective
-    /// quantity is `effective_abs_q`. This is the inverse used after a partial
-    /// reduction: `ceil(raw * current_a / a_basis) == effective` while the
-    /// account remains on the same side.
+    /// quantity is `effective_abs_q`: `ceil(raw * current_a / a_basis) ==
+    /// effective`. The position-delta plan uses it for same-side growth, which
+    /// is admitted only at unit A, where it returns `effective_abs_q` itself.
+    /// A same-side reduction uses `kernel_raw_basis_after_adl_reduction`.
     pub(crate) fn kernel_raw_basis_for_adl_effective_quantity(
         effective_abs_q: u128,
         a_basis: u128,
@@ -3238,6 +3279,170 @@ impl V16Core {
             return Err(V16Error::InvalidLeg);
         }
         Ok(raw_abs_q)
+    }
+
+    /// PRODUCTION KERNEL: the side A index implied by the side's two totals,
+    /// `floor(ADL_ONE * oi_eff / raw_basis_sum)`. Every current-epoch leg has
+    /// `a_basis == ADL_ONE`, so `raw_basis_sum * A / ADL_ONE` is the side's
+    /// exact exposure. Deriving A from the totals after every change, instead
+    /// of scaling the previous A, keeps that exposure within
+    /// `raw_basis_sum / ADL_ONE` of `oi_eff` (under a tenth of a raw unit at
+    /// `MAX_OI_SIDE_Q`) whatever the history of reductions (percolator-prog
+    /// #449; ported from upstream c030aa40).
+    ///
+    /// Upstream bounds a side's raw basis through its trade side-OI cap; this
+    /// fork checks `MAX_OI_SIDE_Q` only in the audit scan. A side whose raw
+    /// basis exceeds `ADL_ONE * oi_eff` (more than ten maximum-size legs at a
+    /// near-total haircut) is held at index 1, where its exact exposure
+    /// `raw_basis_sum / ADL_ONE` is above `oi_eff`. Porting the cap is a
+    /// follow-up.
+    ///
+    /// - No current-epoch basis: the index is unused and keeps its value, so a
+    ///   haircut side still shows `A != ADL_ONE` until it resets.
+    /// - `oi_eff == raw_basis_sum`: unit A, without a division.
+    /// - `oi_eff == 0` with basis left: the smallest valid index, 1. The side
+    ///   is exhausted and its legs own nothing.
+    ///
+    /// More effective OI than raw basis has no index (`A <= ADL_ONE`).
+    #[inline]
+    pub(crate) fn kernel_side_adl_index(
+        oi_eff_q: u128,
+        raw_basis_sum_q: u128,
+        current_a: u128,
+    ) -> V16Result<u128> {
+        if raw_basis_sum_q == 0 {
+            return Ok(current_a);
+        }
+        if oi_eff_q > raw_basis_sum_q {
+            return Err(V16Error::InvalidLeg);
+        }
+        if oi_eff_q == raw_basis_sum_q {
+            return Ok(ADL_ONE);
+        }
+        // `oi_eff < raw_basis_sum`; a checked product (an overflow needs an
+        // effective OI above 3e23 and fails closed).
+        let derived = ADL_ONE
+            .checked_mul(oi_eff_q)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            / raw_basis_sum_q;
+        Ok(derived.max(1))
+    }
+
+    /// PRODUCTION KERNEL: bring one side's A index in line with its totals
+    /// after its effective OI or raw basis changed. A side that keeps
+    /// effective OI at an index below `MIN_A_SIDE` becomes DrainOnly, as after
+    /// any deep haircut. Nothing else in the asset changes.
+    pub(crate) fn kernel_sync_side_adl_index(
+        mut asset: AssetStateV16,
+        side: SideV16,
+    ) -> V16Result<AssetStateV16> {
+        match side {
+            SideV16::Long => {
+                asset.a_long = Self::kernel_side_adl_index(
+                    asset.oi_eff_long_q,
+                    asset.raw_basis_sum_long_q,
+                    asset.a_long,
+                )?;
+                if asset.oi_eff_long_q != 0
+                    && asset.a_long < MIN_A_SIDE
+                    && asset.mode_long == SideModeV16::Normal
+                {
+                    asset.mode_long = SideModeV16::DrainOnly;
+                }
+            }
+            SideV16::Short => {
+                asset.a_short = Self::kernel_side_adl_index(
+                    asset.oi_eff_short_q,
+                    asset.raw_basis_sum_short_q,
+                    asset.a_short,
+                )?;
+                if asset.oi_eff_short_q != 0
+                    && asset.a_short < MIN_A_SIDE
+                    && asset.mode_short == SideModeV16::Normal
+                {
+                    asset.mode_short = SideModeV16::DrainOnly;
+                }
+            }
+        }
+        Ok(asset)
+    }
+
+    /// PRODUCTION KERNEL: the raw basis a leg keeps after a same-side
+    /// reduction of its effective quantity from `effective_abs_q` to
+    /// `next_effective_abs_q`, on a side with `oi_eff_q` effective OI and
+    /// `raw_basis_sum_q` raw basis (this leg's `raw_abs_q` included).
+    ///
+    /// The reduction takes `d = effective - next_effective` out of the side's
+    /// effective OI and the A index is then re-derived from the new totals
+    /// (`kernel_side_adl_index`), so the raw basis chosen here decides how the
+    /// rounding is shared with the side's other legs. Writing a leg's share
+    /// of the side as `raw * oi_eff / raw_basis_sum`, the result is the
+    /// largest raw basis for which
+    ///
+    /// - the leg's share falls by at least `d`, so the rounding is taken from
+    ///   the reducing leg and no other leg's share falls, and
+    /// - the leg's new share is at most `next_effective`, so its effective
+    ///   quantity does not end above the quantity it asked for,
+    ///
+    /// but never less than one unit (the leg stays open) and never less than
+    /// the side needs to carry its remaining effective OI (`A <= ADL_ONE`).
+    /// At unit A all of these coincide with `next_effective`.
+    ///
+    /// The earlier rule kept the largest raw basis whose own ceiling equalled
+    /// the target at the unchanged A. A leg could then give up less exposure
+    /// than the effective OI it removed, and the difference compounded across
+    /// reductions (percolator-prog #449).
+    pub(crate) fn kernel_raw_basis_after_adl_reduction(
+        raw_abs_q: u128,
+        effective_abs_q: u128,
+        next_effective_abs_q: u128,
+        oi_eff_q: u128,
+        raw_basis_sum_q: u128,
+    ) -> V16Result<u128> {
+        if next_effective_abs_q == 0
+            || next_effective_abs_q >= effective_abs_q
+            || effective_abs_q > oi_eff_q
+            || effective_abs_q > raw_abs_q
+            || oi_eff_q > raw_basis_sum_q
+            || raw_abs_q > raw_basis_sum_q
+        {
+            return Err(V16Error::InvalidLeg);
+        }
+        if oi_eff_q == raw_basis_sum_q {
+            // Unit A: every leg's raw basis is its effective quantity.
+            if effective_abs_q != raw_abs_q {
+                return Err(V16Error::InvalidLeg);
+            }
+            return Ok(next_effective_abs_q);
+        }
+        let reduce_q = effective_abs_q - next_effective_abs_q;
+        let oi_after = oi_eff_q - reduce_q;
+        let other_raw = raw_basis_sum_q - raw_abs_q;
+        // Every operand is at most `raw_basis_sum`; the products are checked
+        // and fail closed on overflow.
+        //
+        // Share falls by at least `reduce_q`: give up ceil(reduce * R / OI).
+        let given_up_num = reduce_q
+            .checked_mul(raw_basis_sum_q)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let raw_given_up = given_up_num / oi_eff_q + u128::from(given_up_num % oi_eff_q != 0);
+        let by_share = raw_abs_q.saturating_sub(raw_given_up);
+        // New share at most `next_effective`:
+        // raw * oi_after <= next_effective * (other_raw + raw).
+        let by_target = if oi_after > next_effective_abs_q {
+            next_effective_abs_q
+                .checked_mul(other_raw)
+                .ok_or(V16Error::ArithmeticOverflow)?
+                / (oi_after - next_effective_abs_q)
+        } else {
+            raw_abs_q
+        };
+        let side_floor = oi_after.saturating_sub(other_raw);
+        let next_raw = by_share.min(by_target).max(side_floor).max(1);
+        if next_raw >= raw_abs_q {
+            return Err(V16Error::InvalidLeg);
+        }
+        Ok(next_raw)
     }
 
     /// Applies the uncovered tail of a loss after source support has already
@@ -6708,6 +6913,12 @@ pub struct AssetStateV16 {
     pub b_epoch_start_short_num: u128,
     pub oi_eff_long_q: u128,
     pub oi_eff_short_q: u128,
+    /// Sum of `abs(basis_pos_q)` over the side's current-epoch legs. Every
+    /// such leg has `a_basis == ADL_ONE`, so the side's exact exposure is
+    /// `raw_basis_sum * A / ADL_ONE`, and `A` is derived from
+    /// `oi_eff / raw_basis_sum` (`kernel_side_adl_index`, #449).
+    pub raw_basis_sum_long_q: u128,
+    pub raw_basis_sum_short_q: u128,
     pub stored_pos_count_long: u64,
     pub stored_pos_count_short: u64,
     pub stale_account_count_long: u64,
@@ -6777,6 +6988,8 @@ impl Default for AssetStateV16 {
             b_epoch_start_short_num: 0,
             oi_eff_long_q: 0,
             oi_eff_short_q: 0,
+            raw_basis_sum_long_q: 0,
+            raw_basis_sum_short_q: 0,
             stored_pos_count_long: 0,
             stored_pos_count_short: 0,
             stale_account_count_long: 0,
@@ -8427,14 +8640,31 @@ impl PositionSlotMapV16 {
                     } else {
                         asset.a_short
                     };
-                    let mut next_abs = V16Core::kernel_raw_basis_for_adl_effective_quantity(
-                        next_effective_q.unsigned_abs(),
-                        self.a_basis[slot],
-                        current_a,
-                    )?;
-                    if next_effective_q.unsigned_abs() <= current_effective_q.unsigned_abs() {
-                        next_abs = next_abs.min(current_q.unsigned_abs());
-                    }
+                    let next_abs =
+                        if next_effective_q.unsigned_abs() < current_effective_q.unsigned_abs() {
+                            // A reduction shares its rounding with the side through
+                            // the re-derived A index (#449, upstream c030aa40).
+                            let (oi_eff_q, raw_basis_sum_q) = if next_effective_q > 0 {
+                                (asset.oi_eff_long_q, asset.raw_basis_sum_long_q)
+                            } else {
+                                (asset.oi_eff_short_q, asset.raw_basis_sum_short_q)
+                            };
+                            V16Core::kernel_raw_basis_after_adl_reduction(
+                                current_q.unsigned_abs(),
+                                current_effective_q.unsigned_abs(),
+                                next_effective_q.unsigned_abs(),
+                                oi_eff_q,
+                                raw_basis_sum_q,
+                            )?
+                        } else {
+                            // Growth is admitted only at unit A, where raw basis and
+                            // effective quantity coincide.
+                            V16Core::kernel_raw_basis_for_adl_effective_quantity(
+                                next_effective_q.unsigned_abs(),
+                                self.a_basis[slot],
+                                current_a,
+                            )?
+                        };
                     let next_abs =
                         i128::try_from(next_abs).map_err(|_| V16Error::ArithmeticOverflow)?;
                     if next_effective_q > 0 {
@@ -9774,6 +10004,8 @@ pub struct AssetStateV16Account {
     pub b_epoch_start_short_num: V16PodU128,
     pub oi_eff_long_q: V16PodU128,
     pub oi_eff_short_q: V16PodU128,
+    pub raw_basis_sum_long_q: V16PodU128,
+    pub raw_basis_sum_short_q: V16PodU128,
     pub stored_pos_count_long: V16PodU64,
     pub stored_pos_count_short: V16PodU64,
     pub stale_account_count_long: V16PodU64,
@@ -9833,6 +10065,8 @@ impl AssetStateV16Account {
             b_epoch_start_short_num: V16PodU128::new(value.b_epoch_start_short_num),
             oi_eff_long_q: V16PodU128::new(value.oi_eff_long_q),
             oi_eff_short_q: V16PodU128::new(value.oi_eff_short_q),
+            raw_basis_sum_long_q: V16PodU128::new(value.raw_basis_sum_long_q),
+            raw_basis_sum_short_q: V16PodU128::new(value.raw_basis_sum_short_q),
             stored_pos_count_long: V16PodU64::new(value.stored_pos_count_long),
             stored_pos_count_short: V16PodU64::new(value.stored_pos_count_short),
             stale_account_count_long: V16PodU64::new(value.stale_account_count_long),
@@ -9912,6 +10146,8 @@ impl AssetStateV16Account {
             b_epoch_start_short_num: self.b_epoch_start_short_num.get(),
             oi_eff_long_q: self.oi_eff_long_q.get(),
             oi_eff_short_q: self.oi_eff_short_q.get(),
+            raw_basis_sum_long_q: self.raw_basis_sum_long_q.get(),
+            raw_basis_sum_short_q: self.raw_basis_sum_short_q.get(),
             stored_pos_count_long: self.stored_pos_count_long.get(),
             stored_pos_count_short: self.stored_pos_count_short.get(),
             stale_account_count_long: self.stale_account_count_long.get(),
@@ -10346,6 +10582,8 @@ impl EngineAssetSlotV16Account {
             && asset.b_epoch_start_short_num.get() == 0
             && asset.oi_eff_long_q.get() == 0
             && asset.oi_eff_short_q.get() == 0
+            && asset.raw_basis_sum_long_q.get() == 0
+            && asset.raw_basis_sum_short_q.get() == 0
             && asset.stored_pos_count_long.get() == 0
             && asset.stored_pos_count_short.get() == 0
             && asset.stale_account_count_long.get() == 0
@@ -10402,6 +10640,8 @@ impl EngineAssetSlotV16Account {
             && asset.b_epoch_start_short_num == 0
             && asset.oi_eff_long_q == 0
             && asset.oi_eff_short_q == 0
+            && asset.raw_basis_sum_long_q == 0
+            && asset.raw_basis_sum_short_q == 0
             && asset.stored_pos_count_long == 0
             && asset.stored_pos_count_short == 0
             && asset.stale_account_count_long == 0
@@ -11327,10 +11567,85 @@ impl<'a, T> MarketGroupV16View<'a, T> {
             || (asset.oi_eff_short_q != 0 && asset.loss_weight_sum_short == 0)
             || (asset.loss_weight_sum_long != 0 && asset.stored_pos_count_long == 0)
             || (asset.loss_weight_sum_short != 0 && asset.stored_pos_count_short == 0)
+            || !Self::side_adl_totals_are_coherent(
+                asset.oi_eff_long_q,
+                asset.raw_basis_sum_long_q,
+                asset.a_long,
+                asset.loss_weight_sum_long,
+                asset.mode_long,
+            )
+            || !Self::side_adl_totals_are_coherent(
+                asset.oi_eff_short_q,
+                asset.raw_basis_sum_short_q,
+                asset.a_short,
+                asset.loss_weight_sum_short,
+                asset.mode_short,
+            )
         {
             return Err(V16Error::InvalidConfig);
         }
         Ok(())
+    }
+
+    /// One side's raw basis, effective OI and A index agree (#449): the raw
+    /// basis of the current-epoch legs is bounded by their loss weight and
+    /// carries all of the side's effective OI, and while there is raw basis
+    /// the A index is exactly the one derived from the two totals. A side
+    /// without current-epoch basis holds no effective OI except the unowned
+    /// residue `drop_unowned_side_oi` removes, and keeps whatever index it had.
+    ///
+    /// The index is checked against `kernel_side_adl_index` by multiplication
+    /// instead of by calling the kernel: `a` is `floor(n / r)` exactly when
+    /// `a * r <= n < (a + 1) * r`. That keeps the scan independent of the
+    /// kernel it audits and keeps a wide division out of every proof that
+    /// validates a market. `tests/adl_side_index_449.rs` holds the two
+    /// formulations equal. The three quantities are bounded far below 64
+    /// bits (`MAX_OI_SIDE_Q`, `ADL_ONE`); a side where one of them is not is
+    /// not coherent.
+    #[cfg(any(test, kani, feature = "audit-scan"))]
+    pub(crate) fn side_adl_totals_are_coherent(
+        oi_eff_q: u128,
+        raw_basis_sum_q: u128,
+        a_side: u128,
+        loss_weight_sum: u128,
+        mode: SideModeV16,
+    ) -> bool {
+        if raw_basis_sum_q > loss_weight_sum {
+            return false;
+        }
+        if raw_basis_sum_q == 0 {
+            return true;
+        }
+        if oi_eff_q > raw_basis_sum_q {
+            return false;
+        }
+        if mode == SideModeV16::Normal && oi_eff_q != 0 && a_side < MIN_A_SIDE {
+            return false;
+        }
+        if oi_eff_q == raw_basis_sum_q {
+            return a_side == ADL_ONE;
+        }
+        // `oi_eff < raw_basis_sum`: the index is `max(1, floor(ADL_ONE * oi_eff /
+        // raw_basis_sum))`, at least 1 and strictly below `ADL_ONE`.
+        let (Ok(raw), Ok(oi), Ok(a)) = (
+            u64::try_from(raw_basis_sum_q),
+            u64::try_from(oi_eff_q),
+            u64::try_from(a_side),
+        ) else {
+            return false;
+        };
+        if a == 0 || a_side >= ADL_ONE {
+            return false;
+        }
+        // `ADL_ONE < 2^50` and both factors of each product fit 64 bits, so
+        // neither product can overflow a u128.
+        let target = ADL_ONE * u128::from(oi);
+        if target < u128::from(raw) {
+            // The floor is zero; the index is held at its minimum.
+            return a == 1;
+        }
+        let low = u128::from(a) * u128::from(raw);
+        low <= target && target - low < u128::from(raw)
     }
 
     #[cfg(any(test, kani, feature = "audit-scan"))]
@@ -20967,6 +21282,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(notional.saturating_mul(2) < min)
     }
 
+    /// The ADL-effective quantity of a current-epoch leg with signed raw
+    /// basis `raw_q` on `asset`: zero without a position. Every stored leg is
+    /// based at `ADL_ONE` (#449).
+    fn effective_abs_q_for_raw_basis(asset: AssetStateV16, raw_q: i128) -> V16Result<u128> {
+        let current_a = match raw_q.signum() {
+            1 => asset.a_long,
+            -1 => asset.a_short,
+            _ => return Ok(0),
+        };
+        V16Core::kernel_adl_effective_quantity_ceil(raw_q.unsigned_abs(), ADL_ONE, current_a)
+    }
+
     fn asset_state(&self, asset_index: usize) -> V16Result<AssetStateV16> {
         if asset_index >= self.header.config.max_market_slots.get() as usize
             || asset_index >= self.markets.len()
@@ -21256,6 +21583,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || asset.b_epoch_start_short_num != 0
             || asset.oi_eff_long_q != 0
             || asset.oi_eff_short_q != 0
+            || asset.raw_basis_sum_long_q != 0
+            || asset.raw_basis_sum_short_q != 0
             || asset.stored_pos_count_long != 0
             || asset.stored_pos_count_short != 0
             || asset.stale_account_count_long != 0
@@ -22126,6 +22455,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.header.config.band_bps.get(),
                 self.header.config.band_max_positions_per_side.get(),
             )?;
+        let asset = self.sync_side_adl_index(asset, side, basis_pos_q.unsigned_abs())?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&new_leg);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
         active_bitmap_set(&mut bitmap, leg_slot)?;
@@ -22191,6 +22521,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let effective_abs_q = V16Core::effective_abs_quantity_for_detach(asset, leg)?;
         let (leg, asset) =
             V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
+        let asset = self.sync_side_adl_index(asset, leg.side, 0)?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)
@@ -22293,6 +22624,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             None => V16Core::effective_abs_quantity_for_detach(asset, leg)?,
         };
         let asset = V16Core::kernel_clear_leg(leg, asset, clear_effective_oi_q)?;
+        let asset = self.sync_side_adl_index(asset, leg.side, 0)?;
         account.header.legs[leg_slot] =
             PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
@@ -22417,6 +22749,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let effective_abs_q = V16Core::effective_abs_quantity_for_detach(asset, leg)?;
                 let (obligation, asset) =
                     V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
+                let asset = self.sync_side_adl_index(asset, leg.side, 0)?;
                 account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&obligation);
                 account.header.health_cert.valid = 0;
                 self.set_asset_state(asset_index, asset)?;
@@ -22486,6 +22819,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             old_effective_abs,
             new_effective_abs,
         )?;
+        let new_asset = self.sync_side_adl_index(new_asset, old_leg.side, new.unsigned_abs())?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&new_leg);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, new_asset)?;
@@ -23138,6 +23472,46 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(outcome)
     }
 
+    /// Bring one side's A index in line with its totals after a position change
+    /// or a haircut (`kernel_sync_side_adl_index`, #449), and keep cached health
+    /// certificates sound.
+    ///
+    /// A lower index only shrinks the effective quantity of the side's legs, so
+    /// a certificate issued before it stays conservative. A higher index can
+    /// raise the effective quantity of the side's other legs by a unit without
+    /// any action of their owners, so it advances the risk epoch and no
+    /// certificate issued before the change is current. `acting_raw_after_q` is
+    /// the raw basis the leg that just changed keeps on this side: zero if it
+    /// left, and zero for a haircut, which changes no leg of this side. The
+    /// caller invalidates that leg's own account, so the epoch moves only when
+    /// the side holds raw basis beyond it.
+    fn sync_side_adl_index(
+        &mut self,
+        asset: AssetStateV16,
+        side: SideV16,
+        acting_raw_after_q: u128,
+    ) -> V16Result<AssetStateV16> {
+        let a_before = match side {
+            SideV16::Long => asset.a_long,
+            SideV16::Short => asset.a_short,
+        };
+        let asset = V16Core::kernel_sync_side_adl_index(asset, side)?;
+        let (a_after, raw_basis_sum_q) = match side {
+            SideV16::Long => (asset.a_long, asset.raw_basis_sum_long_q),
+            SideV16::Short => (asset.a_short, asset.raw_basis_sum_short_q),
+        };
+        if a_after > a_before && raw_basis_sum_q > acting_raw_after_q {
+            self.header.risk_epoch = V16PodU64::new(
+                self.header
+                    .risk_epoch
+                    .get()
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?,
+            );
+        }
+        Ok(asset)
+    }
+
     fn begin_full_drain_reset_inner(&mut self, asset_index: usize, side: SideV16) -> V16Result<()> {
         self.validate_configured_asset_index(asset_index)?;
         if self.has_pending_domain_loss_barrier(asset_index, side)? {
@@ -23175,10 +23549,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    // Effective OI on a side with no stored leg belongs to no one: residue of the
-    // floored A index. It breaks spec.md:953 (OI with no loss weight), keeps the
-    // side from its zero-OI reset, and cannot leave through a leg clear, which
-    // refuses more than the leg's raw basis. Before resolution it is dropped only
+    // Effective OI on a side with no stored leg belongs to no one. Before #449
+    // it was the residue of an A index scaled by floor; with the index derived
+    // from the side's totals (upstream c030aa40), a side's last leg removes the
+    // side's whole effective OI and no transition of this engine leaves any
+    // behind, so this is a fail-safe. Such OI breaks spec.md:953 (OI with no
+    // loss weight), keeps the side from its zero-OI reset, and cannot leave
+    // through a leg clear, which refuses more than the leg's raw basis. Before
+    // resolution it is dropped only
     // once the whole asset is legless and neither side has a pending loss
     // barrier, so both sides reach zero together and Live OI stays equal; after
     // resolution each legless side without a barrier drops its own. A barrier
@@ -23271,42 +23649,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let opp = opposite_side(closed_side);
         let mut asset = self.asset_state(asset_index)?;
-        let (opp_oi_before, opp_a_before) = match opp {
-            SideV16::Long => (asset.oi_eff_long_q, asset.a_long),
-            SideV16::Short => (asset.oi_eff_short_q, asset.a_short),
+        let opp_oi_before = match opp {
+            SideV16::Long => asset.oi_eff_long_q,
+            SideV16::Short => asset.oi_eff_short_q,
         };
         if close_q > opp_oi_before {
             return Err(V16Error::InvalidLeg);
         }
         let opp_oi_after = opp_oi_before - close_q;
-        let opp_a_after = if opp_oi_after == 0 {
-            ADL_ONE
-        } else {
-            let candidate = wide_mul_div_floor_u128(opp_a_before, opp_oi_after, opp_oi_before);
-            if candidate == 0 {
-                self.declare_permissionless_recovery(
-                    PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
-                )?;
-                return Err(V16Error::RecoveryRequired);
-            }
-            candidate
-        };
         match opp {
-            SideV16::Long => {
-                asset.oi_eff_long_q = opp_oi_after;
-                asset.a_long = opp_a_after;
-                if opp_oi_after != 0 && asset.a_long < MIN_A_SIDE {
-                    asset.mode_long = SideModeV16::DrainOnly;
-                }
-            }
-            SideV16::Short => {
-                asset.oi_eff_short_q = opp_oi_after;
-                asset.a_short = opp_a_after;
-                if opp_oi_after != 0 && asset.a_short < MIN_A_SIDE {
-                    asset.mode_short = SideModeV16::DrainOnly;
-                }
-            }
+            SideV16::Long => asset.oi_eff_long_q = opp_oi_after,
+            SideV16::Short => asset.oi_eff_short_q = opp_oi_after,
         }
+        // The haircut is the side's effective OI falling against unchanged raw
+        // basis: A is re-derived from the two totals, never scaled from its
+        // previous value, so its rounding cannot accumulate (#449, upstream
+        // c030aa40). With raw basis at most `MAX_OI_SIDE_Q` the derived index
+        // is at least 10 while any effective OI remains (this fork does not
+        // enforce that bound on fills; see `kernel_side_adl_index`).
+        let asset = self.sync_side_adl_index(asset, opp, 0)?;
         self.set_asset_state(asset_index, asset)?;
         if opp_oi_after == 0 {
             self.begin_full_drain_reset_inner(asset_index, opp)?;
@@ -24663,19 +25024,34 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             request.asset_index,
         )?;
         if recertify_after_fill {
-            let price = self.asset_state(request.asset_index)?.effective_price;
+            let post_fill_asset = self.asset_state(request.asset_index)?;
+            let price = post_fill_asset.effective_price;
+            // The incremental certificate has to describe the position the fill
+            // left. A reduction on a haircut side is settled by the side rule, so
+            // the leg's effective quantity can end below the quantity the fill
+            // asked for (#449): take it from the raw basis the fill stored and
+            // the index its side has now, not from the request. Both are at
+            // hand; looking the leg up again would scan the account.
+            let long_new_abs_q = Self::effective_abs_q_for_raw_basis(
+                post_fill_asset,
+                trade_preflight.long_lookup.next_q,
+            )?;
+            let short_new_abs_q = Self::effective_abs_q_for_raw_basis(
+                post_fill_asset,
+                trade_preflight.short_lookup.next_q,
+            )?;
             self.recertify_account_after_trade_delta(
                 long_account,
                 request.asset_index,
                 trade_preflight.long_old_abs_q,
-                trade_preflight.long_new_abs_q,
+                long_new_abs_q,
                 price,
             )?;
             self.recertify_account_after_trade_delta(
                 short_account,
                 request.asset_index,
                 trade_preflight.short_old_abs_q,
-                trade_preflight.short_new_abs_q,
+                short_new_abs_q,
                 price,
             )?;
         }
@@ -29780,6 +30156,57 @@ pub fn kani_raw_basis_for_adl_effective_quantity(
     V16Core::kernel_raw_basis_for_adl_effective_quantity(effective_abs_q, a_basis, current_a)
 }
 
+/// #449 (upstream c030aa40): the side A index derived from the side's totals.
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn kani_side_adl_index(
+    oi_eff_q: u128,
+    raw_basis_sum_q: u128,
+    current_a: u128,
+) -> V16Result<u128> {
+    V16Core::kernel_side_adl_index(oi_eff_q, raw_basis_sum_q, current_a)
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn kani_sync_side_adl_index(asset: AssetStateV16, side: SideV16) -> V16Result<AssetStateV16> {
+    V16Core::kernel_sync_side_adl_index(asset, side)
+}
+
+/// The audit scan's per-side predicate, exposed so a test can hold it
+/// against `kernel_side_adl_index`.
+#[cfg(any(kani, all(feature = "fuzz", feature = "audit-scan")))]
+pub fn kani_side_adl_totals_are_coherent(
+    oi_eff_q: u128,
+    raw_basis_sum_q: u128,
+    a_side: u128,
+    loss_weight_sum: u128,
+    mode: SideModeV16,
+) -> bool {
+    MarketGroupV16View::<'_, u64>::side_adl_totals_are_coherent(
+        oi_eff_q,
+        raw_basis_sum_q,
+        a_side,
+        loss_weight_sum,
+        mode,
+    )
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn kani_raw_basis_after_adl_reduction(
+    raw_abs_q: u128,
+    effective_abs_q: u128,
+    next_effective_abs_q: u128,
+    oi_eff_q: u128,
+    raw_basis_sum_q: u128,
+) -> V16Result<u128> {
+    V16Core::kernel_raw_basis_after_adl_reduction(
+        raw_abs_q,
+        effective_abs_q,
+        next_effective_abs_q,
+        oi_eff_q,
+        raw_basis_sum_q,
+    )
+}
+
 #[cfg(any(kani, feature = "fuzz"))]
 pub fn kani_funding_index_deltas(
     funding_num: i128,
@@ -30027,6 +30454,8 @@ pub fn kani_eq_asset_state_v16_account(a: &AssetStateV16Account, b: &AssetStateV
         && a.b_epoch_start_short_num.get() == b.b_epoch_start_short_num.get()
         && a.oi_eff_long_q.get() == b.oi_eff_long_q.get()
         && a.oi_eff_short_q.get() == b.oi_eff_short_q.get()
+        && a.raw_basis_sum_long_q.get() == b.raw_basis_sum_long_q.get()
+        && a.raw_basis_sum_short_q.get() == b.raw_basis_sum_short_q.get()
         && a.stored_pos_count_long.get() == b.stored_pos_count_long.get()
         && a.stored_pos_count_short.get() == b.stored_pos_count_short.get()
         && a.stale_account_count_long.get() == b.stale_account_count_long.get()
@@ -30565,7 +30994,9 @@ fn validate_active_leg(leg: PortfolioLegV16) -> V16Result<()> {
         validate_basis(leg.basis_pos_q)?;
         loss_weight_for_basis(leg.basis_pos_q.unsigned_abs(), leg.a_basis)?
     };
-    if !(MIN_A_SIDE..=ADL_ONE).contains(&leg.a_basis)
+    // Positions open only at unit A; the side's raw basis sum and the A index
+    // derived from it (#449) rest on every leg sharing that basis.
+    if leg.a_basis != ADL_ONE
         || leg.loss_weight == 0
         || leg.loss_weight < current_loss_weight
         || leg.loss_weight > SOCIAL_LOSS_DEN
@@ -31792,7 +32223,14 @@ mod attach_writer_cross_side_oi_tripwire_tests {
     /// pins that it is a scale at which an A-scaled contribution rounds apart
     /// from the untouched short side. Most scales do not, so do not reduce this
     /// to a round number without re-checking that test.
-    const A_LONG: u128 = 656_160_904_301_049;
+    ///
+    /// #449 (upstream c030aa40): a side's A index is now derived from its
+    /// totals, `floor(ADL_ONE * oi_eff / raw_basis_sum)`, so the fixture's A
+    /// must be one some raw-basis sum produces for `BALANCED_OI`. It is the
+    /// index of `LONG_RAW_BASIS_SUM` (the earlier 656_160_904_301_049 is the
+    /// index of no integer raw-basis sum for this OI) and still trips.
+    const A_LONG: u128 = 656_160_898_624_952;
+    const LONG_RAW_BASIS_SUM: u128 = 94_909_450;
     const BALANCED_OI: u128 = 62_275_870;
     const ATTACH_Q: u128 = 8_513_359;
 
@@ -31814,9 +32252,26 @@ mod attach_writer_cross_side_oi_tripwire_tests {
         asset.oi_eff_short_q = BALANCED_OI;
         asset.loss_weight_sum_long = loss_weight_for_basis(BALANCED_OI, A_LONG).unwrap();
         asset.loss_weight_sum_short = loss_weight_for_basis(BALANCED_OI, ADL_ONE).unwrap();
+        asset.raw_basis_sum_long_q = LONG_RAW_BASIS_SUM;
+        asset.raw_basis_sum_short_q = BALANCED_OI;
         asset.stored_pos_count_long = 1;
         asset.stored_pos_count_short = 1;
         asset
+    }
+
+    /// Re-derive both sides' A index from their totals, as the attach glue
+    /// does after the writer (`sync_side_adl_index`, #449).
+    fn sync_both_sides(asset: &mut AssetStateV16) {
+        *asset = V16Core::kernel_sync_side_adl_index(*asset, SideV16::Long).unwrap();
+        *asset = V16Core::kernel_sync_side_adl_index(*asset, SideV16::Short).unwrap();
+    }
+
+    /// The one-atom cross-side divergence an A-scaled writer would produce on
+    /// this fixture, with the long side's index re-derived so the side stays
+    /// coherent and only the cross-side equality is broken.
+    fn diverge_one_atom(asset: &mut AssetStateV16) {
+        asset.oi_eff_long_q += 1;
+        sync_both_sides(asset);
     }
 
     fn audit_scan(asset: AssetStateV16) -> V16Result<()> {
@@ -31842,6 +32297,7 @@ mod attach_writer_cross_side_oi_tripwire_tests {
         let w_short = loss_weight_for_basis(ATTACH_Q, a_short).unwrap();
         add_open_interest_for_new_position(asset, SideV16::Long, ATTACH_Q, w_long).unwrap();
         add_open_interest_for_new_position(asset, SideV16::Short, ATTACH_Q, w_short).unwrap();
+        sync_both_sides(asset);
     }
 
     /// The fixture must be a state the engine could actually be in, or every
@@ -31865,6 +32321,15 @@ mod attach_writer_cross_side_oi_tripwire_tests {
             telescoped_oi(asset.a_short, asset.loss_weight_sum_short),
             asset.oi_eff_short_q,
             "short side must satisfy oi_eff == floor(a * sum_w / SCALE)"
+        );
+        assert_eq!(
+            V16Core::kernel_side_adl_index(
+                asset.oi_eff_long_q,
+                asset.raw_basis_sum_long_q,
+                ADL_ONE
+            ),
+            Ok(asset.a_long),
+            "long side's A must be the index derived from its totals (#449)"
         );
         audit_scan(asset).expect("asymmetric `a` with balanced OI is a legal Live state");
     }
@@ -31951,7 +32416,7 @@ mod attach_writer_cross_side_oi_tripwire_tests {
     fn audit_scanner_rejects_a_one_atom_cross_side_divergence() {
         let mut asset = asset_with_asymmetric_a();
         attach_one_fill(&mut asset);
-        asset.oi_eff_long_q += 1;
+        diverge_one_atom(&mut asset);
 
         assert!(
             matches!(audit_scan(asset), Err(V16Error::InvalidConfig)),
@@ -31971,7 +32436,7 @@ mod attach_writer_cross_side_oi_tripwire_tests {
         // Same one-atom divergence the negative control rejects for an Active asset.
         let mut asset = asset_with_asymmetric_a();
         attach_one_fill(&mut asset);
-        asset.oi_eff_long_q += 1;
+        diverge_one_atom(&mut asset);
 
         // Active: still rejected (the #457 defense the negative control guards).
         assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
