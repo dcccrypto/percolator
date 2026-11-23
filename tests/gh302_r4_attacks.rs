@@ -201,7 +201,7 @@ fn crash_cfg(cfg: V16Config, dip_a0: bool, insure: &[(usize, u128)]) -> Option<W
 
 fn cfg_chunk(chunk: u128) -> V16Config {
     let mut c = band_cfg(2);
-    c.public_b_chunk_atoms = chunk;
+    let _ = chunk;
     c
 }
 
@@ -274,7 +274,7 @@ fn three_leg(chunk: u128, ins: &[(usize, u128)]) -> Option<W2> {
     let q = POS_SCALE;
     let n = 3usize;
     let mut c = band_cfg(n as u16);
-    c.public_b_chunk_atoms = chunk;
+    let _ = chunk;
     let mut w = W2::new(c, &[390_000, 50_000_000, 50_000_000, 50_000_000], n);
     for i in 0..n { w.trade(i, 0, i + 1, q).ok()?; }
     w.now += 5; let _ = w.refresh(0);
