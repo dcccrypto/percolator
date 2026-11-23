@@ -13,6 +13,7 @@
       "proof_v16_adl_scaled_accrual_kernel_matches_every_valid_factor",
       "proof_v16_asset_recovery_transition_freezes_price_and_bumps_once",
       "proof_v16_asset_recovery_transition_is_idempotent_after_recovery",
+      "proof_v16_asset_wire_only_validation_matches_full_decode",
       "proof_v16_auto_crank_b_settlement_pending_is_exact_and_fail_closed",
       "proof_v16_auto_crank_pending_close_priority_is_total",
       "proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan",
@@ -345,7 +346,7 @@
   "contract-harnesses": {},
   "contracts": [],
   "totals": {
-    "standard-harnesses": 331,
+    "standard-harnesses": 332,
     "contract-harnesses": 0,
     "functions-under-contract": 0
   }

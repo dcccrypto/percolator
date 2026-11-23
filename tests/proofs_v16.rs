@@ -59,7 +59,7 @@ use percolator::v16::{
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS, MAX_OI_SIDE_Q,
-    MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, MIN_A_SIDE, POS_SCALE,
+    MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, MIN_A_SIDE, POS_SCALE, PUBLIC_B_CHUNK_ATOMS,
     SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
 
@@ -104,7 +104,6 @@ fn proof_v16_b_settlement_atom_budget_clears_public_scale_gap() {
     const LOSS_WEIGHT: u128 = 19_000_000;
 
     let (mut header, mut markets, _) = one_market_view_fixture();
-    header.config.public_b_chunk_atoms = V16PodU128::new(MAX_VAULT_TVL);
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let leg = PortfolioLegV16 {
         active: true,
@@ -9722,17 +9721,21 @@ fn proof_v16_live_residual_booking_to_loss_bearing_side_is_bounded_and_exact() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_bankruptcy_residual_capacity_is_nonzero_and_bounded_with_headroom() {
+    // The chunk is the constant PUBLIC_B_CHUNK_ATOMS; the residual is small or
+    // just above it, so both sides of the cap are covered.
     let residual_raw: u8 = kani::any();
-    let chunk_raw: u8 = kani::any();
+    let above_chunk: bool = kani::any();
     let rem_raw: u8 = kani::any();
     kani::assume(residual_raw > 0);
-    kani::assume(chunk_raw > 0);
-    let residual = residual_raw as u128;
-    let chunk = chunk_raw as u128;
+    let chunk = PUBLIC_B_CHUNK_ATOMS;
+    let residual = if above_chunk {
+        chunk + residual_raw as u128
+    } else {
+        residual_raw as u128
+    };
     let expected = residual.min(chunk);
 
     let (mut header, mut markets, _) = one_market_view_fixture();
-    header.config.public_b_chunk_atoms = V16PodU128::new(chunk);
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.oi_eff_long_q = POS_SCALE;
     asset.oi_eff_short_q = POS_SCALE;
@@ -9770,7 +9773,6 @@ fn proof_v16_liquidation_preflight_accepts_only_fully_durable_residual() {
     kani::assume((1..=8).contains(&residual_raw));
     let residual = residual_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.config.public_b_chunk_atoms = V16PodU128::new(residual);
     header.vault = V16PodU128::new(0);
     header.insurance = V16PodU128::new(0);
     account_header.pnl = V16PodI128::new(-(residual as i128));
@@ -9808,11 +9810,12 @@ fn proof_v16_liquidation_preflight_accepts_only_fully_durable_residual() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_recovery() {
+    // A residual above the public B chunk (the constant PUBLIC_B_CHUNK_ATOMS)
+    // cannot be booked in one step.
     let residual_raw: u8 = kani::any();
-    kani::assume((2..=8).contains(&residual_raw));
-    let residual = residual_raw as u128;
+    kani::assume((1..=7).contains(&residual_raw));
+    let residual = PUBLIC_B_CHUNK_ATOMS + residual_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.config.public_b_chunk_atoms = V16PodU128::new(residual - 1);
     header.vault = V16PodU128::new(0);
     header.insurance = V16PodU128::new(0);
     account_header.pnl = V16PodI128::new(-(residual as i128));
@@ -9835,7 +9838,7 @@ fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_reco
         market.kani_preflight_liquidation_residual_durability(0, SideV16::Long, &account.as_view());
 
     kani::cover!(
-        residual > 2,
+        residual_raw > 1,
         "liquidation residual preflight proof covers nontrivial recovery residual"
     );
     assert_eq!(result, Err(V16Error::RecoveryRequired));
@@ -20513,4 +20516,75 @@ fn proof_v16_haircut_b_in_flight_support_bounds() {
     if pending_atoms == 0 {
         assert_eq!(in_flight, realizable);
     }
+}
+
+/// `AssetStateV16Account::validate_wire_only` (used instead of the full decode by readers that
+/// need only raw fields) fails exactly when `try_to_runtime` fails, with the same error, for every
+/// account image.
+#[kani::proof]
+#[kani::unwind(1024)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_wire_only_validation_matches_full_decode() {
+    let image: [u8; core::mem::size_of::<AssetStateV16Account>()] = kani::any();
+    let asset: AssetStateV16Account = bytemuck::pod_read_unaligned(&image);
+    let full = asset.try_to_runtime();
+    kani::cover!(full.is_ok(), "valid image");
+    kani::cover!(full.is_err(), "invalid image");
+    assert_eq!(asset.validate_wire_only().err(), full.err());
+}
+
+// INV-045 (program charter): the path accrual moves the mark toward its target by at most
+// `anchor * cap` per slot, the anchor being the mark when the current target took effect. A staged
+// target that changes therefore restarts the anchor (`fund_px_last`) at the effective price, as the
+// path accrual does when it is given a new target; a target equal to the one in force leaves the
+// asset slot as it was; a target of 0 or above MAX_ORACLE_PRICE is refused with no write. The mark,
+// the anchor, the stored target and the new target are symbolic over the whole price range (the
+// mark, the anchor and the stored target in 1..=MAX_ORACLE_PRICE, as the shape check requires of a
+// live asset); one live asset with no position.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_changed_raw_target_restarts_the_cap_anchor() {
+    let target: u64 = kani::any();
+    let mark: u64 = kani::any();
+    let anchor: u64 = kani::any();
+    let stored: u64 = kani::any();
+    kani::assume(1 <= mark && mark <= MAX_ORACLE_PRICE);
+    kani::assume(1 <= anchor && anchor <= MAX_ORACLE_PRICE);
+    kani::assume(1 <= stored && stored <= MAX_ORACLE_PRICE);
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    {
+        let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+        asset.effective_price = mark;
+        asset.fund_px_last = anchor;
+        asset.raw_oracle_target_price = stored;
+        markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    }
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let res = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.set_asset_raw_oracle_target_not_atomic(0, target)
+    };
+    if target == 0 || target > MAX_ORACLE_PRICE {
+        assert_eq!(res, Err(V16Error::InvalidConfig));
+        assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+        assert!(kani_eq_engine_asset_slot_v16_account(&s0, &markets[0].engine));
+        return;
+    }
+    assert_eq!(res, Ok(()));
+    let changed = target != stored;
+    kani::cover!(changed && anchor != mark, "a changed target moves a stale anchor to the mark");
+    kani::cover!(!changed && anchor != mark, "an unchanged target keeps an anchor that differs from the mark");
+    let mut es = s0;
+    let mut expected = s0.asset.try_to_runtime().unwrap();
+    expected.raw_oracle_target_price = target;
+    if changed {
+        expected.fund_px_last = mark;
+    }
+    es.asset = AssetStateV16Account::from_runtime(&expected);
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
+    let after = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(after.effective_price, mark);
+    assert_eq!(after.fund_px_last, if changed { mark } else { anchor });
 }

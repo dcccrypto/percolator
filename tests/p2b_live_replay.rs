@@ -53,9 +53,15 @@ const V22_LEG_EXTRA: usize = 8 + 1 + 16 + 8; // band_epoch_snap, band_liq_pendin
 fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
     use percolator::{AssetStateV16Account, V16ConfigAccount};
     let new_header_len = core::mem::size_of::<MarketGroupV16HeaderAccount>();
-    let old_header_len = new_header_len - V22_CONFIG_EXTRA;
+    // Upstream 083a0d08 dropped the 16-byte `public_b_chunk_atoms` config field, which sat
+    // right before `max_recovery_fallback_deviation_bps`. The fixtures still carry it.
+    const OLD_CHUNK_LEN: usize = 16;
+    let old_header_len = new_header_len - V22_CONFIG_EXTRA + OLD_CHUNK_LEN;
     let config_off = core::mem::offset_of!(MarketGroupV16HeaderAccount, config);
-    let old_config_end = config_off + core::mem::size_of::<V16ConfigAccount>() - V22_CONFIG_EXTRA;
+    let chunk_off =
+        config_off + core::mem::offset_of!(V16ConfigAccount, max_recovery_fallback_deviation_bps);
+    let old_config_end = config_off + core::mem::size_of::<V16ConfigAccount>() - V22_CONFIG_EXTRA
+        + OLD_CHUNK_LEN;
     let new_slot_len = core::mem::size_of::<EngineAssetSlotV16Account>();
     let old_slot_len = new_slot_len - V22_ASSET_EXTRA;
     let old_asset_len = core::mem::size_of::<AssetStateV16Account>() - V22_ASSET_EXTRA;
@@ -63,7 +69,8 @@ fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&old[..MARKET_GROUP_OFF]);
     let header = &old[MARKET_GROUP_OFF..MARKET_GROUP_OFF + old_header_len];
-    out.extend_from_slice(&header[..old_config_end]);
+    out.extend_from_slice(&header[..chunk_off]);
+    out.extend_from_slice(&header[chunk_off + OLD_CHUNK_LEN..old_config_end]);
     out.extend_from_slice(&[0u8; V22_CONFIG_EXTRA]);
     out.extend_from_slice(&header[old_config_end..]);
     let rest = &old[MARKET_GROUP_OFF + old_header_len..];

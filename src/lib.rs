@@ -25,6 +25,12 @@ pub const FULL_SUPPORT_WEIGHT: u128 = SUPPORT_WEIGHT_SCALE;
 pub const BOUND_SCALE: u128 = 1_000_000_000_000;
 pub const CREDIT_RATE_SCALE: u128 = 1_000_000_000_000;
 pub const MAX_VAULT_TVL: u128 = 10_000_000_000_000_000;
+/// The public B chunk: the most collateral atoms one B-settlement step or one
+/// bankruptcy-residual booking step moves. A constant, not a market setting: a market
+/// creator who could choose it could make it one atom, so that every social-loss
+/// settlement crawls, or so large that every step overflows. No collateral amount
+/// exceeds the largest vault, so this chunk never splits a settlement that fits in it.
+pub const PUBLIC_B_CHUNK_ATOMS: u128 = MAX_VAULT_TVL;
 pub const MAX_POSITION_ABS_Q: u128 = 100_000_000_000_000;
 pub const MAX_ACCOUNT_NOTIONAL: u128 = 100_000_000_000_000_000_000;
 pub const MAX_TRADE_SIZE_Q: u128 = MAX_POSITION_ABS_Q;
@@ -127,6 +133,10 @@ pub use v16::{
     kani_source_credit_state_realizable_support_for_claim_num,
 };
 
+// Source-credit rate u128 path vs. the U256 computation it replaced (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::{source_credit_rate_num_for_test, source_credit_rate_num_wide_reference_for_test};
+
 // v17 fork-facade re-exports — present only when the fork-facade feature is enabled (the wrapper
 // opts in on its engine dep). Keeps the production frozen surface minimal by default. Under kani the
 // blanket `pub use v16::*` above already covers these.
@@ -145,3 +155,11 @@ pub use v16::STRESS_ENVELOPE_TRIGGER_BPS_E9;
 // Source-domain all-zero tail check (test only).
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::source_domain_tail_is_zero_for_test;
+
+// Atom-alignment check without u128 modulo vs. `% BOUND_SCALE` (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::bound_num_is_atom_aligned_for_test;
+
+// Source-domain compaction skip predicate vs. the full compaction (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::{compact_source_domain_table_for_test, source_domain_table_already_compact_for_test};

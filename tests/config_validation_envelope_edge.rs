@@ -319,7 +319,7 @@ fn config_envelope_chunk_and_lifetime_counters_nonzero() {
     edge!(b, max_bankrupt_close_chunks, [(0u64, false), (1u64, true), (u64::MAX, true)]);
     edge!(b, max_bankrupt_close_lifetime_slots, [(0u64, false), (1u64, true), (u64::MAX, true)]);
     edge!(b, asset_activation_cooldown_slots, [(0u64, false), (1u64, true), (u64::MAX, true)]);
-    edge!(b, public_b_chunk_atoms, [(0u64, false), (1u64, true), (u128::MAX, true)]);
+    // upstream 083a0d08: the public B chunk is the constant PUBLIC_B_CHUNK_ATOMS, not a config field.
     edge!(b, max_recovery_fallback_deviation_bps, [(0u64, true), (10_000u64, true), (10_001u64, false)]);
 }
 
