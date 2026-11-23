@@ -2,12 +2,13 @@
 //! `b == denominator` (and `b` when `a == denominator`) without dividing, and the ceil helper tests
 //! the remainder as `quotient * denominator != product` instead of `product % denominator`.
 //! This compares both helpers with the U256 references on the shortcut inputs, around them, and on
-//! random values. Needs `--features fuzz` (same hooks as tests/rounding_edge.rs).
+//! random values, and that the shortcut (`mul_div_cancelled_factor`) fires exactly when a factor
+//! equals the denominator. Needs `--features fuzz` (same hooks as tests/rounding_edge.rs).
 #![cfg(feature = "fuzz")]
 use percolator::{
     kani_mul_div_ceil_u128_or_wide as ceil, kani_mul_div_ceil_u128_wide_reference as ceil_ref,
     kani_mul_div_floor_u128_or_wide as floor, kani_mul_div_floor_u128_wide_reference as floor_ref,
-    ADL_ONE, MAX_POSITION_ABS_Q, MIN_A_SIDE,
+    mul_div_cancelled_factor_for_test as cancelled, ADL_ONE, MAX_POSITION_ABS_Q, MIN_A_SIDE,
 };
 
 struct XorShift(u64);
@@ -28,6 +29,15 @@ impl XorShift {
 fn check(a: u128, b: u128, d: u128) {
     assert_eq!(floor(a, b, d), floor_ref(a, b, d), "floor a={a} b={b} d={d}");
     assert_eq!(ceil(a, b, d), ceil_ref(a, b, d), "ceil a={a} b={b} d={d}");
+    // the shortcut fires exactly when a factor equals the denominator, and then it is the answer
+    let c = cancelled(a, b, d);
+    assert_eq!(c.is_some(), d == b || d == a, "a={a} b={b} d={d}");
+    if let Some(v) = c {
+        if d != 0 {
+            assert_eq!(Ok(v), floor_ref(a, b, d));
+            assert_eq!(Ok(v), ceil_ref(a, b, d));
+        }
+    }
 }
 
 const EDGES: [u128; 16] = [
