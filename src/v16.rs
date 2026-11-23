@@ -84,6 +84,25 @@ pub fn bound_num_is_atom_aligned_for_test(value: u128) -> bool {
     bound_num_is_atom_aligned(value)
 }
 
+/// `a * b / denominator` when one factor equals the (non-zero) denominator: the other factor,
+/// exactly, for floor and ceil alike, and it always fits u128. `None` otherwise. Used by the u128
+/// mul-div helpers before any multiply or divide.
+#[inline(always)]
+fn mul_div_cancelled_factor(a: u128, b: u128, denominator: u128) -> Option<u128> {
+    if b == denominator {
+        Some(a)
+    } else if a == denominator {
+        Some(b)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn mul_div_cancelled_factor_for_test(a: u128, b: u128, denominator: u128) -> Option<u128> {
+    mul_div_cancelled_factor(a, b, denominator)
+}
+
 pub fn backing_domain_fee_split_for_lien_delta_num(
     lien_delta_num: u128,
     fee_bps: u16,
@@ -1137,10 +1156,16 @@ impl V16Core {
         if denominator == 0 {
             return Err(V16Error::InvalidConfig);
         }
+        // The common case is an unscaled ADL index (current_a == a_basis): no software divide.
+        if let Some(value) = mul_div_cancelled_factor(a, b, denominator) {
+            return Ok(value);
+        }
         if let Some(product) = a.checked_mul(b) {
             let quotient = product / denominator;
+            // quotient * denominator <= product, so the multiply is exact; comparing it with the
+            // product is the remainder test without a second software divide (`__umodti3`).
             return quotient
-                .checked_add(u128::from(product % denominator != 0))
+                .checked_add(u128::from(quotient.wrapping_mul(denominator) != product))
                 .ok_or(V16Error::ArithmeticOverflow);
         }
         checked_mul_div_ceil_u256(
@@ -3171,6 +3196,9 @@ impl V16Core {
     fn mul_div_floor_u128_or_wide(a: u128, b: u128, denominator: u128) -> V16Result<u128> {
         if denominator == 0 {
             return Err(V16Error::InvalidConfig);
+        }
+        if let Some(value) = mul_div_cancelled_factor(a, b, denominator) {
+            return Ok(value);
         }
         if let Some(product) = a.checked_mul(b) {
             return Ok(product / denominator);
