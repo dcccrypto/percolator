@@ -199,10 +199,10 @@ fn latch(
     first: usize,
 ) -> Option<Latched> {
     let q = POS_SCALE;
-    let mut cfg = band_cfg(2);
-    if let Some(c) = chunk {
-        cfg.public_b_chunk_atoms = c;
-    }
+    // The chunk argument is kept for the call sites: since upstream 083a0d08 the public B chunk
+    // is the constant PUBLIC_B_CHUNK_ATOMS, not a market setting.
+    let _ = chunk;
+    let cfg = band_cfg(2);
     let mut w = W2::new(cfg, &[deposit, 50_000_000, 50_000_000], 2);
     w.trade(0, 0, 1, q).ok()?;
     w.trade(1, 0, 2, q).ok()?;
@@ -406,13 +406,13 @@ fn gh292_only_the_charged_domains_holder_bears_the_booking() {
     assert_eq!(b_total(&l.w, 1), (0, 0), "the closed-last asset's domain is untouched");
 }
 
-/// Stage 3 (changed by b-prime-2, att-302 finding 1): nothing can cover the deficit in one step ->
-/// the recorded domain is charged as far as one step goes (insurance, then a one-atom chunk of B)
-/// and the remainder is written off account-locally. NEVER Recovery: that is the permissionless
-/// force-the-whole-group-into-Recovery lever Toly removed in 4bf0a98f. This replaces
-/// `gh292_stage_uncoverable_declares_recovery`, which pinned the old Recovery escalation.
+/// Stage 3 (changed by b-prime-2, att-302 finding 1, then by upstream 083a0d08): with no insurance
+/// the whole deficit goes to B in one step. NEVER Recovery: that is the permissionless
+/// force-the-whole-group-into-Recovery lever Toly removed in 4bf0a98f. Before 083a0d08 a one-atom
+/// chunk made this the partial-booking + account-local write-off case; the chunk is now the
+/// constant PUBLIC_B_CHUNK_ATOMS (1e16), which no deficit here comes near.
 #[test]
-fn gh292_uncoverable_deficit_is_charged_partially_and_written_off_never_recovery() {
+fn gh292_uninsured_deficit_is_booked_in_one_step_never_recovery() {
     for first in [0usize, 1] {
         let mut l = latch(260_000, Some(1), false, &[(DOMAIN_A0_SHORT, 0)], first).expect("latched");
         let before = snap(&l.w);
@@ -420,8 +420,8 @@ fn gh292_uncoverable_deficit_is_charged_partially_and_written_off_never_recovery
         let out = resolve(&mut l).expect("never Recovery: the flat close succeeds");
         assert_eq!(l.w.header.mode, 0, "market stays Live");
         assert!(l.w.header.recovery_reason.try_to_runtime().unwrap().is_none());
-        assert_eq!((out.insurance_used, out.residual_booked, out.explicit_loss), (0, 1, 0), "one atom of B booked");
-        assert_resolved_cleanly(&l, &before, &out, l.deficit - 1);
+        assert_eq!((out.insurance_used, out.residual_booked, out.explicit_loss), (0, l.deficit, 0), "whole deficit booked");
+        assert_resolved_cleanly(&l, &before, &out, 0);
     }
 }
 
@@ -669,7 +669,8 @@ proptest! {
         let after_ins = deficit - seed.min(deficit);
         // b-prime-2: Recovery is never declared. The recorded domain pays its insurance, then at
         // most one chunk of B; whatever one step cannot book is written off account-locally.
-        let booked_expected = after_ins.min(chunk.unwrap_or(u128::MAX));
+        let _ = chunk;
+        let booked_expected = after_ins.min(percolator::PUBLIC_B_CHUNK_ATOMS);
         let written_off = after_ins - booked_expected;
         match resolve(&mut l) {
             Ok(o) => {
@@ -718,7 +719,8 @@ fn gh292_sim_sweep_covers_every_waterfall_outcome() {
                     ran += 1;
                     let before = snap(&l.w);
                     let used = seed.min(deficit);
-                    let booked_expected = (deficit - used).min(chunk.unwrap_or(u128::MAX));
+                    let _ = chunk;
+                    let booked_expected = (deficit - used).min(percolator::PUBLIC_B_CHUNK_ATOMS);
                     let written_off = deficit - used - booked_expected;
                     match resolve(&mut l) {
                         Ok(o) => {
@@ -739,5 +741,7 @@ fn gh292_sim_sweep_covers_every_waterfall_outcome() {
         }
     }
     println!("sweep ran={ran} ins_only={ins_only} ins_b={ins_b} b_only={b_only} partial_writeoff={partial}");
-    assert!(ran >= 40 && ins_only > 0 && ins_b > 0 && b_only > 0 && partial > 0, "sim must be non-vacuous");
+    // partial write-off needs a chunk below the deficit; the chunk is now PUBLIC_B_CHUNK_ATOMS.
+    assert!(ran >= 40 && ins_only > 0 && ins_b > 0 && b_only > 0, "sim must be non-vacuous");
+    assert_eq!(partial, 0, "no deficit here exceeds the public B chunk");
 }

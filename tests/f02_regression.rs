@@ -24,8 +24,8 @@ use percolator::{
     CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account,
     LiquidationRequestV16, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
     PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
-    ProvenanceHeaderV16Account, SideV16, TradeRequestV16, V16Config, V16Error, V16PodU128,
-    V16PodU64, POS_SCALE, SOCIAL_LOSS_DEN,
+    ProvenanceHeaderV16Account, SideV16, TradeRequestV16, V16Config, V16Error,
+    V16PodU64, POS_SCALE, PUBLIC_B_CHUNK_ATOMS, SOCIAL_LOSS_DEN,
 };
 
 // ---------------------------------------------------------------------------
@@ -407,6 +407,100 @@ fn route1b_fixed_the_live_advancer_books_the_fresh_residual_and_finalizes() {
     short.validate_with_market(&market.as_view()).unwrap();
 }
 
+// The leveraged book: the public B chunk is the constant PUBLIC_B_CHUNK_ATOMS (the largest
+// vault), so a close can only span more than one chunk when the unpaid loss exceeds it. This is
+// the same pending-close state as `live_pending_close_scenario`, rebuilt at 2% margin and 1%
+// mark moves, sized so the short debtor's unpaid loss is a little above the chunk.
+const LEV_PRICE: u64 = 100_000_000_000;
+const LEV_LOTS: u128 = 1_350_000;
+const LEV_STEPS: usize = 10;
+const LEV_SHORT_CAPITAL: u128 = LEV_LOTS * LEV_PRICE as u128 / 50; // exactly 2% of the notional
+const LEV_LONG_CAPITAL: u128 = 5_000_000_000_000_000;
+
+/// Returns the scenario and the stale residual `R` stamped on its pending close.
+fn leveraged_pending_close_scenario() -> (Scenario, u128) {
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.initial_margin_bps = 200;
+    cfg.maintenance_margin_bps = 200;
+    cfg.max_price_move_bps_per_slot = 100;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, LEV_PRICE, 1)
+        .unwrap();
+    let mut long_header = account_fixture(1, 61);
+    let mut short_header = account_fixture(1, 62);
+    let size = LEV_LOTS * POS_SCALE;
+    let mut price = LEV_PRICE;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market
+            .deposit_not_atomic(&mut long, LEV_LONG_CAPITAL)
+            .unwrap();
+        market
+            .deposit_not_atomic(&mut short, LEV_SHORT_CAPITAL)
+            .unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(size),
+                    exec_price: price,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+        for step in 0..LEV_STEPS {
+            price += price / 100;
+            let slot = 2 + step as u64;
+            market
+                .set_asset_raw_oracle_target_not_atomic(0, price)
+                .unwrap();
+            market
+                .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+                .unwrap();
+        }
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: -signed_q(size),
+                    exec_price: price,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .expect("risk-reducing final trade must remain available");
+    }
+    let r = LEV_LOTS * u128::from(price - LEV_PRICE) - LEV_SHORT_CAPITAL;
+    let pending = short_header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(short_header.capital.get(), 0);
+    assert_eq!(short_header.pnl.get(), -(r as i128));
+    assert!(pending.active && !pending.finalized && !pending.canceled);
+    assert_eq!(pending.residual_remaining, r);
+    assert!(
+        r > PUBLIC_B_CHUNK_ATOMS && r < 2 * PUBLIC_B_CHUNK_ATOMS,
+        "the stale residual must exceed one public B chunk"
+    );
+    (
+        Scenario {
+            header,
+            markets,
+            long_header,
+            short_header,
+        },
+        r,
+    )
+}
+
 // ===========================================================================
 // ROUTE 1c (FIXED) — the brick. A chunk cap between |pnl| and the stale
 //                    `residual_remaining` used to leave the ledger unfinalizable
@@ -416,21 +510,29 @@ fn route1b_fixed_the_live_advancer_books_the_fresh_residual_and_finalizes() {
 
 #[test]
 fn route1c_fixed_a_capped_chunk_no_longer_bricks_the_close_or_holds_the_barrier() {
-    const D: u128 = 100; // true residual after settlement = 150
-    const CHUNK_CAP: u128 = 200; // |pnl| (150) < cap (200) < stale residual (250)
+    // The fresh residual after the deposit (R - D) is under one public B chunk while the stale
+    // ledger residual R is above it: |pnl| < PUBLIC_B_CHUNK_ATOMS < stale residual.
+    const D: u128 = 2_000_000_000_000_000; // 2e15, the owner's mid-close repayment
 
-    let Scenario {
-        mut header,
-        mut markets,
-        long_header: _long_header,
-        mut short_header,
-    } = live_pending_close_scenario();
-    header.config.public_b_chunk_atoms = V16PodU128::new(CHUNK_CAP);
+    let (
+        Scenario {
+            mut header,
+            mut markets,
+            long_header: _long_header,
+            mut short_header,
+        },
+        r,
+    ) = leveraged_pending_close_scenario();
+    assert!(r - D < PUBLIC_B_CHUNK_ATOMS && PUBLIC_B_CHUNK_ATOMS < r);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut short = PortfolioV16ViewMut::new(&mut short_header);
 
     market.deposit_not_atomic(&mut short, D).unwrap();
+    // The stale ledger still claims R > chunk; the account owes only R - D < chunk.
+    let stale = short.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(stale.residual_remaining, r);
+    assert!(stale.residual_remaining > PUBLIC_B_CHUNK_ATOMS);
     market.resolve_market_not_atomic(11).unwrap();
     let outcome = market
         .close_resolved_account_not_atomic(&mut short, 0)
@@ -452,7 +554,7 @@ fn route1c_fixed_a_capped_chunk_no_longer_bricks_the_close_or_holds_the_barrier(
     assert_eq!(short.header.pnl.get(), 0, "the debtor is credited in full");
     assert_eq!(
         ledger.b_loss_booked,
-        R - D,
+        r - D,
         "the loss side pays the fresh residual, which is under the cap"
     );
     assert_eq!(

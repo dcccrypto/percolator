@@ -14,7 +14,7 @@ use crate::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, FUNDING_DEN, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
     MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_PROTOCOL_FEE_ABS,
     MAX_RECOVERY_FALLBACK_DEVIATION_BPS, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, MIN_A_SIDE, POS_SCALE,
-    SOCIAL_LOSS_DEN, SOCIAL_WEIGHT_SCALE,
+    PUBLIC_B_CHUNK_ATOMS, SOCIAL_LOSS_DEN, SOCIAL_WEIGHT_SCALE,
 };
 
 pub const V16_MAX_PORTFOLIO_ASSETS_N: usize = 16;
@@ -191,12 +191,10 @@ fn health_cert_after_capital_debit(cert: HealthCertV16, amount: u128) -> V16Resu
     }
     Ok(HealthCertV16 {
         certified_equity: next_equity,
-        certified_liq_deficit: if next_equity < 0 {
-            next_equity.unsigned_abs()
-        } else {
-            cert.certified_maintenance_req
-                .saturating_sub(next_equity as u128)
-        },
+        certified_liq_deficit: V16Core::kernel_certified_liq_deficit(
+            next_equity,
+            cert.certified_maintenance_req,
+        ),
         ..cert
     })
 }
@@ -752,6 +750,12 @@ fn liquidation_leg_maintenance_requirement(
         .ok_or(V16Error::ArithmeticOverflow)
 }
 
+/// How far an account would still be from maintenance after a liquidation step:
+/// the certificate's maintenance requirement with the leg's old contribution
+/// replaced by its new one, against the certified equity less the fee the step
+/// charges. With negative post-step equity the distance is the whole maintenance
+/// requirement plus the shortfall below zero; otherwise what the requirement
+/// exceeds the equity by. The liquidation sizes its close with it.
 fn liquidation_projected_health_deficit_from_parts(
     certified_equity: i128,
     certified_maintenance_req: u128,
@@ -1069,6 +1073,11 @@ pub fn kani_liquidation_partial_search_hi(
     liquidation_partial_search_hi(config, old_abs_q, effective_price)
 }
 
+/// A new position of `abs_q` on `side` adds itself to that side's totals: the
+/// effective open interest and the raw basis sum rise by `abs_q`, the stored
+/// position count by one and the loss-weight sum by `loss_weight`. The other side
+/// and every other field of the asset are untouched. (The side cap is checked on
+/// the net result of both legs of a trade, by `kernel_trade_side_oi_cap_gate`.)
 fn add_open_interest_for_new_position(
     asset: &mut AssetStateV16,
     side: SideV16,
@@ -2115,6 +2124,676 @@ impl V16Core {
             .checked_add(paid_i128)
             .ok_or(V16Error::ArithmeticOverflow)?;
         Ok((paid, new_capital, new_c_tot, new_pnl))
+    }
+
+    /// PRODUCTION KERNEL (value safety, fee charge): what a fee charge takes and
+    /// where it goes. An account whose PnL is negative pays no fee (its loss is
+    /// senior to the fee); otherwise it pays `charged = min(requested_fee,
+    /// capital)` out of capital. Capital and the group capital total `c_tot` drop
+    /// by exactly `charged` and insurance rises by exactly `charged`: the three
+    /// move together and no token value moves. Nothing changes when nothing is
+    /// charged. Pure scalar; `charge_account_fee_current_not_atomic` calls exactly
+    /// this for the arithmetic and writes the three results.
+    #[inline(always)]
+    pub(crate) fn kernel_charge_account_fee(
+        requested_fee: u128,
+        pnl: i128,
+        capital: u128,
+        c_tot: u128,
+        insurance: u128,
+    ) -> V16Result<(u128, u128, u128, u128)> {
+        if requested_fee == 0 || pnl < 0 {
+            return Ok((0, capital, c_tot, insurance));
+        }
+        let charged = requested_fee.min(capital);
+        if charged == 0 {
+            return Ok((0, capital, c_tot, insurance));
+        }
+        let new_capital = capital
+            .checked_sub(charged)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let new_c_tot = c_tot
+            .checked_sub(charged)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let new_insurance = insurance
+            .checked_add(charged)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((charged, new_capital, new_c_tot, new_insurance))
+    }
+
+    /// PRODUCTION KERNEL (margin, initial-margin lien need): how much source credit
+    /// an account still has to reserve to meet its initial requirement. What
+    /// already covers the requirement is the account's equity without positive
+    /// PnL (`no_positive_equity`: capital less negative PnL and fee debt, which
+    /// can be negative) plus the credit its valid liens already reserve. The
+    /// result is the shortfall, and it is zero exactly when
+    /// `no_positive_equity + existing_lien >= certified_initial_req` in the
+    /// integers: that is the statement the margin rule of a risk-increasing trade
+    /// rests on. Pure scalar; `incremental_initial_margin_source_credit_needed`
+    /// calls exactly this for the arithmetic.
+    #[inline(always)]
+    pub(crate) fn kernel_initial_margin_source_credit_needed(
+        certified_initial_req: u128,
+        no_positive_equity: i128,
+        existing_lien: u128,
+    ) -> V16Result<u128> {
+        if no_positive_equity >= 0 {
+            let covered = (no_positive_equity as u128)
+                .checked_add(existing_lien)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            return Ok(certified_initial_req.saturating_sub(covered));
+        }
+        let need_before_lien = certified_initial_req
+            .checked_add(no_positive_equity.unsigned_abs())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(need_before_lien.saturating_sub(existing_lien))
+    }
+
+    /// PRODUCTION KERNEL (margin, liquidation deficit): how far a certified
+    /// account is from maintenance. With negative equity the deficit is the whole
+    /// shortfall below zero; otherwise it is what the maintenance requirement
+    /// exceeds the equity by. It is zero exactly when the equity is non-negative
+    /// and covers the maintenance requirement, which is the test every
+    /// liquidation starts with. Pure scalar and total; every place that writes a
+    /// certificate calls exactly this.
+    #[inline(always)]
+    pub(crate) fn kernel_certified_liq_deficit(equity: i128, maintenance_req: u128) -> u128 {
+        if equity < 0 {
+            equity.unsigned_abs()
+        } else {
+            maintenance_req.saturating_sub(equity as u128)
+        }
+    }
+
+    /// PRODUCTION KERNEL (margin, incremental certificate): the requirements of a
+    /// certificate after one leg changes size. Each total is the old total less
+    /// the leg's old contribution plus its new one: the initial requirement, the
+    /// maintenance requirement and the worst-case loss (the notional). A leg
+    /// whose old contribution exceeds the total it is part of, or a total that
+    /// would not fit, is an error. Pure scalar;
+    /// `recertify_account_after_trade_delta` calls exactly this for the
+    /// arithmetic.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kernel_cert_requirements_after_leg_delta(
+        certified_initial_req: u128,
+        certified_maintenance_req: u128,
+        certified_worst_case_loss: u128,
+        old_initial: u128,
+        new_initial: u128,
+        old_maintenance: u128,
+        new_maintenance: u128,
+        old_notional: u128,
+        new_notional: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        let initial_req = certified_initial_req
+            .checked_sub(old_initial)
+            .and_then(|v| v.checked_add(new_initial))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let maintenance_req = certified_maintenance_req
+            .checked_sub(old_maintenance)
+            .and_then(|v| v.checked_add(new_maintenance))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let worst_case_loss = certified_worst_case_loss
+            .checked_sub(old_notional)
+            .and_then(|v| v.checked_add(new_notional))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((initial_req, maintenance_req, worst_case_loss))
+    }
+
+    /// PRODUCTION KERNEL (anti-wash, residual reward credit): how much
+    /// residual-reward credit a fill moves from the trader's allowance to the
+    /// counterparty. The trader can spend only what it has crystallized and not
+    /// yet spent, and at most the initial-margin principal the fill adds:
+    /// `credit = min(crystallized - spent, principal_atoms)`. The trader's spent
+    /// total and the counterparty's received total both rise by exactly `credit`,
+    /// so spent never exceeds crystallized. Nothing changes when the credit is
+    /// zero. Pure scalar; `transfer_account_residual_reward_credit` calls exactly
+    /// this for the arithmetic.
+    #[inline(always)]
+    pub(crate) fn kernel_residual_reward_credit(
+        crystallized: u128,
+        spent: u128,
+        received: u128,
+        principal_atoms: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        if principal_atoms == 0 {
+            return Ok((0, spent, received));
+        }
+        let available = crystallized
+            .checked_sub(spent)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let credit = available.min(principal_atoms);
+        if credit == 0 {
+            return Ok((0, spent, received));
+        }
+        let new_spent = spent.checked_add(credit).ok_or(V16Error::CounterOverflow)?;
+        let new_received = received
+            .checked_add(credit)
+            .ok_or(V16Error::CounterOverflow)?;
+        Ok((credit, new_spent, new_received))
+    }
+
+    /// PRODUCTION KERNEL (PnL totals, increase): the group totals of positive PnL
+    /// after one account's positive PnL rises by `increase`. The exact total rises
+    /// by `increase` and the bound total (in `BOUND_SCALE` units) by
+    /// `increase_num`, which the caller forms as `increase * BOUND_SCALE`; so a
+    /// bound that covered the exact total before still covers it. Pure scalar;
+    /// `set_account_pnl_inner` calls exactly this for the arithmetic.
+    #[inline(always)]
+    pub(crate) fn kernel_pnl_totals_after_increase(
+        pnl_pos_tot: u128,
+        pnl_pos_bound_tot_num: u128,
+        increase: u128,
+        increase_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        let new_pnl_pos_tot = pnl_pos_tot
+            .checked_add(increase)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let new_bound_num = pnl_pos_bound_tot_num
+            .checked_add(increase_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((new_pnl_pos_tot, new_bound_num))
+    }
+
+    /// PRODUCTION KERNEL (PnL totals, decrease): the bound total and the matured
+    /// total after the exact total of positive PnL has fallen to
+    /// `new_pnl_pos_tot`. The bound falls by `decrease_num` but never below
+    /// `exact_min_num`, the new exact total in `BOUND_SCALE` units (formed by the
+    /// caller), so it still covers the exact total; the matured total is capped
+    /// by the new exact total. Pure scalar and total; `set_account_pnl_inner`
+    /// calls exactly this for the arithmetic.
+    #[inline(always)]
+    pub(crate) fn kernel_pnl_bounds_after_decrease(
+        pnl_pos_bound_tot_num: u128,
+        decrease_num: u128,
+        exact_min_num: u128,
+        pnl_matured_pos_tot: u128,
+        new_pnl_pos_tot: u128,
+    ) -> (u128, u128) {
+        let next_bound_num = pnl_pos_bound_tot_num.saturating_sub(decrease_num);
+        (
+            next_bound_num.max(exact_min_num),
+            pnl_matured_pos_tot.min(new_pnl_pos_tot),
+        )
+    }
+
+    /// PRODUCTION KERNEL (PnL totals, sign count): the number of accounts with
+    /// negative PnL after one account's PnL goes from `old_pnl` to `new_pnl`: one
+    /// more when it turns negative, one fewer when it stops being negative, the
+    /// same otherwise. Pure scalar; `set_account_pnl_inner` calls exactly this.
+    #[inline(always)]
+    pub(crate) fn kernel_negative_pnl_account_count(
+        count: u64,
+        old_pnl: i128,
+        new_pnl: i128,
+    ) -> V16Result<u64> {
+        match (old_pnl < 0, new_pnl < 0) {
+            (false, true) => count.checked_add(1).ok_or(V16Error::CounterOverflow),
+            (true, false) => count.checked_sub(1).ok_or(V16Error::CounterUnderflow),
+            _ => Ok(count),
+        }
+    }
+
+    /// PRODUCTION KERNEL (bankrupt close, ledger start): the close ledger that
+    /// opens when an account's uncovered loss `gross_loss` starts to be resolved
+    /// against one loss domain. The whole loss is still to be resolved
+    /// (`residual_remaining == gross_loss`), nothing is consumed, spent or booked
+    /// yet, the ledger is active and not finalized, its id is the previous id plus
+    /// one (never zero), it is bound to the asset, its market id and the domain
+    /// side, and it must finish within the configured lifetime from the current
+    /// slot. Pure; `begin_close_progress_ledger` calls exactly this.
+    #[inline(always)]
+    pub(crate) fn kernel_begin_close_ledger(
+        previous_close_id: u64,
+        asset_index: usize,
+        market_id: u64,
+        domain_side: SideV16,
+        gross_loss: u128,
+        current_slot: u64,
+        max_close_lifetime_slots: u64,
+    ) -> V16Result<CloseProgressLedgerV16> {
+        let close_id = previous_close_id.saturating_add(1).max(1);
+        Ok(CloseProgressLedgerV16 {
+            active: true,
+            finalized: false,
+            close_id,
+            asset_index: u32::try_from(asset_index).map_err(|_| V16Error::InvalidLeg)?,
+            market_id,
+            domain_side,
+            gross_loss_at_close_start: gross_loss,
+            drift_reference_slot: current_slot,
+            max_close_slot: current_slot
+                .checked_add(max_close_lifetime_slots)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+            residual_remaining: gross_loss,
+            ..CloseProgressLedgerV16::EMPTY
+        })
+    }
+
+    /// PRODUCTION KERNEL (value, junior payout pool): what the vault holds beyond
+    /// every senior claim. The senior claims are the capital total `c_tot`,
+    /// insurance, the backing providers' earnings and the recoverable
+    /// counterparty backing principal (whole atoms); the residual is the vault
+    /// less their sum, and zero when they reach the vault. A sum that does not fit
+    /// in 128 bits counts as covering the vault. Pure scalar and total; `residual`
+    /// calls exactly this, and the junior claims are paid out of its result.
+    #[inline(always)]
+    pub(crate) fn kernel_residual(
+        vault: u128,
+        c_tot: u128,
+        insurance: u128,
+        provider_earnings: u128,
+        fresh_backing_atoms: u128,
+    ) -> u128 {
+        vault.saturating_sub(
+            c_tot
+                .saturating_add(insurance)
+                .saturating_add(provider_earnings)
+                .saturating_add(fresh_backing_atoms),
+        )
+    }
+
+    /// PRODUCTION KERNEL (margin, equity without positive credit): an account's
+    /// equity counting nothing for positive PnL: capital, less negative PnL, less
+    /// the fee debt. It can be negative. `pnl` and `fee_credits` are validated as
+    /// everywhere else: neither may be `i128::MIN`, and fee credits are never
+    /// positive (they hold a debt). Pure scalar; `account_no_positive_credit_equity`
+    /// calls exactly this. The initial-margin lien rule
+    /// (`kernel_initial_margin_source_credit_needed`) and the locked-lane margin
+    /// gate measure an account against this equity.
+    #[inline(always)]
+    pub(crate) fn kernel_no_positive_credit_equity(
+        capital: u128,
+        pnl: i128,
+        fee_credits: i128,
+    ) -> V16Result<i128> {
+        validate_non_min_i128(pnl)?;
+        validate_fee_credits(fee_credits)?;
+        let capital = i128::try_from(capital).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let fee_debt =
+            i128::try_from(fee_credits.unsigned_abs()).map_err(|_| V16Error::ArithmeticOverflow)?;
+        capital
+            .checked_add(pnl.min(0))
+            .and_then(|v| v.checked_sub(fee_debt))
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    /// PRODUCTION KERNEL (margin, haircut equity): an account's equity for its
+    /// health certificate. With PnL at or below zero it is the equity without
+    /// positive credit (capital, less the loss, less the fee debt). With positive
+    /// PnL the PnL itself does not count: only `positive_support`, the part of it
+    /// that its source domains can actually pay now (the caller computes it, zero
+    /// when the account has no source claims), is added to capital. The fee debt
+    /// is subtracted in both cases. Pure scalar; `account_haircut_equity` calls
+    /// exactly this after it has validated `pnl` and `fee_credits`.
+    #[inline(always)]
+    pub(crate) fn kernel_haircut_equity(
+        capital: u128,
+        pnl: i128,
+        fee_credits: i128,
+        positive_support: u128,
+    ) -> V16Result<i128> {
+        let capital = i128::try_from(capital).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let fee_debt =
+            i128::try_from(fee_credits.unsigned_abs()).map_err(|_| V16Error::ArithmeticOverflow)?;
+        if pnl <= 0 {
+            return capital
+                .checked_add(pnl)
+                .and_then(|v| v.checked_sub(fee_debt))
+                .ok_or(V16Error::ArithmeticOverflow);
+        }
+        let positive_support_i128 =
+            i128::try_from(positive_support).map_err(|_| V16Error::ArithmeticOverflow)?;
+        capital
+            .checked_add(positive_support_i128)
+            .and_then(|v| v.checked_sub(fee_debt))
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    /// PRODUCTION KERNEL (K/F settlement, a gain against an outstanding loss): how
+    /// much of a new gain's face is kept and what the account's PnL becomes, once
+    /// the support the gain could draw has been applied to the old loss
+    /// (`support_consumed <= old_loss`, `remaining_loss = old_loss -
+    /// support_consumed`). The face burned is `burn_candidate`, or, when
+    /// `burn_all` (a Live gain without a source domain) or any loss still
+    /// remains, only the part of the new face above `old_loss` (fork rule: the
+    /// part that nets against the loss is the counterparty's loss realized
+    /// against a debt already owed and needs no source backing; upstream burns
+    /// the whole face here). A burn above the new face is an error. The PnL
+    /// becomes the kept face less the remaining loss. Pure scalar;
+    /// `apply_signed_kf_delta_to_pnl` calls exactly this for the arithmetic.
+    #[inline(always)]
+    pub(crate) fn kernel_gain_against_loss_after_support(
+        new_face_support: u128,
+        burn_candidate: u128,
+        burn_all: bool,
+        old_loss: u128,
+        remaining_loss: u128,
+    ) -> V16Result<(u128, i128)> {
+        let mut junior_face_burned = burn_candidate;
+        if burn_all || remaining_loss != 0 {
+            junior_face_burned = new_face_support.saturating_sub(old_loss);
+        }
+        if junior_face_burned > new_face_support {
+            return Err(V16Error::ArithmeticOverflow);
+        }
+        let retained_face = new_face_support
+            .checked_sub(junior_face_burned)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let retained_i128 =
+            i128::try_from(retained_face).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let remaining_i128 =
+            i128::try_from(remaining_loss).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let new_pnl = retained_i128
+            .checked_sub(remaining_i128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((junior_face_burned, new_pnl))
+    }
+
+    /// PRODUCTION KERNEL (K/F settlement, a newly realized loss backed by
+    /// capital): when an account's negative PnL grows from `negative_before` to
+    /// `negative_after`, the new loss is paid out of capital that earlier losses
+    /// have not already encumbered (`capital - negative_before`), up to the new
+    /// loss. The amount paid (`backing`) leaves capital and the capital total and
+    /// is added back to PnL (the loss is realized), so it can be booked as backing
+    /// for the domain the loss is owed to. Nothing changes when nothing is paid.
+    /// Pure scalar; `reserve_new_capital_backed_loss_for_source_domain_not_atomic`
+    /// calls exactly this for the arithmetic.
+    #[inline(always)]
+    pub(crate) fn kernel_capital_backed_loss_reservation(
+        negative_before: u128,
+        negative_after: u128,
+        capital: u128,
+        c_tot: u128,
+        pnl: i128,
+    ) -> V16Result<(u128, u128, u128, i128)> {
+        let new_negative_loss = negative_after.saturating_sub(negative_before);
+        if new_negative_loss == 0 {
+            return Ok((0, capital, c_tot, pnl));
+        }
+        let capital_not_already_encumbered = capital.saturating_sub(negative_before);
+        let backing = new_negative_loss.min(capital_not_already_encumbered);
+        if backing == 0 {
+            return Ok((0, capital, c_tot, pnl));
+        }
+        let new_capital = capital
+            .checked_sub(backing)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let new_c_tot = c_tot
+            .checked_sub(backing)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let backing_i128 = i128::try_from(backing).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let new_pnl = pnl
+            .checked_add(backing_i128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((backing, new_capital, new_c_tot, new_pnl))
+    }
+
+    /// PRODUCTION KERNEL (Resolved mode, how much of a late loss a domain's backing
+    /// takes): the support gap is what the domain's positive claims exceed its
+    /// available backing by. After the payout snapshot the domain takes only that
+    /// gap. Before it, a domain with live funded backing (`live_funded_bucket`: a
+    /// Fresh, unlapsed bucket holding unliened or liened principal or a provider
+    /// receivable) takes the loss in full, because that backing pays the claims;
+    /// otherwise it takes the gap plus what the provider is owed. Everything above
+    /// the result goes to the junior pool. Pure scalar;
+    /// `resolved_loss_backing_capacity_num` calls exactly this for the arithmetic.
+    #[inline(always)]
+    pub(crate) fn kernel_resolved_loss_backing_capacity(
+        positive_claim_bound_num: u128,
+        available_backing_num: u128,
+        snapshot_captured: bool,
+        live_funded_bucket: bool,
+        provider_receivable_num: u128,
+    ) -> V16Result<u128> {
+        let support_gap_num = positive_claim_bound_num.saturating_sub(available_backing_num);
+        if snapshot_captured {
+            return Ok(support_gap_num);
+        }
+        if live_funded_bucket {
+            return Ok(u128::MAX);
+        }
+        support_gap_num
+            .checked_add(provider_receivable_num)
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    /// PRODUCTION KERNEL (Resolved mode, a late loss in a domain with no claim and no
+    /// creditor left): the loss refills only what the provider fronted and was not
+    /// repaid: at most the provider receivable, and at most the provider's
+    /// principal less the backing still reserved for it. Pure scalar and total;
+    /// `book_realized_kf_loss_for_source_domain_not_atomic` calls exactly this.
+    #[inline(always)]
+    pub(crate) fn kernel_terminal_provider_refill_capacity(
+        provider_receivable_num: u128,
+        provider_principal_num: u128,
+        fresh_reserved_backing_num: u128,
+    ) -> u128 {
+        provider_receivable_num
+            .min(provider_principal_num.saturating_sub(fresh_reserved_backing_num))
+    }
+
+    /// PRODUCTION KERNEL (source claims, mirror): burning `burn_num` of an
+    /// account's claim on a source domain lowers the account's claim and the
+    /// domain's bound total by the same amount, and the domain's exact total by
+    /// as much of it as it holds. No other field of the domain's record changes.
+    /// The account's claim is checked first. Pure; the claim-burn paths that
+    /// write both sides call exactly this.
+    #[inline(always)]
+    pub(crate) fn kernel_burn_account_source_claim(
+        account_claim_bound_num: u128,
+        source: SourceCreditStateV16,
+        burn_num: u128,
+    ) -> V16Result<(u128, SourceCreditStateV16)> {
+        let account_claim_bound_num = account_claim_bound_num
+            .checked_sub(burn_num)
+            .ok_or(V16Error::CounterUnderflow)?;
+        // The same arithmetic as prepare_source_positive_claim_burn_delta, which is not
+        // called here: its contract requires a burn the domain can cover, and this
+        // kernel also states the error when it cannot.
+        let mut source = source;
+        source.positive_claim_bound_num = source
+            .positive_claim_bound_num
+            .checked_sub(burn_num)
+            .ok_or(V16Error::CounterUnderflow)?;
+        source.exact_positive_claim_num = source
+            .exact_positive_claim_num
+            .checked_sub(burn_num.min(source.exact_positive_claim_num))
+            .ok_or(V16Error::CounterUnderflow)?;
+        Ok((account_claim_bound_num, source))
+    }
+
+    /// PRODUCTION KERNEL (bankruptcy residual, the size of one booking step): how many
+    /// atoms of a bankruptcy residual one step may book onto the opposite side's B
+    /// index. The step is at most the residual and at most the configured chunk. It
+    /// takes that whole chunk when booking it moves the index (`delta_b >= 1`) without
+    /// overflowing it; otherwise it takes the largest chunk the index can still absorb
+    /// (`(b_headroom + 1) * weight_sum - 1 - remainder`, in units of `1 /
+    /// SOCIAL_LOSS_DEN`), which can be zero. A side with no loss weight takes nothing.
+    /// Pure scalar; `bankruptcy_residual_single_step_capacity` calls exactly this
+    /// after reading the side's B index, weight sum and remainder.
+    #[inline(always)]
+    pub(crate) fn kernel_bankruptcy_residual_step_capacity(
+        b_now: u128,
+        weight_sum: u128,
+        rem: u128,
+        residual_remaining: u128,
+        chunk_atoms: u128,
+    ) -> V16Result<u128> {
+        if residual_remaining == 0 || weight_sum == 0 {
+            return Ok(0);
+        }
+        // the chunk is capped by the residual AND the per-call public cap
+        let candidate = residual_remaining.min(chunk_atoms);
+        if candidate != 0 {
+            if let Some(delta_b) = candidate
+                .checked_mul(SOCIAL_LOSS_DEN)
+                .and_then(|v| v.checked_add(rem))
+                .map(|v| v / weight_sum)
+            {
+                if delta_b != 0 && b_now.checked_add(delta_b).is_some() {
+                    return Ok(candidate);
+                }
+            }
+        }
+        let headroom_plus_one = U256::from_u128(u128::MAX - b_now)
+            .checked_add(U256::ONE)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let max_scaled = headroom_plus_one
+            .checked_mul(U256::from_u128(weight_sum))
+            .and_then(|v| v.checked_sub(U256::ONE))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if U256::from_u128(rem) > max_scaled {
+            return Ok(0);
+        }
+        let max_chunk_by_b_wide = max_scaled
+            .checked_sub(U256::from_u128(rem))
+            .and_then(|v| v.checked_div(U256::from_u128(SOCIAL_LOSS_DEN)))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let max_chunk_by_b = max_chunk_by_b_wide
+            .try_into_u128()
+            .unwrap_or(residual_remaining);
+        Ok(residual_remaining.min(max_chunk_by_b).min(chunk_atoms))
+    }
+
+    /// PRODUCTION KERNEL (B settlement, one bounded step of a leg's share of a
+    /// bankruptcy residual): the side's B index has moved from the leg's snapshot
+    /// `b_snap` to `target`; the leg owes `loss_weight` times the move, in units of
+    /// `1 / SOCIAL_LOSS_DEN` of an atom, plus its carried remainder `b_rem`. One step
+    /// settles at most `limit = min(chunk_atoms, endpoint_loss_atom_budget)` whole
+    /// atoms: it takes the largest move `delta_b` whose loss stays within `limit`,
+    /// charges `loss = (loss_weight * delta_b + b_rem) / SOCIAL_LOSS_DEN` and
+    /// carries the remainder. A step that cannot settle anything (no weight, no
+    /// budget, a remainder already above the limit, or no whole move within it)
+    /// asks for Recovery instead of looping. A target behind the snapshot is also
+    /// a Recovery case. Pure scalar; `account_b_settlement_chunk_from_leg` calls
+    /// exactly this. The divisions put a full-width check beyond Kani; the
+    /// contract is asserted wherever a Kani proof reaches this kernel, and it is a
+    /// target for the arithmetic prover.
+    #[inline(always)]
+    pub(crate) fn kernel_b_settlement_chunk(
+        b_snap: u128,
+        b_rem: u128,
+        loss_weight: u128,
+        target: u128,
+        chunk_atoms: u128,
+        endpoint_loss_atom_budget: u128,
+    ) -> V16Result<AccountBSettlementChunkV16> {
+        if target < b_snap {
+            return Err(V16Error::RecoveryRequired);
+        }
+        let b_remaining = target - b_snap;
+        if b_remaining == 0 {
+            return Ok(AccountBSettlementChunkV16 {
+                delta_b: 0,
+                loss: 0,
+                new_remainder: b_rem,
+                remaining_after: 0,
+            });
+        }
+        if loss_weight == 0 || endpoint_loss_atom_budget == 0 {
+            return Err(V16Error::RecoveryRequired);
+        }
+        // Both limits are collateral atoms. Convert that atom budget to the
+        // corresponding B-index delta exactly once through loss_weight below.
+        let limit = chunk_atoms.min(endpoint_loss_atom_budget);
+        let max_num = limit
+            .checked_add(1)
+            .and_then(|v| v.checked_mul(SOCIAL_LOSS_DEN))
+            .and_then(|v| v.checked_sub(1))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if b_rem > max_num {
+            return Err(V16Error::RecoveryRequired);
+        }
+        let max_delta_by_loss = (max_num - b_rem) / loss_weight;
+        let delta_b = b_remaining.min(max_delta_by_loss);
+        if delta_b == 0 {
+            return Err(V16Error::RecoveryRequired);
+        }
+        let num = loss_weight
+            .checked_mul(delta_b)
+            .and_then(|v| v.checked_add(b_rem))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let loss = num / SOCIAL_LOSS_DEN;
+        let new_remainder = num % SOCIAL_LOSS_DEN;
+        Ok(AccountBSettlementChunkV16 {
+            delta_b,
+            loss,
+            new_remainder,
+            remaining_after: b_remaining - delta_b,
+        })
+    }
+
+    /// PRODUCTION KERNEL (source liens, the account's side of a new lien): a lien of
+    /// `required_face_num` face backed by `required_backing_num` from one backing
+    /// source raises the account's liened face and its reserved effective credit,
+    /// and the liened face and backing of that source, by exactly those amounts.
+    /// The first counterparty backing of a slot starts its utilization-fee clock
+    /// at `current_slot`. Nothing else in the record changes. Pure; `create`
+    /// paths of source-credit liens call exactly this for the account record.
+    #[inline(always)]
+    pub(crate) fn kernel_account_source_lien_delta(
+        mut source: PortfolioSourceDomainV16Account,
+        backing_source: SourceCreditBackingSourceV16,
+        required_face_num: u128,
+        required_backing_num: u128,
+        effective_credit: u128,
+        current_slot: u64,
+    ) -> V16Result<PortfolioSourceDomainV16Account> {
+        let prior_counterparty_backing = source.source_lien_counterparty_backing_num.get();
+        source.source_claim_liened_num = V16PodU128::new(
+            source
+                .source_claim_liened_num
+                .get()
+                .checked_add(required_face_num)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        );
+        source.source_lien_effective_reserved = V16PodU128::new(
+            source
+                .source_lien_effective_reserved
+                .get()
+                .checked_add(effective_credit)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        );
+        match backing_source {
+            SourceCreditBackingSourceV16::Counterparty => {
+                source.source_claim_counterparty_liened_num = V16PodU128::new(
+                    source
+                        .source_claim_counterparty_liened_num
+                        .get()
+                        .checked_add(required_face_num)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+                source.source_lien_counterparty_backing_num = V16PodU128::new(
+                    source
+                        .source_lien_counterparty_backing_num
+                        .get()
+                        .checked_add(required_backing_num)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+                if prior_counterparty_backing == 0 {
+                    source.source_lien_fee_last_slot = V16PodU64::new(current_slot);
+                }
+            }
+            SourceCreditBackingSourceV16::Insurance => {
+                source.source_claim_insurance_liened_num = V16PodU128::new(
+                    source
+                        .source_claim_insurance_liened_num
+                        .get()
+                        .checked_add(required_face_num)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+                source.source_lien_insurance_backing_num = V16PodU128::new(
+                    source
+                        .source_lien_insurance_backing_num
+                        .get()
+                        .checked_add(required_backing_num)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+            }
+        }
+        Ok(source)
     }
 
     /// PRODUCTION KERNEL (liveness rank): the B-settlement leg advance.
@@ -3474,6 +4153,55 @@ impl V16Core {
             equity_active: price_move_active || funding_active,
             loss_stale_after: false,
         }
+    }
+
+    /// PRODUCTION KERNEL (accrual, the oracle bound of one segment): an equity-active
+    /// accrual segment of `segment_dt` slots may move the effective price from
+    /// `old_price` to `new_price` only if `|new_price - old_price| * MAX_MARGIN_BPS <=
+    /// max_price_move_bps_per_slot * segment_dt * old_price`; a larger move requires
+    /// Recovery, whatever price the oracle reports. Pure; the single-segment accrual
+    /// (`accrue_asset_to_not_atomic`) calls exactly this.
+    #[inline(always)]
+    pub(crate) fn kernel_accrual_price_move_within_cap(
+        old_price: u64,
+        new_price: u64,
+        max_price_move_bps_per_slot: u64,
+        segment_dt: u64,
+    ) -> V16Result<()> {
+        let price_diff = new_price.abs_diff(old_price) as u128;
+        let lhs = price_diff
+            .checked_mul(MAX_MARGIN_BPS as u128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let rhs = (max_price_move_bps_per_slot as u128)
+            .checked_mul(segment_dt as u128)
+            .and_then(|v| v.checked_mul(old_price as u128))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if lhs > rhs {
+            return Err(V16Error::RecoveryRequired);
+        }
+        Ok(())
+    }
+
+    /// PRODUCTION KERNEL (accrual, the funding of one segment): the per-unit funding
+    /// transfer `funding_rate_e9 * segment_dt * effective_price`, in units of
+    /// `1 / FUNDING_DEN` price units, or 0 when funding is not active in the segment.
+    /// Pure; the single-segment accrual calls it with the segment's length and the path
+    /// accrual with 1 per step (where `rate * 1` cannot overflow, so the result and the
+    /// error are those of `rate * price`).
+    #[inline(always)]
+    pub(crate) fn kernel_accrual_funding_num(
+        funding_rate_e9: i128,
+        segment_dt: u64,
+        effective_price: u64,
+        funding_active: bool,
+    ) -> V16Result<i128> {
+        if !funding_active {
+            return Ok(0);
+        }
+        funding_rate_e9
+            .checked_mul(segment_dt as i128)
+            .and_then(|v| v.checked_mul(effective_price as i128))
+            .ok_or(V16Error::ArithmeticOverflow)
     }
 
     #[inline]
@@ -5248,7 +5976,6 @@ pub struct V16Config {
     pub max_bankrupt_close_chunks: u64,
     pub max_bankrupt_close_lifetime_slots: u64,
     pub asset_activation_cooldown_slots: u64,
-    pub public_b_chunk_atoms: u128,
     pub max_recovery_fallback_deviation_bps: u64,
     pub backing_fee_base_rate_e9_per_slot: u64,
     pub backing_fee_kink_util_bps: u64,
@@ -5329,7 +6056,6 @@ impl V16Config {
             max_bankrupt_close_chunks: 1,
             max_bankrupt_close_lifetime_slots: 1,
             asset_activation_cooldown_slots: 1,
-            public_b_chunk_atoms: MAX_VAULT_TVL,
             max_recovery_fallback_deviation_bps: MAX_RECOVERY_FALLBACK_DEVIATION_BPS,
             backing_fee_base_rate_e9_per_slot: 0,
             backing_fee_kink_util_bps: 8_000,
@@ -5801,7 +6527,6 @@ impl V16Config {
             || self.max_bankrupt_close_chunks == 0
             || self.max_bankrupt_close_lifetime_slots == 0
             || self.asset_activation_cooldown_slots == 0
-            || self.public_b_chunk_atoms == 0
             || self.max_recovery_fallback_deviation_bps > MAX_RECOVERY_FALLBACK_DEVIATION_BPS
             || self.backing_fee_kink_util_bps == 0
             || self.backing_fee_kink_util_bps >= MAX_BACKING_FEE_UTIL_BPS
@@ -6452,49 +7177,103 @@ impl<'a> PortfolioV16ViewMut<'a> {
     }
 
     fn compact_source_domains(&mut self) {
-        let mut write = 0usize;
-        let mut read = 0usize;
-        let mut ordered = true;
-        let mut previous_domain = None;
-        while read < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            let source = self.header.source_domains[read];
-            if source.is_occupied() {
-                let domain = source.domain.get();
-                if previous_domain.is_some_and(|previous| previous > domain) {
-                    ordered = false;
-                }
-                previous_domain = Some(domain);
-                if write != read {
-                    self.header.source_domains[write] = source;
-                    self.header.source_domains[read] = PortfolioSourceDomainV16Account::default();
-                }
-                write += 1;
-            }
-            read += 1;
+        // Already compact (occupied prefix in ascending domain order, all-zero tail): the
+        // compaction below would only write values equal to the ones already there, so skip it.
+        // Kani verifies the full compaction unchanged; the skip is a CU saving only.
+        #[cfg(not(kani))]
+        if source_domain_table_already_compact(&self.header.source_domains) {
+            return;
         }
-        let occupied = write;
-        while write < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            self.header.source_domains[write] = PortfolioSourceDomainV16Account::default();
+        compact_source_domain_table(&mut self.header.source_domains);
+    }
+}
+
+/// The source-domain compaction (moved verbatim from `PortfolioV16ViewMut::compact_source_domains`):
+/// occupied slots to a prefix, defaults after them, then ascending domain order (upstream c0dec8ce).
+fn compact_source_domain_table(
+    domains: &mut [PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
+) {
+    let mut write = 0usize;
+    let mut read = 0usize;
+    let mut ordered = true;
+    let mut previous_domain = None;
+    while read < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let source = domains[read];
+        if source.is_occupied() {
+            let domain = source.domain.get();
+            if previous_domain.is_some_and(|previous| previous > domain) {
+                ordered = false;
+            }
+            previous_domain = Some(domain);
+            if write != read {
+                domains[write] = source;
+                domains[read] = PortfolioSourceDomainV16Account::default();
+            }
             write += 1;
         }
-        // upstream c0dec8ce: canonical allocation order (ascending domain index) so
-        // bounded one-domain-per-call continuations see one layout.
-        if !ordered {
-            let mut index = 1usize;
-            while index < occupied {
-                let source = self.header.source_domains[index];
-                let mut insert = index;
-                while insert != 0
-                    && self.header.source_domains[insert - 1].domain.get() > source.domain.get()
-                {
-                    self.header.source_domains[insert] = self.header.source_domains[insert - 1];
-                    insert -= 1;
-                }
-                self.header.source_domains[insert] = source;
-                index += 1;
+        read += 1;
+    }
+    let occupied = write;
+    while write < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        domains[write] = PortfolioSourceDomainV16Account::default();
+        write += 1;
+    }
+    // upstream c0dec8ce: canonical allocation order (ascending domain index) so
+    // bounded one-domain-per-call continuations see one layout.
+    if !ordered {
+        let mut index = 1usize;
+        while index < occupied {
+            let source = domains[index];
+            let mut insert = index;
+            while insert != 0 && domains[insert - 1].domain.get() > source.domain.get() {
+                domains[insert] = domains[insert - 1];
+                insert -= 1;
             }
+            domains[insert] = source;
+            index += 1;
         }
     }
+}
+
+/// True when `compact_source_domain_table` would leave every byte unchanged: the occupied slots
+/// form a prefix with no descending domain pair, and every slot after them is all-zero bytes
+/// (`PortfolioSourceDomainV16Account::default()`; one `sol_memcmp_`). Then the compaction loop
+/// only has `write == read`, writes default over default, and does not sort.
+#[cfg(not(kani))]
+fn source_domain_table_already_compact(
+    domains: &[PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
+) -> bool {
+    let mut slot = 0usize;
+    let mut previous_domain: Option<u32> = None;
+    while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let source = &domains[slot];
+        if !source.is_occupied() {
+            break;
+        }
+        let domain = source.domain.get();
+        if previous_domain.is_some_and(|previous| previous > domain) {
+            return false;
+        }
+        previous_domain = Some(domain);
+        slot += 1;
+    }
+    source_domain_tail_is_zero(domains, slot)
+}
+
+/// Test hooks for tests/source_domain_compact_skip.rs (`--features fuzz`): the skip predicate and
+/// the full compaction.
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub fn source_domain_table_already_compact_for_test(
+    domains: &[PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
+) -> bool {
+    source_domain_table_already_compact(domains)
+}
+
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub fn compact_source_domain_table_for_test(
+    domains: &mut [PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
+) {
+    compact_source_domain_table(domains)
 }
 
 impl<'a> PortfolioV16View<'a> {
@@ -7351,6 +8130,12 @@ pub struct AccrualStepV16 {
 /// of compounding the cap at caller-selected transaction boundaries. The remainder is the
 /// numerator left after division by `MAX_MARGIN_BPS`; carrying it across calls prevents permanent
 /// low-price target pinning.
+/// The bound this step puts on the oracle: one step moves the effective price toward the
+/// target, never past it, by at most `(cap_anchor * max_change_bps + remainder_before) /
+/// MAX_MARGIN_BPS`, and carries the exact remainder of that division (below `MAX_MARGIN_BPS`). An
+/// unexposed asset (no open interest) jumps to the target; nothing moves when the price is at the
+/// target or the cap is zero. Summed over steps, the movement therefore never exceeds
+/// `cap_anchor * max_change_bps * steps / MAX_MARGIN_BPS`, whatever prices the oracle reports.
 pub fn canonical_accrual_price_step_v16(
     current: u64,
     target: u64,
@@ -8578,7 +9363,6 @@ pub struct V16ConfigAccount {
     pub max_bankrupt_close_chunks: V16PodU64,
     pub max_bankrupt_close_lifetime_slots: V16PodU64,
     pub asset_activation_cooldown_slots: V16PodU64,
-    pub public_b_chunk_atoms: V16PodU128,
     pub max_recovery_fallback_deviation_bps: V16PodU64,
     pub backing_fee_base_rate_e9_per_slot: V16PodU64,
     pub backing_fee_kink_util_bps: V16PodU64,
@@ -8628,7 +9412,6 @@ impl V16ConfigAccount {
                 value.max_bankrupt_close_lifetime_slots,
             ),
             asset_activation_cooldown_slots: V16PodU64::new(value.asset_activation_cooldown_slots),
-            public_b_chunk_atoms: V16PodU128::new(value.public_b_chunk_atoms),
             max_recovery_fallback_deviation_bps: V16PodU64::new(
                 value.max_recovery_fallback_deviation_bps,
             ),
@@ -8694,7 +9477,6 @@ impl V16ConfigAccount {
             max_bankrupt_close_chunks: self.max_bankrupt_close_chunks.get(),
             max_bankrupt_close_lifetime_slots: self.max_bankrupt_close_lifetime_slots.get(),
             asset_activation_cooldown_slots: self.asset_activation_cooldown_slots.get(),
-            public_b_chunk_atoms: self.public_b_chunk_atoms.get(),
             max_recovery_fallback_deviation_bps: self.max_recovery_fallback_deviation_bps.get(),
             backing_fee_base_rate_e9_per_slot: self.backing_fee_base_rate_e9_per_slot.get(),
             backing_fee_kink_util_bps: self.backing_fee_kink_util_bps.get(),
@@ -10660,13 +11442,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     // over-pays winners out of value its owner can still withdraw (or, when the
     // final validate_shape catches it, deadlocks the close permanently).
     fn residual(&self) -> u128 {
-        self.header.vault.get().saturating_sub(
-            self.header
-                .c_tot
-                .get()
-                .saturating_add(self.header.insurance.get())
-                .saturating_add(self.backing_provider_earnings_total())
-                .saturating_add(self.source_fresh_backing_total_atoms()),
+        // PRODUCTION KERNEL: the vault beyond every senior claim.
+        V16Core::kernel_residual(
+            self.header.vault.get(),
+            self.header.c_tot.get(),
+            self.header.insurance.get(),
+            self.backing_provider_earnings_total(),
+            self.source_fresh_backing_total_atoms(),
         )
     }
 
@@ -12814,23 +13596,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP {
             return Err(V16Error::InvalidLeg);
         }
-        let source = &mut account.header.source_domains[slot];
-        source.source_claim_bound_num = V16PodU128::new(
-            source
-                .source_claim_bound_num
-                .get()
-                .checked_sub(burn_num)
-                .ok_or(V16Error::CounterUnderflow)?,
-        );
-        let mut source_credit = self.source_credit_for_domain(domain)?;
-        source_credit.positive_claim_bound_num = source_credit
-            .positive_claim_bound_num
-            .checked_sub(burn_num)
-            .ok_or(V16Error::CounterUnderflow)?;
-        source_credit.exact_positive_claim_num = source_credit
-            .exact_positive_claim_num
-            .checked_sub(burn_num.min(source_credit.exact_positive_claim_num))
-            .ok_or(V16Error::CounterUnderflow)?;
+        let account_claim_bound_num = account.header.source_domains[slot]
+            .source_claim_bound_num
+            .get();
+        // The account's claim is checked before the domain's record is read, as before.
+        if account_claim_bound_num < burn_num {
+            return Err(V16Error::CounterUnderflow);
+        }
+        // PRODUCTION KERNEL: the account's claim and the domain's totals fall together.
+        let (account_claim_bound_num, source_credit) = V16Core::kernel_burn_account_source_claim(
+            account_claim_bound_num,
+            self.source_credit_for_domain(domain)?,
+            burn_num,
+        )?;
+        account.header.source_domains[slot].source_claim_bound_num =
+            V16PodU128::new(account_claim_bound_num);
         self.set_source_credit_for_domain(domain, source_credit)?;
         account.reset_source_domain_slot_if_empty(slot);
         self.recompute_source_credit_domain_after_mutation(domain)
@@ -13416,17 +14196,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::Stale);
         }
         let existing_lien = self.valid_source_lien_effective_reserved_sum(account)?;
-        if no_positive_equity >= 0 {
-            let covered = (no_positive_equity as u128)
-                .checked_add(existing_lien)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            return Ok(cert.certified_initial_req.saturating_sub(covered));
-        }
-        let need_before_lien = cert
-            .certified_initial_req
-            .checked_add(no_positive_equity.unsigned_abs())
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        Ok(need_before_lien.saturating_sub(existing_lien))
+        // PRODUCTION KERNEL: the shortfall of the initial requirement over what
+        // capital-side equity and the account's own liens already cover.
+        V16Core::kernel_initial_margin_source_credit_needed(
+            cert.certified_initial_req,
+            no_positive_equity,
+            existing_lien,
+        )
     }
 
     fn set_insurance_reservation_for_domain(
@@ -14169,7 +14945,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if residual_after_principal_and_insurance == 0 {
             return Ok(false);
         }
-        if self.header.config.public_b_chunk_atoms.get() < residual_after_principal_and_insurance {
+        if PUBLIC_B_CHUNK_ATOMS < residual_after_principal_and_insurance {
             return Ok(true);
         }
         let capacity = self.bankruptcy_residual_single_step_capacity(
@@ -14655,58 +15431,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         effective_credit: u128,
         current_slot: u64,
     ) -> V16Result<()> {
-        let prior_counterparty_backing = source.source_lien_counterparty_backing_num.get();
-        source.source_claim_liened_num = V16PodU128::new(
-            source
-                .source_claim_liened_num
-                .get()
-                .checked_add(required_face_num)
-                .ok_or(V16Error::ArithmeticOverflow)?,
-        );
-        source.source_lien_effective_reserved = V16PodU128::new(
-            source
-                .source_lien_effective_reserved
-                .get()
-                .checked_add(effective_credit)
-                .ok_or(V16Error::ArithmeticOverflow)?,
-        );
-        match backing_source {
-            SourceCreditBackingSourceV16::Counterparty => {
-                source.source_claim_counterparty_liened_num = V16PodU128::new(
-                    source
-                        .source_claim_counterparty_liened_num
-                        .get()
-                        .checked_add(required_face_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?,
-                );
-                source.source_lien_counterparty_backing_num = V16PodU128::new(
-                    source
-                        .source_lien_counterparty_backing_num
-                        .get()
-                        .checked_add(required_backing_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?,
-                );
-                if prior_counterparty_backing == 0 {
-                    source.source_lien_fee_last_slot = V16PodU64::new(current_slot);
-                }
-            }
-            SourceCreditBackingSourceV16::Insurance => {
-                source.source_claim_insurance_liened_num = V16PodU128::new(
-                    source
-                        .source_claim_insurance_liened_num
-                        .get()
-                        .checked_add(required_face_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?,
-                );
-                source.source_lien_insurance_backing_num = V16PodU128::new(
-                    source
-                        .source_lien_insurance_backing_num
-                        .get()
-                        .checked_add(required_backing_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?,
-                );
-            }
-        }
+        // PRODUCTION KERNEL: the account record after the lien, written only on Ok.
+        *source = V16Core::kernel_account_source_lien_delta(
+            *source,
+            backing_source,
+            required_face_num,
+            required_backing_num,
+            effective_credit,
+            current_slot,
+        )?;
         Ok(())
     }
 
@@ -15054,11 +15787,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         maintenance_req: u128,
     ) -> V16Result<u128> {
         let equity = self.account_liquidation_equity(account)?;
-        Ok(if equity < 0 {
-            equity.unsigned_abs()
-        } else {
-            maintenance_req.saturating_sub(equity as u128)
-        })
+        Ok(V16Core::kernel_certified_liq_deficit(equity, maintenance_req))
     }
 
     fn account_equity_inner(
@@ -15066,29 +15795,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &PortfolioV16View<'_>,
         in_flight: bool,
     ) -> V16Result<i128> {
-        validate_non_min_i128(account.header.pnl.get())?;
-        validate_fee_credits(account.header.fee_credits.get())?;
-        let capital = i128::try_from(account.header.capital.get())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
-        let fee_debt = i128::try_from(account.header.fee_credits.get().unsigned_abs())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
-        if account.header.pnl.get() <= 0 {
-            return capital
-                .checked_add(account.header.pnl.get())
-                .and_then(|v| v.checked_sub(fee_debt))
-                .ok_or(V16Error::ArithmeticOverflow);
+        let pnl = account.header.pnl.get();
+        let fee_credits = account.header.fee_credits.get();
+        validate_non_min_i128(pnl)?;
+        validate_fee_credits(fee_credits)?;
+        let capital = account.header.capital.get();
+        if pnl <= 0 {
+            // PRODUCTION KERNEL: no positive PnL, so no support to read.
+            return V16Core::kernel_haircut_equity(capital, pnl, fee_credits, 0);
         }
+        // The kernel's two conversions come first, as they did before the support was read.
+        i128::try_from(capital).map_err(|_| V16Error::ArithmeticOverflow)?;
+        i128::try_from(fee_credits.unsigned_abs()).map_err(|_| V16Error::ArithmeticOverflow)?;
         let positive_support = if Self::account_has_source_claims(account)? {
-            self.account_source_support_inner(account, account.header.pnl.get() as u128, in_flight)?
+            self.account_source_support_inner(account, pnl as u128, in_flight)?
         } else {
             0
         };
-        let positive_support_i128 =
-            i128::try_from(positive_support).map_err(|_| V16Error::ArithmeticOverflow)?;
-        capital
-            .checked_add(positive_support_i128)
-            .and_then(|v| v.checked_sub(fee_debt))
-            .ok_or(V16Error::ArithmeticOverflow)
+        // PRODUCTION KERNEL: only the realizable support of positive PnL counts.
+        V16Core::kernel_haircut_equity(capital, pnl, fee_credits, positive_support)
     }
 
     fn ensure_account_source_claim_market_id(
@@ -15191,27 +15916,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         lp: &mut PortfolioV16ViewMut<'_>,
         principal_atoms: u128,
     ) -> V16Result<u128> {
-        if principal_atoms == 0 {
-            return Ok(0);
-        }
-        let crystallized = trader.header.residual_crystallized_loss_atoms_total.get();
-        let spent = trader.header.residual_spent_principal_atoms_total.get();
-        let available = crystallized
-            .checked_sub(spent)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let credit = available.min(principal_atoms);
+        // PRODUCTION KERNEL: the reward-credit core (what the trader may still
+        // spend, capped by the principal, and the equal rise of both totals).
+        let (credit, spent, received) = V16Core::kernel_residual_reward_credit(
+            trader.header.residual_crystallized_loss_atoms_total.get(),
+            trader.header.residual_spent_principal_atoms_total.get(),
+            lp.header.residual_received_atoms_total.get(),
+            principal_atoms,
+        )?;
         if credit == 0 {
             return Ok(0);
         }
-        trader.header.residual_spent_principal_atoms_total =
-            V16PodU128::new(spent.checked_add(credit).ok_or(V16Error::CounterOverflow)?);
-        lp.header.residual_received_atoms_total = V16PodU128::new(
-            lp.header
-                .residual_received_atoms_total
-                .get()
-                .checked_add(credit)
-                .ok_or(V16Error::CounterOverflow)?,
-        );
+        trader.header.residual_spent_principal_atoms_total = V16PodU128::new(spent);
+        lp.header.residual_received_atoms_total = V16PodU128::new(received);
         Ok(credit)
     }
 
@@ -15458,20 +16175,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             } else {
                 None
             };
-            self.header.pnl_pos_tot = V16PodU128::new(
-                self.header
-                    .pnl_pos_tot
-                    .get()
-                    .checked_add(increase)
-                    .ok_or(V16Error::ArithmeticOverflow)?,
-            );
-            self.header.pnl_pos_bound_tot_num = V16PodU128::new(
-                self.header
-                    .pnl_pos_bound_tot_num
-                    .get()
-                    .checked_add(increase_num)
-                    .ok_or(V16Error::ArithmeticOverflow)?,
-            );
+            // PRODUCTION KERNEL: the exact and the bound total rise together.
+            let (pnl_pos_tot, pnl_pos_bound_tot_num) = V16Core::kernel_pnl_totals_after_increase(
+                self.header.pnl_pos_tot.get(),
+                self.header.pnl_pos_bound_tot_num.get(),
+                increase,
+                increase_num,
+            )?;
+            self.header.pnl_pos_tot = V16PodU128::new(pnl_pos_tot);
+            self.header.pnl_pos_bound_tot_num = V16PodU128::new(pnl_pos_bound_tot_num);
             if let Some(domain) = increase_domain {
                 self.ensure_account_source_claim_market_id(account, domain)?;
                 let source = account.source_domain_mut_or_insert(domain)?;
@@ -15513,47 +16225,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .checked_sub(decrease)
                     .ok_or(V16Error::CounterUnderflow)?,
             );
-            let next_bound_num = self
-                .header
-                .pnl_pos_bound_tot_num
-                .get()
-                .saturating_sub(decrease_num);
             let exact_min_num = V16Core::bound_num_from_amount(self.header.pnl_pos_tot.get())?;
-            self.header.pnl_pos_bound_tot_num = V16PodU128::new(next_bound_num.max(exact_min_num));
-            self.header.pnl_matured_pos_tot = V16PodU128::new(
-                self.header
-                    .pnl_matured_pos_tot
-                    .get()
-                    .min(self.header.pnl_pos_tot.get()),
-            );
+            // PRODUCTION KERNEL: the bound falls but still covers the exact total;
+            // the matured total is capped by it.
+            let (pnl_pos_bound_tot_num, pnl_matured_pos_tot) =
+                V16Core::kernel_pnl_bounds_after_decrease(
+                    self.header.pnl_pos_bound_tot_num.get(),
+                    decrease_num,
+                    exact_min_num,
+                    self.header.pnl_matured_pos_tot.get(),
+                    self.header.pnl_pos_tot.get(),
+                );
+            self.header.pnl_pos_bound_tot_num = V16PodU128::new(pnl_pos_bound_tot_num);
+            self.header.pnl_matured_pos_tot = V16PodU128::new(pnl_matured_pos_tot);
         }
         self.header.pnl_pos_bound_tot = V16PodU128::new(V16Core::amount_from_bound_num(
             self.header.pnl_pos_bound_tot_num.get(),
         )?);
 
-        let old_negative = account.header.pnl.get() < 0;
-        let new_negative = new_pnl < 0;
-        match (old_negative, new_negative) {
-            (false, true) => {
-                self.header.negative_pnl_account_count = V16PodU64::new(
-                    self.header
-                        .negative_pnl_account_count
-                        .get()
-                        .checked_add(1)
-                        .ok_or(V16Error::CounterOverflow)?,
-                );
-            }
-            (true, false) => {
-                self.header.negative_pnl_account_count = V16PodU64::new(
-                    self.header
-                        .negative_pnl_account_count
-                        .get()
-                        .checked_sub(1)
-                        .ok_or(V16Error::CounterUnderflow)?,
-                );
-            }
-            _ => {}
-        }
+        // PRODUCTION KERNEL: the count of accounts with negative PnL follows the
+        // sign of this account's PnL.
+        self.header.negative_pnl_account_count =
+            V16PodU64::new(V16Core::kernel_negative_pnl_account_count(
+                self.header.negative_pnl_account_count.get(),
+                account.header.pnl.get(),
+                new_pnl,
+            )?);
         Self::sync_unattributed_loss_lock(account, new_pnl, loss_domain)?;
         account.header.pnl = V16PodI128::new(new_pnl);
         account.header.health_cert.valid = 0;
@@ -15891,7 +16588,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let remaining_loss = old_loss
             .checked_sub(support_consumed)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let mut junior_face_burned = if let Some(domain) = source_support_domain {
+        let burn_candidate = if let Some(domain) = source_support_domain {
             self.consume_source_domain_credit_for_effective_not_atomic(domain, support_consumed)?
                 .face_burn
                 .min(new_face_support)
@@ -15905,29 +16602,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?;
             self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?
         };
-        if (source_support_domain.is_none()
-            && decode_market_mode(self.header.mode)? == MarketModeV16::Live)
-            || remaining_loss != 0
-        {
-            // Burn only the part of the gain EXCEEDING the outstanding loss. The part
-            // that merely NETS against the loss is the counterparty's loss being
-            // realized against a debt already owed, so it needs no source backing.
-            // Burning it made an underwater account permanently unrecoverable.
-            junior_face_burned = new_face_support.saturating_sub(old_loss);
-        }
-        if junior_face_burned > new_face_support {
-            return Err(V16Error::ArithmeticOverflow);
-        }
-        let retained_face = new_face_support
-            .checked_sub(junior_face_burned)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let retained_i128 =
-            i128::try_from(retained_face).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let remaining_i128 =
-            i128::try_from(remaining_loss).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let new_pnl = retained_i128
-            .checked_sub(remaining_i128)
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        let burn_all = source_support_domain.is_none()
+            && decode_market_mode(self.header.mode)? == MarketModeV16::Live;
+        // PRODUCTION KERNEL: the face a gain keeps against an outstanding loss, and
+        // the PnL it leaves. Burn only the part of the gain EXCEEDING the
+        // outstanding loss: burning the part that nets against the loss made an
+        // underwater account permanently unrecoverable.
+        let (junior_face_burned, new_pnl) = V16Core::kernel_gain_against_loss_after_support(
+            new_face_support,
+            burn_candidate,
+            burn_all,
+            old_loss,
+            remaining_loss,
+        )?;
         if new_pnl > 0 {
             if let Some(domain) = source_domain {
                 self.set_account_pnl_with_source(account, new_pnl, domain)?;
@@ -16169,29 +16856,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             return self.book_realized_loss_backing_for_domain_not_atomic(domain, booked);
         }
+        // PRODUCTION KERNEL: the new loss is paid from capital that earlier losses
+        // left free, and realized. Same `backing` as above (same inputs).
+        let (_, capital, c_tot, new_pnl) = V16Core::kernel_capital_backed_loss_reservation(
+            negative_before,
+            negative_after,
+            account.header.capital.get(),
+            self.header.c_tot.get(),
+            account.header.pnl.get(),
+        )?;
         let vault_before = self.header.vault.get();
-        account.header.capital = V16PodU128::new(
-            account
-                .header
-                .capital
-                .get()
-                .checked_sub(backing)
-                .ok_or(V16Error::CounterUnderflow)?,
-        );
-        self.header.c_tot = V16PodU128::new(
-            self.header
-                .c_tot
-                .get()
-                .checked_sub(backing)
-                .ok_or(V16Error::CounterUnderflow)?,
-        );
-        let backing_i128 = i128::try_from(backing).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let new_pnl = account
-            .header
-            .pnl
-            .get()
-            .checked_add(backing_i128)
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        account.header.capital = V16PodU128::new(capital);
+        self.header.c_tot = V16PodU128::new(c_tot);
         self.set_account_pnl(account, new_pnl)?;
         TokenValueFlowProofV16::account_capital_to_realized_loss(
             backing,
@@ -16223,11 +16899,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// v2.2: called only from the narrowed split (creditor claims final), see the caller.
     fn resolved_loss_backing_capacity_num(&self, domain: usize) -> V16Result<u128> {
         let source = self.source_credit_for_domain(domain)?;
-        let support_gap_num = source.positive_claim_bound_num.saturating_sub(
-            V16Core::available_backing_num_for_source_credit_state(source)?,
-        );
+        let available_backing_num = V16Core::available_backing_num_for_source_credit_state(source)?;
         if decode_bool(self.header.payout_snapshot_captured)? {
-            return Ok(support_gap_num);
+            // PRODUCTION KERNEL: after the snapshot only the support gap is credited.
+            return V16Core::kernel_resolved_loss_backing_capacity(
+                source.positive_claim_bound_num,
+                available_backing_num,
+                true,
+                false,
+                source.provider_receivable_num,
+            );
         }
         let bucket = self.backing_bucket_for_domain(domain)?;
         // v2.2 adaptation: upstream tests `fresh_unliened_backing_num != 0 ||
@@ -16243,15 +16924,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             SideV16::Long => slot.provider_principal_long.get(),
             SideV16::Short => slot.provider_principal_short.get(),
         };
-        if bucket.status == BackingBucketStatusV16::Fresh
+        let live_funded_bucket = bucket.status == BackingBucketStatusV16::Fresh
             && bucket.expiry_slot > self.header.current_slot.get()
-            && (provider_principal_num != 0 || source.provider_receivable_num != 0)
-        {
-            return Ok(u128::MAX);
-        }
-        support_gap_num
-            .checked_add(source.provider_receivable_num)
-            .ok_or(V16Error::ArithmeticOverflow)
+            && (provider_principal_num != 0 || source.provider_receivable_num != 0);
+        // PRODUCTION KERNEL: the whole loss for live funded backing, otherwise the
+        // support gap plus the provider receivable.
+        V16Core::kernel_resolved_loss_backing_capacity(
+            source.positive_claim_bound_num,
+            available_backing_num,
+            false,
+            live_funded_bucket,
+            source.provider_receivable_num,
+        )
     }
 
     /// Whether `book_realized_loss_backing_for_domain_not_atomic` can book into `domain` now:
@@ -16331,9 +17015,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 && self.loss_domain_accepts_realized_backing(domain)?
             {
                 let source = self.source_credit_for_domain(domain)?;
-                let refill_num = source.provider_receivable_num.min(
-                    self.provider_principal_for_domain(domain)?
-                        .saturating_sub(source.fresh_reserved_backing_num),
+                // PRODUCTION KERNEL: what the provider fronted and was not repaid.
+                let refill_num = V16Core::kernel_terminal_provider_refill_capacity(
+                    source.provider_receivable_num,
+                    self.provider_principal_for_domain(domain)?,
+                    source.fresh_reserved_backing_num,
                 );
                 amount.min(
                     refill_num
@@ -17647,55 +18333,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         target: u128,
         endpoint_loss_atom_budget: u128,
     ) -> V16Result<AccountBSettlementChunkV16> {
-        if target < leg.b_snap {
-            return Err(V16Error::RecoveryRequired);
-        }
-        let b_remaining = target - leg.b_snap;
-        if b_remaining == 0 {
-            return Ok(AccountBSettlementChunkV16 {
-                delta_b: 0,
-                loss: 0,
-                new_remainder: leg.b_rem,
-                remaining_after: 0,
-            });
-        }
-        if leg.loss_weight == 0 || endpoint_loss_atom_budget == 0 {
-            return Err(V16Error::RecoveryRequired);
-        }
-        // Both limits are collateral atoms. Convert that atom budget to the
-        // corresponding B-index delta exactly once through loss_weight below.
-        let limit = self
-            .header
-            .config
-            .public_b_chunk_atoms
-            .get()
-            .min(endpoint_loss_atom_budget);
-        let max_num = limit
-            .checked_add(1)
-            .and_then(|v| v.checked_mul(SOCIAL_LOSS_DEN))
-            .and_then(|v| v.checked_sub(1))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if leg.b_rem > max_num {
-            return Err(V16Error::RecoveryRequired);
-        }
-        let max_delta_by_loss = (max_num - leg.b_rem) / leg.loss_weight;
-        let delta_b = b_remaining.min(max_delta_by_loss);
-        if delta_b == 0 {
-            return Err(V16Error::RecoveryRequired);
-        }
-        let num = leg
-            .loss_weight
-            .checked_mul(delta_b)
-            .and_then(|v| v.checked_add(leg.b_rem))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let loss = num / SOCIAL_LOSS_DEN;
-        let new_remainder = num % SOCIAL_LOSS_DEN;
-        Ok(AccountBSettlementChunkV16 {
-            delta_b,
-            loss,
-            new_remainder,
-            remaining_after: b_remaining - delta_b,
-        })
+        // PRODUCTION KERNEL: one bounded step of the leg's share of a residual.
+        V16Core::kernel_b_settlement_chunk(
+            leg.b_snap,
+            leg.b_rem,
+            leg.loss_weight,
+            target,
+            PUBLIC_B_CHUNK_ATOMS,
+            endpoint_loss_atom_budget,
+        )
     }
 
     fn account_b_settlement_chunk(
@@ -18257,17 +18903,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if segment_dt == 0 {
                 return Err(V16Error::NonProgress);
             }
-            let price_diff = effective_price.abs_diff(old.effective_price) as u128;
-            let lhs = price_diff
-                .checked_mul(MAX_MARGIN_BPS as u128)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            let rhs = (config.max_price_move_bps_per_slot as u128)
-                .checked_mul(segment_dt as u128)
-                .and_then(|v| v.checked_mul(old.effective_price as u128))
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            if lhs > rhs {
-                return Err(V16Error::RecoveryRequired);
-            }
+            // PRODUCTION KERNEL: the price-move cap of the segment.
+            V16Core::kernel_accrual_price_move_within_cap(
+                old.effective_price,
+                effective_price,
+                config.max_price_move_bps_per_slot,
+                segment_dt,
+            )?;
             if !protective_progress_committed {
                 return Err(V16Error::NonProgress);
             }
@@ -18284,14 +18926,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // over-realized by ADL_ONE/a_side (see issue #114).
         // fix/v21-funding-precision: keep the funding numerator unfloored; the per-side F
         // deltas are rounded once, in `kernel_funding_index_deltas`.
-        let funding_num = if activity.funding_active {
-            funding_rate_e9
-                .checked_mul(segment_dt as i128)
-                .and_then(|v| v.checked_mul(effective_price as i128))
-                .ok_or(V16Error::ArithmeticOverflow)?
-        } else {
-            0
-        };
+        // PRODUCTION KERNEL: the segment's funding amount.
+        let funding_num = V16Core::kernel_accrual_funding_num(
+            funding_rate_e9,
+            segment_dt,
+            effective_price,
+            activity.funding_active,
+        )?;
         let (k_delta_long, k_delta_short, _, _) = V16Core::kernel_adl_scaled_accrual_index_deltas(
             price_delta,
             0,
@@ -18662,13 +19303,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
             let price_delta = step.effective_price as i128 - asset.effective_price as i128;
             // fix/v21-funding-precision: unfloored numerator (see `kernel_funding_index_deltas`).
-            let funding_num = if activity.funding_active {
-                step.funding_rate_e9
-                    .checked_mul(step.effective_price as i128)
-                    .ok_or(V16Error::ArithmeticOverflow)?
-            } else {
-                0
-            };
+            // PRODUCTION KERNEL: the step's funding amount (one slot).
+            let funding_num = V16Core::kernel_accrual_funding_num(
+                step.funding_rate_e9,
+                1,
+                step.effective_price,
+                activity.funding_active,
+            )?;
             let (k_delta_long, k_delta_short, _, _) =
                 V16Core::kernel_adl_scaled_accrual_index_deltas(
                     price_delta,
@@ -19275,11 +19916,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let released_obligation_asset = self.auto_crank_selected_assets(&account.as_view())?.4;
             if let Some(asset_index) = released_obligation_asset {
                 self.validate_unconfigured_market_tail()?;
-                self.forfeit_recovery_leg_not_atomic(
-                    account,
-                    asset_index,
-                    self.header.config.public_b_chunk_atoms.get(),
-                )?;
+                self.forfeit_recovery_leg_not_atomic(account, asset_index, PUBLIC_B_CHUNK_ATOMS)?;
                 self.validate_shape_audit_scan()?;
                 account.validate_with_market(&self.as_view())?;
                 return Ok(AutoCrankResultV16 {
@@ -19337,7 +19974,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         self.forfeit_recovery_leg_not_atomic(
                             account,
                             asset_index,
-                            self.header.config.public_b_chunk_atoms.get(),
+                            PUBLIC_B_CHUNK_ATOMS,
                         )?;
                         true
                     } else {
@@ -19623,7 +20260,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 match self.refresh_account_and_certify_not_atomic(
                     account,
                     Some((request.asset_index, request.effective_price)),
-                    self.header.config.public_b_chunk_atoms.get(),
+                    PUBLIC_B_CHUNK_ATOMS,
                     true,
                     &mut s10_budget,
                 )? {
@@ -19665,11 +20302,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 // lands on the gain it offsets instead of arriving as a debt the gain must cure
                 // (upstream #172, 137662a9). No S10 budget: only the refresh crank grants one.
                 self.settle_account_kf_effects_not_atomic(account, false, &mut 0u8)?;
-                let out = self.settle_account_b_chunk(
-                    account,
-                    asset_index,
-                    self.header.config.public_b_chunk_atoms.get(),
-                )?;
+                let out =
+                    self.settle_account_b_chunk(account, asset_index, PUBLIC_B_CHUNK_ATOMS)?;
                 return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(out));
             }
             PermissionlessCrankActionV16::Liquidate(_) => {
@@ -19761,7 +20395,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let outcome = match self.refresh_account_and_certify_not_atomic(
             account,
             None,
-            self.header.config.public_b_chunk_atoms.get(),
+            PUBLIC_B_CHUNK_ATOMS,
             true,
             &mut 0u8,
         )? {
@@ -21544,26 +22178,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if self.pending_domain_loss_barrier_count(asset_index, domain_side)? != 0 {
             return Err(V16Error::LockActive);
         }
-        let close_id = current.close_id.saturating_add(1).max(1);
         let asset = self.asset_state(asset_index)?;
-        let ledger = CloseProgressLedgerV16 {
-            active: true,
-            finalized: false,
-            close_id,
-            asset_index: u32::try_from(asset_index).map_err(|_| V16Error::InvalidLeg)?,
-            market_id: asset.market_id,
+        // PRODUCTION KERNEL: the ledger a bankrupt close starts with.
+        let ledger = V16Core::kernel_begin_close_ledger(
+            current.close_id,
+            asset_index,
+            asset.market_id,
             domain_side,
-            gross_loss_at_close_start: gross_loss,
-            drift_reference_slot: self.header.current_slot.get(),
-            max_close_slot: self
-                .header
-                .current_slot
-                .get()
-                .checked_add(self.header.config.max_bankrupt_close_lifetime_slots.get())
-                .ok_or(V16Error::ArithmeticOverflow)?,
-            residual_remaining: gross_loss,
-            ..CloseProgressLedgerV16::EMPTY
-        };
+            gross_loss,
+            self.header.current_slot.get(),
+            self.header.config.max_bankrupt_close_lifetime_slots.get(),
+        )?;
         account.header.close_progress = CloseProgressLedgerV16Account::from_runtime(&ledger);
         let count = self.pending_domain_loss_barrier_count(asset_index, domain_side)?;
         self.set_pending_domain_loss_barrier_count(
@@ -21786,41 +22411,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 asset.social_loss_remainder_short_num,
             ),
         };
-        if weight_sum == 0 {
-            return Ok(0);
-        }
-        let candidate = residual_remaining.min(self.header.config.public_b_chunk_atoms.get());
-        if candidate != 0 {
-            if let Some(delta_b) = candidate
-                .checked_mul(SOCIAL_LOSS_DEN)
-                .and_then(|v| v.checked_add(rem))
-                .map(|v| v / weight_sum)
-            {
-                if delta_b != 0 && b_now.checked_add(delta_b).is_some() {
-                    return Ok(candidate);
-                }
-            }
-        }
-        let headroom_plus_one = U256::from_u128(u128::MAX - b_now)
-            .checked_add(U256::ONE)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let max_scaled = headroom_plus_one
-            .checked_mul(U256::from_u128(weight_sum))
-            .and_then(|v| v.checked_sub(U256::ONE))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if U256::from_u128(rem) > max_scaled {
-            return Ok(0);
-        }
-        let max_chunk_by_b_wide = max_scaled
-            .checked_sub(U256::from_u128(rem))
-            .and_then(|v| v.checked_div(U256::from_u128(SOCIAL_LOSS_DEN)))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let max_chunk_by_b = max_chunk_by_b_wide
-            .try_into_u128()
-            .unwrap_or(residual_remaining);
-        Ok(residual_remaining
-            .min(max_chunk_by_b)
-            .min(self.header.config.public_b_chunk_atoms.get()))
+        // PRODUCTION KERNEL: the largest step the residual, the chunk and the index allow.
+        V16Core::kernel_bankruptcy_residual_step_capacity(
+            b_now,
+            weight_sum,
+            rem,
+            residual_remaining,
+            PUBLIC_B_CHUNK_ATOMS,
+        )
     }
 
     #[cfg(kani)]
@@ -22553,7 +23151,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         match self.refresh_account_and_certify_not_atomic(
             account,
             None,
-            self.header.config.public_b_chunk_atoms.get(),
+            PUBLIC_B_CHUNK_ATOMS,
             false,
             &mut 0u8,
         )? {
@@ -22595,7 +23193,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.refresh_account_and_certify_not_atomic(
                     cp,
                     None,
-                    self.header.config.public_b_chunk_atoms.get(),
+                    PUBLIC_B_CHUNK_ATOMS,
                     false,
                     &mut 0u8,
                 )?,
@@ -22956,10 +23554,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::InvalidConfig);
         }
         self.require_asset_live_reducible(request.asset_index)?;
-        self.settle_account_side_effects_not_atomic(
-            account,
-            self.header.config.public_b_chunk_atoms.get(),
-        )?;
+        self.settle_account_side_effects_not_atomic(account, PUBLIC_B_CHUNK_ATOMS)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
         let before_score = self.risk_score_unchecked(&account.as_view())?;
         let leg = Self::active_leg_for_asset(&account.as_view(), request.asset_index)?;
@@ -23088,7 +23683,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         match self.refresh_account_and_certify_not_atomic(
             account,
             None,
-            self.header.config.public_b_chunk_atoms.get(),
+            PUBLIC_B_CHUNK_ATOMS,
             false,
             &mut 0u8,
         )? {
@@ -23310,16 +23905,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn account_no_positive_credit_equity(account: &PortfolioV16View<'_>) -> V16Result<i128> {
-        validate_non_min_i128(account.header.pnl.get())?;
-        validate_fee_credits(account.header.fee_credits.get())?;
-        let capital = i128::try_from(account.header.capital.get())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
-        let fee_debt = i128::try_from(account.header.fee_credits.get().unsigned_abs())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
-        capital
-            .checked_add(account.header.pnl.get().min(0))
-            .and_then(|v| v.checked_sub(fee_debt))
-            .ok_or(V16Error::ArithmeticOverflow)
+        // PRODUCTION KERNEL: capital, less negative PnL, less the fee debt.
+        V16Core::kernel_no_positive_credit_equity(
+            account.header.capital.get(),
+            account.header.pnl.get(),
+            account.header.fee_credits.get(),
+        )
     }
 
     fn ensure_no_positive_credit_initial_margin(account: &PortfolioV16View<'_>) -> V16Result<()> {
@@ -23435,21 +24026,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             config.maintenance_margin_bps,
             config.min_nonzero_mm_req,
         )?;
-        let initial_req = existing
-            .certified_initial_req
-            .checked_sub(old_initial)
-            .and_then(|v| v.checked_add(new_initial))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let maintenance_req = existing
-            .certified_maintenance_req
-            .checked_sub(old_maintenance)
-            .and_then(|v| v.checked_add(new_maintenance))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let worst_case_loss = existing
-            .certified_worst_case_loss
-            .checked_sub(old_notional)
-            .and_then(|v| v.checked_add(new_notional))
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        // PRODUCTION KERNEL: the certificate's requirements after this leg's
+        // change (old contribution out, new contribution in).
+        let (initial_req, maintenance_req, worst_case_loss) =
+            V16Core::kernel_cert_requirements_after_leg_delta(
+                existing.certified_initial_req,
+                existing.certified_maintenance_req,
+                existing.certified_worst_case_loss,
+                old_initial,
+                new_initial,
+                old_maintenance,
+                new_maintenance,
+                old_notional,
+                new_notional,
+            )?;
         let equity = self.account_haircut_equity(&account.as_view())?;
         // haircut-order fix B: the trigger counts in-flight backing
         let certified_liq_deficit =
@@ -24562,7 +25152,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 0
             };
             let step = residual
-                .min(self.header.config.public_b_chunk_atoms.get())
+                .min(PUBLIC_B_CHUNK_ATOMS)
                 .min(self.bankruptcy_residual_single_step_capacity(
                     charge_asset,
                     bankrupt_side,
@@ -25112,32 +25702,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         requested_fee: u128,
     ) -> V16Result<u128> {
-        if requested_fee == 0 || account.header.pnl.get() < 0 {
-            return Ok(0);
-        }
-        let charged = requested_fee.min(account.header.capital.get());
+        // PRODUCTION KERNEL: the fee-charge core (who pays, how much, and the exact
+        // capital / c_tot / insurance movement).
+        let (charged, capital, c_tot, insurance) = V16Core::kernel_charge_account_fee(
+            requested_fee,
+            account.header.pnl.get(),
+            account.header.capital.get(),
+            self.header.c_tot.get(),
+            self.header.insurance.get(),
+        )?;
         if charged == 0 {
             return Ok(0);
         }
         let vault_before = self.header.vault.get();
-        let capital = account
-            .header
-            .capital
-            .get()
-            .checked_sub(charged)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let c_tot = self
-            .header
-            .c_tot
-            .get()
-            .checked_sub(charged)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let insurance = self
-            .header
-            .insurance
-            .get()
-            .checked_add(charged)
-            .ok_or(V16Error::ArithmeticOverflow)?;
         account.header.capital = V16PodU128::new(capital);
         self.header.c_tot = V16PodU128::new(c_tot);
         self.header.insurance = V16PodU128::new(insurance);
@@ -25182,10 +25759,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         requested_fee: u128,
     ) -> V16Result<u128> {
-        self.settle_account_side_effects_not_atomic(
-            account,
-            self.header.config.public_b_chunk_atoms.get(),
-        )?;
+        self.settle_account_side_effects_not_atomic(account, PUBLIC_B_CHUNK_ATOMS)?;
         if decode_bool(account.header.b_stale_state)? || Self::has_b_stale_leg(&account.as_view())?
         {
             return Err(V16Error::BStale);
@@ -25801,10 +26375,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
-        self.settle_account_side_effects_not_atomic(
-            account,
-            self.header.config.public_b_chunk_atoms.get(),
-        )?;
+        self.settle_account_side_effects_not_atomic(account, PUBLIC_B_CHUNK_ATOMS)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
         let no_positive = Self::account_no_positive_credit_equity(&account.as_view())?;
         let cert = account.header.health_cert.try_to_runtime()?;
@@ -26113,11 +26684,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)?;
         let requested_fee = raw_fee.try_into_u128().unwrap_or(u128::MAX);
         if decode_market_mode(self.header.mode)? == MarketModeV16::Live && nonflat {
-            if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
-                .settle_account_side_effects_not_atomic(
-                    account,
-                    self.header.config.public_b_chunk_atoms.get(),
-                )?
+            if let PermissionlessProgressOutcomeV16::AccountBChunk(_) =
+                self.settle_account_side_effects_not_atomic(account, PUBLIC_B_CHUNK_ATOMS)?
             {
                 return Err(V16Error::BStale);
             }
@@ -26772,7 +27340,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
             .settle_account_side_effects_not_atomic(
                 account,
-                self.header.config.public_b_chunk_atoms.get(),
+                PUBLIC_B_CHUNK_ATOMS,
             )?
         {
             self.validate_shape()?;
@@ -28963,7 +29531,6 @@ pub fn kani_eq_v16_config_account(a: &V16ConfigAccount, b: &V16ConfigAccount) ->
         && a.max_bankrupt_close_chunks.get() == b.max_bankrupt_close_chunks.get()
         && a.max_bankrupt_close_lifetime_slots.get() == b.max_bankrupt_close_lifetime_slots.get()
         && a.asset_activation_cooldown_slots.get() == b.asset_activation_cooldown_slots.get()
-        && a.public_b_chunk_atoms.get() == b.public_b_chunk_atoms.get()
         && a.max_recovery_fallback_deviation_bps.get()
             == b.max_recovery_fallback_deviation_bps.get()
         && a.backing_fee_base_rate_e9_per_slot.get() == b.backing_fee_base_rate_e9_per_slot.get()

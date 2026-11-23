@@ -51,7 +51,6 @@ fn deployed_config() -> V16Config {
     cfg.max_bankrupt_close_chunks = 10;
     cfg.max_bankrupt_close_lifetime_slots = 500;
     cfg.asset_activation_cooldown_slots = 1;
-    cfg.public_b_chunk_atoms = 1_000_000_000_000;
     cfg.max_recovery_fallback_deviation_bps = 10_000;
     cfg.backing_fee_base_rate_e9_per_slot = 0;
     cfg.backing_fee_kink_util_bps = 8_000;

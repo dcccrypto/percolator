@@ -25,6 +25,12 @@ pub const FULL_SUPPORT_WEIGHT: u128 = SUPPORT_WEIGHT_SCALE;
 pub const BOUND_SCALE: u128 = 1_000_000_000_000;
 pub const CREDIT_RATE_SCALE: u128 = 1_000_000_000_000;
 pub const MAX_VAULT_TVL: u128 = 10_000_000_000_000_000;
+/// The public B chunk: the most collateral atoms one B-settlement step or one
+/// bankruptcy-residual booking step moves. A constant, not a market setting: a market
+/// creator who could choose it could make it one atom, so that every social-loss
+/// settlement crawls, or so large that every step overflows. No collateral amount
+/// exceeds the largest vault, so this chunk never splits a settlement that fits in it.
+pub const PUBLIC_B_CHUNK_ATOMS: u128 = MAX_VAULT_TVL;
 pub const MAX_POSITION_ABS_Q: u128 = 100_000_000_000_000;
 pub const MAX_ACCOUNT_NOTIONAL: u128 = 100_000_000_000_000_000_000;
 pub const MAX_TRADE_SIZE_Q: u128 = MAX_POSITION_ABS_Q;
@@ -151,7 +157,6 @@ pub use v16::source_domain_tail_is_zero_for_test;
 // Atom-alignment check without u128 modulo vs. `% BOUND_SCALE` (differential test only).
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::bound_num_is_atom_aligned_for_test;
-
 
 // Source-domain compaction skip predicate vs. the full compaction (differential test only).
 #[cfg(all(not(kani), feature = "fuzz"))]

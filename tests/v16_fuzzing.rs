@@ -7,7 +7,7 @@ use percolator::{
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
     V16Config, V16Error, V16PodU128, MAX_VAULT_TVL,
 };
-use percolator::{BOUND_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
+use percolator::{BOUND_SCALE, POS_SCALE, PUBLIC_B_CHUNK_ATOMS, SOCIAL_LOSS_DEN};
 use proptest::prelude::*;
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
@@ -93,8 +93,7 @@ fn settle_two_domain_b_loss(
     target_lien_backing: TargetLienBacking,
 ) -> TwoDomainBSettlement {
     let (market_id, _, _, owner) = ids();
-    let mut cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
-    cfg.public_b_chunk_atoms = loss.max(1);
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 2, 0).unwrap();
     let mut markets = vec![
         Market::new(0u64, EngineAssetSlotV16Account::default()),
@@ -268,11 +267,85 @@ fn v16_b_loss_preserves_the_unburned_part_of_a_matching_insurance_lien() {
     assert_eq!(after.target_valid_insurance_num, 50 * BOUND_SCALE);
 }
 
+// Multi-step B settlement, driven for real: a bankrupt residual is booked onto the winning
+// side's B index, then the winner settles it under a 1-atom caller budget. Each step moves at
+// most one loss atom, so settlement takes several steps (the old fuzzer reached this with a
+// one-atom config chunk) and a zero budget with a B delta outstanding asks for Recovery.
+#[test]
+fn v16_b_settlement_under_a_small_budget_takes_several_steps_and_a_zero_budget_recovers() {
+    const RESIDUAL: u128 = 40;
+    let (mut header, mut markets) = fuzz_group();
+    let (_, a_id, b_id, _) = ids();
+    let mut loser = fuzz_account(a_id);
+    let mut winner = fuzz_account(b_id);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut l = PortfolioV16ViewMut::new(&mut loser);
+        let mut w = PortfolioV16ViewMut::new(&mut winner);
+        market.deposit_not_atomic(&mut l, 1_000).unwrap();
+        market.deposit_not_atomic(&mut w, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut l,
+                &mut w,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    exec_price: 1,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+    }
+    // The long loser goes bankrupt; the short winner carries the loss weight.
+    loser.pnl = percolator::V16PodI128::new(-(RESIDUAL as i128));
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let booked = {
+        let mut l = PortfolioV16ViewMut::new(&mut loser);
+        let (booked, explicit) = market
+            .kani_book_bankruptcy_residual_chunk_for_account_core(
+                &mut l,
+                0,
+                percolator::SideV16::Long,
+                RESIDUAL,
+            )
+            .unwrap();
+        booked + explicit
+    };
+    assert!(booked > 1, "the residual must be large enough to need several 1-atom steps");
+
+    let mut w = PortfolioV16ViewMut::new(&mut winner);
+    // A zero budget cannot settle anything while B has moved: Recovery, not a loop.
+    assert_eq!(
+        market.kani_settle_account_b_chunk(&mut w, 0, 0).unwrap_err(),
+        V16Error::RecoveryRequired
+    );
+    let pnl_before = w.header.pnl.get();
+    let mut steps = 0u32;
+    let mut total_loss = 0u128;
+    let mut saw_partial = false;
+    loop {
+        let chunk = market.kani_settle_account_b_chunk(&mut w, 0, 1).unwrap();
+        steps += 1;
+        total_loss += chunk.loss;
+        assert!(chunk.loss <= 1, "a 1-atom budget caps one step at one loss atom");
+        if chunk.remaining_after != 0 {
+            saw_partial = true;
+        } else {
+            break;
+        }
+        assert!(steps < 10_000, "settlement must terminate");
+    }
+    assert!(steps > 1 && saw_partial, "B settlement must have taken more than one step");
+    assert!(total_loss <= booked);
+    assert_eq!(pnl_before - w.header.pnl.get(), total_loss as i128);
+}
+
 fn fuzz_group() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
     let (market_id, _, _, _) = ids();
     let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
     cfg.max_trading_fee_bps = 10;
-    cfg.public_b_chunk_atoms = 1;
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
     let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
     header
@@ -302,7 +375,7 @@ fn v16_b_settlement_budget_is_loss_atoms_not_index_delta() {
 
     let (market_id, _, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
-    assert_eq!(cfg.public_b_chunk_atoms, MAX_VAULT_TVL);
+    assert_eq!(PUBLIC_B_CHUNK_ATOMS, MAX_VAULT_TVL);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
     let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -387,7 +460,7 @@ fn apply_fuzz_action(
     let before = (*header, markets.clone(), *account_a, *account_b);
     let target_a = (selector & 0x8) == 0;
     let amount = (amount_seed as u128) % 128;
-    let result = match selector % 12 {
+    let result = match selector % 13 {
         0 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
@@ -582,7 +655,7 @@ fn apply_fuzz_action(
                 .resolve_market_not_atomic(market.header.current_slot.get())
                 .map(|_| ())
         }
-        _ => {
+        11 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
                 let mut account = PortfolioV16ViewMut::new(account_a);
@@ -593,6 +666,25 @@ fn apply_fuzz_action(
                 let mut account = PortfolioV16ViewMut::new(account_b);
                 market
                     .close_resolved_account_not_atomic(&mut account, 0)
+                    .map(|_| ())
+            }
+        }
+        _ => {
+            // The public B chunk is the constant PUBLIC_B_CHUNK_ATOMS, so a public path settles a
+            // leg's B loss in one step. A caller's loss-atom budget still caps one step; settle with
+            // a tiny budget (0..=3 atoms) to reach multi-step settlement and the RecoveryRequired
+            // branches of kernel_b_settlement_chunk.
+            let budget = amount % 4;
+            let mut market = MarketGroupV16ViewMut::new(header, markets);
+            if target_a {
+                let mut account = PortfolioV16ViewMut::new(account_a);
+                market
+                    .kani_settle_account_b_chunk(&mut account, 0, budget)
+                    .map(|_| ())
+            } else {
+                let mut account = PortfolioV16ViewMut::new(account_b);
+                market
+                    .kani_settle_account_b_chunk(&mut account, 0, budget)
                     .map(|_| ())
             }
         }
