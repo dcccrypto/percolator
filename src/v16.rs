@@ -57,6 +57,33 @@ pub struct BackingDomainFeeSplitV16 {
     pub insurance_fee: u128,
 }
 
+/// `value % BOUND_SCALE == 0`, without the u128 software modulo (`__umodti3`, ~150 CU on SBF)
+/// for values below 2^88. With value = hi * 2^64 + lo and hi < 2^24, the residue is
+/// (hi * C + lo mod BOUND_SCALE) mod BOUND_SCALE with C = 2^64 mod BOUND_SCALE = 73_709_551_616,
+/// all in u64 (C < 2^37, so hi * C < 2^61 and the sum < 2^62). Larger values keep the u128 `%`.
+/// Same answer for every value; pinned by tests/bound_num_atom_aligned.rs (`--features fuzz`).
+/// Kani keeps the plain u128 `%` (same dual-mode pattern as `loss_weight_for_basis`), so existing
+/// proofs see the arithmetic they were written against.
+#[inline(always)]
+fn bound_num_is_atom_aligned(value: u128) -> bool {
+    #[cfg(not(kani))]
+    {
+        const M: u64 = BOUND_SCALE as u64;
+        const C: u64 = ((1u128 << 64) % BOUND_SCALE) as u64;
+        if value >> 88 == 0 {
+            let hi = (value >> 64) as u64;
+            let lo = value as u64;
+            return (hi * C + lo % M) % M == 0;
+        }
+    }
+    value % BOUND_SCALE == 0
+}
+
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub fn bound_num_is_atom_aligned_for_test(value: u128) -> bool {
+    bound_num_is_atom_aligned(value)
+}
+
 pub fn backing_domain_fee_split_for_lien_delta_num(
     lien_delta_num: u128,
     fee_bps: u16,
@@ -65,7 +92,7 @@ pub fn backing_domain_fee_split_for_lien_delta_num(
     if fee_bps as u64 > MAX_MARGIN_BPS || insurance_share_bps as u64 > MAX_MARGIN_BPS {
         return Err(V16Error::InvalidConfig);
     }
-    if lien_delta_num % BOUND_SCALE != 0 {
+    if !bound_num_is_atom_aligned(lien_delta_num) {
         return Err(V16Error::InvalidConfig);
     }
     let lien_delta_atoms = lien_delta_num / BOUND_SCALE;
@@ -2798,7 +2825,7 @@ impl V16Core {
                 && bucket_valid_liened_num >= counterparty_backing_num
                 && source_valid_liened_backing_num >= counterparty_backing_num);
         let insurance_releasable = insurance_backing_num == 0
-            || (insurance_backing_num % BOUND_SCALE == 0
+            || (bound_num_is_atom_aligned(insurance_backing_num)
                 && reservation_valid_liened_insurance_num >= insurance_backing_num
                 && source_valid_liened_insurance_num >= insurance_backing_num);
         if counterparty_releasable && insurance_releasable {
@@ -3217,7 +3244,7 @@ impl V16Core {
         if face == 0 && backing_num == 0 {
             return Ok((source, 0));
         }
-        if face == 0 || backing_num == 0 || backing_num % BOUND_SCALE != 0 {
+        if face == 0 || backing_num == 0 || !bound_num_is_atom_aligned(backing_num) {
             return Err(V16Error::InvalidLeg);
         }
         let effective = backing_num / BOUND_SCALE;
@@ -3264,7 +3291,7 @@ impl V16Core {
         backing_reserved_num: u128,
         face_burn_num: u128,
     ) -> V16Result<u128> {
-        if face_burn_num > face_locked_num || backing_reserved_num % BOUND_SCALE != 0 {
+        if face_burn_num > face_locked_num || !bound_num_is_atom_aligned(backing_reserved_num) {
             return Err(V16Error::InvalidLeg);
         }
         let effective_reserved = backing_reserved_num / BOUND_SCALE;
@@ -3379,7 +3406,7 @@ impl V16Core {
         if bound_num == 0 {
             return Ok(());
         }
-        if bound_num % BOUND_SCALE != 0 {
+        if !bound_num_is_atom_aligned(bound_num) {
             return Err(V16Error::InvalidConfig);
         }
         Ok(())
@@ -6608,8 +6635,8 @@ impl<'a> PortfolioV16View<'a> {
                 .counterparty_backing_reserved_num
                 .checked_add(proof.insurance_backing_reserved_num)
                 .ok_or(V16Error::ArithmeticOverflow)?;
-            if proof.counterparty_backing_reserved_num % BOUND_SCALE != 0
-                || proof.insurance_backing_reserved_num % BOUND_SCALE != 0
+            if !bound_num_is_atom_aligned(proof.counterparty_backing_reserved_num)
+                || !bound_num_is_atom_aligned(proof.insurance_backing_reserved_num)
                 || lien_backing_num
                     != proof
                         .effective_credit_reserved
@@ -7999,8 +8026,8 @@ impl SourceCreditLienAggregateProofV16 {
         {
             return Err(V16Error::InvalidLeg);
         }
-        if self.counterparty_backing_reserved_num % BOUND_SCALE != 0
-            || self.insurance_backing_reserved_num % BOUND_SCALE != 0
+        if !bound_num_is_atom_aligned(self.counterparty_backing_reserved_num)
+            || !bound_num_is_atom_aligned(self.insurance_backing_reserved_num)
         {
             return Err(V16Error::InvalidLeg);
         }
