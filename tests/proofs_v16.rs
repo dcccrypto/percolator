@@ -20552,7 +20552,7 @@ fn proof_v16_decoded_leg_is_empty_matches_encoding() {
     match leg.try_to_runtime() {
         Ok(decoded) => {
             kani::cover!(decoded.is_empty(), "inactive image that decodes");
-            assert_eq!(decoded.is_empty(), leg.is_empty_encoding());
+            assert_eq!(decoded.is_empty(), percolator::v16::decoded_leg_slot_is_empty_for_test(&leg));
         }
         Err(_) => kani::cover!(!leg.is_empty_encoding(), "inactive non-empty image is refused"),
     }

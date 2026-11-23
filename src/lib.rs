@@ -157,3 +157,7 @@ pub use v16::source_domain_tail_is_zero_for_test;
 // Atom-alignment check without u128 modulo vs. `% BOUND_SCALE` (differential test only).
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::bound_num_is_atom_aligned_for_test;
+
+// Raw-byte emptiness of a decoded leg slot vs. PortfolioLegV16::is_empty (differential test only).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::decoded_leg_slot_is_empty_for_test;

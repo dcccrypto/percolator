@@ -1,8 +1,14 @@
 //! `validate_with_market` and the refresh loop (src/v16.rs) test a decoded inactive leg for
-//! emptiness with the raw `is_empty_encoding()` byte compare instead of `PortfolioLegV16::is_empty()`.
+//! emptiness on the raw bytes (`decoded_leg_slot_is_empty`, one memcmp) instead of
+//! `PortfolioLegV16::is_empty()`.
 //! For every image that decodes, the two must agree. This checks it on the empty encoding, on
 //! every single-byte change of it, and on random images (active ones included).
-use percolator::{PortfolioLegV16Account, PORTFOLIO_LEG_V16_EMPTY_ACCOUNT};
+//! Needs `--features fuzz` (exposes the hook).
+#![cfg(all(feature = "fuzz", not(kani)))]
+use percolator::{
+    decoded_leg_slot_is_empty_for_test as raw_is_empty, PortfolioLegV16Account,
+    PORTFOLIO_LEG_V16_EMPTY_ACCOUNT,
+};
 
 struct XorShift(u64);
 impl XorShift {
@@ -19,7 +25,7 @@ impl XorShift {
 fn check(leg: &PortfolioLegV16Account) -> bool {
     match leg.try_to_runtime() {
         Ok(decoded) => {
-            assert_eq!(decoded.is_empty(), leg.is_empty_encoding(), "{leg:?}");
+            assert_eq!(decoded.is_empty(), raw_is_empty(leg), "{leg:?}");
             true
         }
         Err(_) => false,
