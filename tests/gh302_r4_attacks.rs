@@ -199,10 +199,17 @@ fn crash_cfg(cfg: V16Config, dip_a0: bool, insure: &[(usize, u128)]) -> Option<W
     Some(w)
 }
 
-fn cfg_chunk(chunk: u128) -> V16Config {
-    let mut c = band_cfg(2);
-    c.public_b_chunk_atoms = chunk;
-    c
+// NOTE (public B chunk): these probes used to sweep a configurable `public_b_chunk_atoms`
+// (1, 7, 50, ... atoms) to force a bankrupt residual to be booked in several partial steps.
+// The chunk is now the constant PUBLIC_B_CHUNK_ATOMS = MAX_VAULT_TVL = 1e16. The deficits in
+// these fixtures are a few hundred atoms and cannot be rescaled past 1e16 within the vault
+// limit (the debtor's deficit is ~0.2% of its capital here, so it would need ~6e18 of capital),
+// so the partial-charge / second-chunk variants are unreachable and are removed rather than
+// left re-running the full-chunk case. Multi-step booking is covered at a scale that fits in
+// tests/f02_stale_residual_poc.rs and tests/f02_regression.rs (route1c), and multi-step B
+// settlement by a small caller budget in tests/v16_fuzzing.rs.
+fn cfg() -> V16Config {
+    band_cfg(2)
 }
 
 fn dump(w: &W2, tag: &str) {
@@ -216,20 +223,21 @@ fn dump(w: &W2, tag: &str) {
 
 fn conserved(w: &W2) -> bool { w.header.vault.get() >= w.header.c_tot.get() + w.header.insurance.get() }
 
-/// Probe: attributed a1 deficit, partial capacity via small chunk, partial insurance; both close orders.
+/// Probe: attributed a1 deficit, partial insurance; both close orders. (The small-chunk
+/// partial-capacity variants are unreachable now, see the note at `cfg`.)
 #[test]
 fn r4_partial_charge_accounting() {
     for order in 0..2 {
-      for &chunk in &[1u128, 7, 50, 333, 334, 335, 336, 430, 433, 434, 435, 436, 437, 440, 1_000, 1_000_000_000_000] {
+      {
         for &ins in &[0u128, 100, 10_000] {
-            let Some(mut w) = crash_cfg(cfg_chunk(chunk), false, &[(DOMAIN_A1_SHORT, ins)]) else { println!("order{order} chunk{chunk} ins{ins}: no latch"); continue };
+            let Some(mut w) = crash_cfg(cfg(), false, &[(DOMAIN_A1_SHORT, ins)]) else { println!("order{order} ins{ins}: no latch"); continue };
             let d0 = -w.accounts[0].pnl.get();
             let ins0 = w.header.insurance.get();
             let b0 = (w.asset(0).b_short_num, w.asset(1).b_short_num);
             let ws = (w.asset(0).loss_weight_sum_short, w.asset(1).loss_weight_sum_short);
             for _ in 0..3 { for i in [1usize,2] { let _ = w.refresh(i); } }
             let wp0 = (w.accounts[1].pnl.get(), w.accounts[2].pnl.get());
-            if chunk==1000 && ins==0 && order==0 { println!("ASSET1 before {:?}", w.asset(1)); println!("ACCT2 before {:?}", w.accounts[2].legs[0].try_to_runtime().unwrap()); }
+            if ins==0 && order==0 { println!("ASSET1 before {:?}", w.asset(1)); println!("ACCT2 before {:?}", w.accounts[2].legs[0].try_to_runtime().unwrap()); }
             let seq: [usize; 2] = if order == 0 { [1, 0] } else { [0, 1] };
             let mut reported = (0u128, 0u128, 0u128);
             let mut log = String::new();
@@ -245,12 +253,12 @@ fn r4_partial_charge_accounting() {
             let wp1 = (w.accounts[1].pnl.get(), w.accounts[2].pnl.get());
             println!("   winners pnl before {wp0:?} after {wp1:?} loss_a0={} loss_a1={}", wp0.0-wp1.0, wp0.1-wp1.1);
 
-            if chunk==1000 && ins==0 && order==0 { println!("ASSET1 after {:?}", w.asset(1)); println!("ACCT2 after {:?} {:?}", w.accounts[2].legs[0].try_to_runtime().unwrap(), w.legs(2)); }
+            if ins==0 && order==0 { println!("ASSET1 after {:?}", w.asset(1)); println!("ACCT2 after {:?} {:?}", w.accounts[2].legs[0].try_to_runtime().unwrap(), w.legs(2)); }
             let ins_used = ins0 - w.header.insurance.get();
             let db1 = w.asset(1).b_short_num - b0.1; let db0 = w.asset(0).b_short_num - b0.0;
             let dbe = w.asset(1).b_epoch_start_short_num - 0 + db1;
             let booked_atoms_est = dbe * ws.1 / 1_000_000_000_000_000_000_000u128; assert_eq!(booked_atoms_est, reported.1 + reported.2, "B on winners (epoch-start index) equals reported booked");
-            println!("order{order} chunk{chunk} ins{ins}: D0={d0} reported={reported:?} ins_used={ins_used} dB(a0,a1)=({db0},{db1}) ws1={} est={booked_atoms_est} final pnl={} mode={} negcnt={} {log}",
+            println!("order{order} ins{ins}: D0={d0} reported={reported:?} ins_used={ins_used} dB(a0,a1)=({db0},{db1}) ws1={} est={booked_atoms_est} final pnl={} mode={} negcnt={} {log}",
                 ws.1, w.accounts[0].pnl.get(), w.header.mode, w.header.negative_pnl_account_count.get());
             assert_eq!(w.header.mode, 0, "no Recovery");
             assert!(ins_used <= ins.min(d0 as u128));
@@ -263,18 +271,17 @@ fn r4_partial_charge_accounting() {
 
 #[test]
 fn r4_winner_realization_probe() {
-    let mut w = crash_cfg(cfg_chunk(1_000_000_000_000), false, &[(DOMAIN_A1_SHORT, 100)]).unwrap();
+    let mut w = crash_cfg(cfg(), false, &[(DOMAIN_A1_SHORT, 100)]).unwrap();
     let _ = close(&mut w, 1); let _ = close(&mut w, 0);
     dump(&w, "after closes");
     for i in 1..3 { for k in 0..4 { let r = w.refresh(i); println!("refresh acct{i} #{k}: {:?} pnl={} cap={} legs={:?}", r.as_ref().map(|c| c.certified_liq_deficit).map_err(|e| format!("{e:?}")), w.accounts[i].pnl.get(), w.accounts[i].capital.get(), w.legs(i)); } }
     dump(&w, "after refresh");
 }
 
-fn three_leg(chunk: u128, ins: &[(usize, u128)]) -> Option<W2> {
+fn three_leg(ins: &[(usize, u128)]) -> Option<W2> {
     let q = POS_SCALE;
     let n = 3usize;
-    let mut c = band_cfg(n as u16);
-    c.public_b_chunk_atoms = chunk;
+    let c = band_cfg(n as u16);
     let mut w = W2::new(c, &[390_000, 50_000_000, 50_000_000, 50_000_000], n);
     for i in 0..n { w.trade(i, 0, i + 1, q).ok()?; }
     w.now += 5; let _ = w.refresh(0);
@@ -295,32 +302,32 @@ fn perms3() -> Vec<[usize;3]> { vec![[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,
 #[test]
 fn r4_recovery_sweep_two_and_three_assets() {
     let mut runs = 0; let mut fails = Vec::new();
-    for &chunk in &[1u128, 100, 435, 1_000_000_000_000] {
+    {
         for ins_cfg in 0..5usize {
             let insv: Vec<(usize,u128)> = match ins_cfg { 0 => vec![], 1 => (0..4).map(|d|(d,100)).collect(), 2 => (0..4).map(|d|(d,10_000)).collect(), 3 => vec![(1,100),(3,10_000)], _ => vec![(0,10_000),(2,10_000)] };
             for dip in [false, true] {
               for order in [[0usize,1],[1,0]] {
-                let Some(mut w) = crash_cfg(cfg_chunk(chunk), dip, &insv) else { continue };
+                let Some(mut w) = crash_cfg(cfg(), dip, &insv) else { continue };
                 runs += 1;
                 for &ai in &order { for _ in 0..3 { if close(&mut w, ai).is_ok() { break; } } assert!(conserved(&w)); }
                 for _ in 0..4 { let _ = w.refresh(0); }
                 let ok = w.header.mode == 0 && w.accounts[0].pnl.get() == 0 && w.header.negative_pnl_account_count.get() == 0;
-                if !ok { fails.push(format!("2asset chunk{chunk} ins{ins_cfg} dip{dip} order{order:?}: mode={} pnl={} negcnt={} legs={:?}", w.header.mode, w.accounts[0].pnl.get(), w.header.negative_pnl_account_count.get(), w.legs(0))); }
+                if !ok { fails.push(format!("2asset ins{ins_cfg} dip{dip} order{order:?}: mode={} pnl={} negcnt={} legs={:?}", w.header.mode, w.accounts[0].pnl.get(), w.header.negative_pnl_account_count.get(), w.legs(0))); }
               }
             }
             for p in perms3() {
-                let Some(mut w) = three_leg(chunk, &insv) else { continue };
+                let Some(mut w) = three_leg(&insv) else { continue };
                 runs += 1;
                 for &ai in &p { for _ in 0..3 { if close(&mut w, ai).is_ok() { break; } } assert!(conserved(&w)); }
                 for _ in 0..4 { let _ = w.refresh(0); }
                 let ok = w.header.mode == 0 && w.accounts[0].pnl.get() == 0 && w.header.negative_pnl_account_count.get() == 0;
-                if !ok { fails.push(format!("3asset chunk{chunk} ins{ins_cfg} order{p:?}: mode={} pnl={} negcnt={} legs={:?}", w.header.mode, w.accounts[0].pnl.get(), w.header.negative_pnl_account_count.get(), w.legs(0))); }
+                if !ok { fails.push(format!("3asset ins{ins_cfg} order{p:?}: mode={} pnl={} negcnt={} legs={:?}", w.header.mode, w.accounts[0].pnl.get(), w.header.negative_pnl_account_count.get(), w.legs(0))); }
             }
         }
     }
     println!("RUNS={runs} FAILS={}", fails.len());
     for f in &fails { println!("FAIL {f}"); }
-    assert!(runs > 100);
+    assert!(runs > 20);
     assert!(fails.is_empty());
 }
 
@@ -328,13 +335,13 @@ fn r4_recovery_sweep_two_and_three_assets() {
 #[test]
 fn r4_trade_route_sweep() {
     let mut runs = 0; let mut fails = Vec::new();
-    for &chunk in &[1u128, 100, 435, 1_000_000_000_000] {
+    {
         for ins_cfg in 0..4usize {
             let insv: Vec<(usize,u128)> = match ins_cfg { 0 => vec![], 1 => (0..4).map(|d|(d,100)).collect(), 2 => (0..4).map(|d|(d,10_000)).collect(), _ => vec![(3,100)] };
             for dip in [false, true] {
               for order in [[0usize,1],[1,0]] {
                 for split in [false, true] {
-                let Some(mut w) = crash_cfg(cfg_chunk(chunk), dip, &insv) else { continue };
+                let Some(mut w) = crash_cfg(cfg(), dip, &insv) else { continue };
                 runs += 1;
                 let d0 = -w.accounts[0].pnl.get();
                 let ins0 = w.header.insurance.get();
@@ -349,7 +356,7 @@ fn r4_trade_route_sweep() {
                 for _ in 0..4 { let _ = w.refresh(0); let _ = w.with(0, |m,a| m.permissionless_auto_crank_not_atomic(a, percolator::AutoCrankWorkV16 { now_slot: m.header.current_slot.get(), observations: &[], resolved_close_fee_rate_per_slot: 0 })); }
                 let ins_used = ins0 - w.header.insurance.get();
                 let ok = w.header.mode == 0 && w.accounts[0].pnl.get() == 0 && w.header.negative_pnl_account_count.get() == 0 && ins_used <= d0 as u128;
-                if !ok { fails.push(format!("chunk{chunk} ins{ins_cfg} dip{dip} order{order:?} split{split}: mode={} pnl={} negcnt={} ins_used={ins_used} d0={d0} legs={:?} errs={errs}", w.header.mode, w.accounts[0].pnl.get(), w.header.negative_pnl_account_count.get(), w.legs(0))); }
+                if !ok { fails.push(format!("ins{ins_cfg} dip{dip} order{order:?} split{split}: mode={} pnl={} negcnt={} ins_used={ins_used} d0={d0} legs={:?} errs={errs}", w.header.mode, w.accounts[0].pnl.get(), w.header.negative_pnl_account_count.get(), w.legs(0))); }
                 }
               }
             }
@@ -357,17 +364,17 @@ fn r4_trade_route_sweep() {
     }
     println!("TRADE RUNS={runs} FAILS={}", fails.len());
     for f in fails.iter().take(25) { println!("FAIL {f}"); }
-    assert!(runs > 100);
+    assert!(runs > 20);
 }
 
 /// Stale record after a PARTIAL pre-charge: deficit remainder on a1's record, then a fresh loss on a0 is realized.
 #[test]
 fn r4_stale_record_after_partial_charge() {
-    for &(chunk, ins1) in &[(100u128, 50u128), (100, 0), (1_000_000_000_000, 0)] {
-        let Some(mut w) = crash_cfg(cfg_chunk(chunk), false, &[(DOMAIN_A0_SHORT, 5_000), (DOMAIN_A1_SHORT, ins1)]) else { println!("nolatch"); continue };
+    for &ins1 in &[50u128, 0] {
+        let Some(mut w) = crash_cfg(cfg(), false, &[(DOMAIN_A0_SHORT, 5_000), (DOMAIN_A1_SHORT, ins1)]) else { println!("nolatch"); continue };
         let ia0 = w.market(|m| m.domain_insurance_withdraw_capacity(DOMAIN_A0_SHORT).unwrap());
         let ia1 = w.market(|m| m.domain_insurance_withdraw_capacity(DOMAIN_A1_SHORT).unwrap());
-        println!("== chunk{chunk} ins1={ins1}: pnl={} prov={} ins domains a0={ia0} a1={ia1}", w.accounts[0].pnl.get(), w.accounts[0].loss_provenance.get());
+        println!("== ins1={ins1}: pnl={} prov={} ins domains a0={ia0} a1={ia1}", w.accounts[0].pnl.get(), w.accounts[0].loss_provenance.get());
         let r = close(&mut w, 1);
         println!("close a1: {:?}", r.as_ref().map(|o| (o.insurance_used, o.residual_booked)).map_err(|e| format!("{e:?}")));
         dump(&w, "after a1 close");
@@ -408,10 +415,10 @@ fn crash_extra(cfg: V16Config, insure: &[(usize, u128)]) -> Option<W2> {
 
 #[test]
 fn r4_second_chunk_with_surviving_winners() {
-    for &chunk in &[50u128, 100, 200, 1_000_000_000_000] {
+    {
       for &ins in &[0u128, 100] {
         for order in [[0usize,1],[1,0]] {
-            let Some(mut w) = crash_extra(cfg_chunk(chunk), &[(DOMAIN_A1_SHORT, ins)]) else { continue };
+            let Some(mut w) = crash_extra(cfg(), &[(DOMAIN_A1_SHORT, ins)]) else { continue };
             let d0 = -w.accounts[0].pnl.get();
             let ins0 = w.header.insurance.get();
             let b0 = w.asset(1).b_short_num + w.asset(1).b_epoch_start_short_num;
@@ -422,7 +429,7 @@ fn r4_second_chunk_with_surviving_winners() {
             let a = w.asset(1);
             let b1 = a.b_short_num + a.b_epoch_start_short_num;
             let booked_idx = (b1 - b0) * ws0 / 1_000_000_000_000_000_000_000u128;
-            println!("chunk{chunk} ins{ins} order{order:?}: D0={d0} reported={rep:?} ins_used={} idx_booked~{booked_idx} ws0={ws0} ws_now={} mode={} pnl={} negcnt={} modeShort={:?}", ins0 - w.header.insurance.get(), a.loss_weight_sum_short, w.header.mode, w.accounts[0].pnl.get(), w.header.negative_pnl_account_count.get(), a.mode_short);
+            println!("ins{ins} order{order:?}: D0={d0} reported={rep:?} ins_used={} idx_booked~{booked_idx} ws0={ws0} ws_now={} mode={} pnl={} negcnt={} modeShort={:?}", ins0 - w.header.insurance.get(), a.loss_weight_sum_short, w.header.mode, w.accounts[0].pnl.get(), w.header.negative_pnl_account_count.get(), a.mode_short);
             assert!(rep.0 + rep.1 + rep.2 <= d0 as u128, "charged more than the deficit");
             assert_eq!(w.header.mode, 0);
         }
@@ -430,14 +437,15 @@ fn r4_second_chunk_with_surviving_winners() {
     }
 }
 
-/// Req 27 + honest reporting with surviving winners and a binding chunk: SHOULD hold, does not on f343d568.
+/// Req 27 + honest reporting with surviving winners: SHOULD hold, does not on f343d568.
+/// (Was swept over binding chunks 50/100/200; those are unreachable now, see the note at `cfg`.)
 #[test]
 fn r4_order_independence_and_reporting_with_surviving_winners() {
     let mut bad = vec![];
-    for &chunk in &[50u128, 100, 200] {
+    {
         let mut res = vec![];
         for order in [[0usize,1],[1,0]] {
-            let mut w = crash_extra(cfg_chunk(chunk), &[]).unwrap();
+            let mut w = crash_extra(cfg(), &[]).unwrap();
             let b0 = w.asset(1).b_short_num + w.asset(1).b_epoch_start_short_num; let ws0 = w.asset(1).loss_weight_sum_short;
             let mut rep = 0u128;
             for &ai in &order { let o = close(&mut w, ai).unwrap(); rep += o.insurance_used + o.residual_booked + o.explicit_loss; }
@@ -445,9 +453,9 @@ fn r4_order_independence_and_reporting_with_surviving_winners() {
             let idx = (a.b_short_num + a.b_epoch_start_short_num - b0) * ws0 / 1_000_000_000_000_000_000_000u128;
             res.push((rep, idx));
         }
-        println!("chunk{chunk}: order[0,1] (reported,actual)={:?} order[1,0]={:?}", res[0], res[1]);
-        if res[0].0 + 1 < res[0].1 { bad.push(format!("chunk{chunk} reported {} < actual {}", res[0].0, res[0].1)); }
-        if res[0].1 != res[1].1 { bad.push(format!("chunk{chunk} order-dependent {} vs {}", res[0].1, res[1].1)); }
+        println!("order[0,1] (reported,actual)={:?} order[1,0]={:?}", res[0], res[1]);
+        if res[0].0 + 1 < res[0].1 { bad.push(format!("reported {} < actual {}", res[0].0, res[0].1)); }
+        if res[0].1 != res[1].1 { bad.push(format!("order-dependent {} vs {}", res[0].1, res[1].1)); }
     }
     assert!(bad.is_empty(), "{bad:?}");
 }

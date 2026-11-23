@@ -117,7 +117,7 @@ cfg_close_conflict_policy == DeterministicPreemptivePriority
 cfg_no_global_B_index == true
 cfg_no_cross_instance_socialization == true
 cfg_asset_activation_cooldown_slots >= cfg_min_public_refresh_grace_slots
-cfg_public_b_chunk_atoms > 0
+PUBLIC_B_CHUNK_ATOMS == MAX_VAULT_TVL             # a constant, not a market setting (until 2026-11-22 it was cfg_public_b_chunk_atoms)
 cfg_max_account_b_settlement_chunks > 0
 cfg_max_bankrupt_close_chunks > 0
 cfg_max_bankrupt_close_lifetime_slots > 0
