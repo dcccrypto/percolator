@@ -2307,6 +2307,127 @@ impl V16Core {
             ..CloseProgressLedgerV16::EMPTY
         })
     }
+
+    /// PRODUCTION KERNEL (value, junior payout pool): what the vault holds beyond
+    /// every senior claim. The senior claims are the capital total `c_tot`,
+    /// insurance, the backing providers' earnings and the recoverable
+    /// counterparty backing principal (whole atoms); the residual is the vault
+    /// less their sum, and zero when they reach the vault. A sum that does not fit
+    /// in 128 bits counts as covering the vault. Pure scalar and total; `residual`
+    /// calls exactly this, and the junior claims are paid out of its result.
+    #[inline(always)]
+    pub(crate) fn kernel_residual(
+        vault: u128,
+        c_tot: u128,
+        insurance: u128,
+        provider_earnings: u128,
+        fresh_backing_atoms: u128,
+    ) -> u128 {
+        vault.saturating_sub(
+            c_tot
+                .saturating_add(insurance)
+                .saturating_add(provider_earnings)
+                .saturating_add(fresh_backing_atoms),
+        )
+    }
+
+    /// PRODUCTION KERNEL (margin, equity without positive credit): an account's
+    /// equity counting nothing for positive PnL: capital, less negative PnL, less
+    /// the fee debt. It can be negative. `pnl` and `fee_credits` are validated as
+    /// everywhere else: neither may be `i128::MIN`, and fee credits are never
+    /// positive (they hold a debt). Pure scalar; `account_no_positive_credit_equity`
+    /// calls exactly this. The initial-margin lien rule
+    /// (`kernel_initial_margin_source_credit_needed`) and the locked-lane margin
+    /// gate measure an account against this equity.
+    #[inline(always)]
+    pub(crate) fn kernel_no_positive_credit_equity(
+        capital: u128,
+        pnl: i128,
+        fee_credits: i128,
+    ) -> V16Result<i128> {
+        validate_non_min_i128(pnl)?;
+        validate_fee_credits(fee_credits)?;
+        let capital = i128::try_from(capital).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let fee_debt =
+            i128::try_from(fee_credits.unsigned_abs()).map_err(|_| V16Error::ArithmeticOverflow)?;
+        capital
+            .checked_add(pnl.min(0))
+            .and_then(|v| v.checked_sub(fee_debt))
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    /// PRODUCTION KERNEL (margin, haircut equity): an account's equity for its
+    /// health certificate. With PnL at or below zero it is the equity without
+    /// positive credit (capital, less the loss, less the fee debt). With positive
+    /// PnL the PnL itself does not count: only `positive_support`, the part of it
+    /// that its source domains can actually pay now (the caller computes it, zero
+    /// when the account has no source claims), is added to capital. The fee debt
+    /// is subtracted in both cases. Pure scalar; `account_haircut_equity` calls
+    /// exactly this after it has validated `pnl` and `fee_credits`.
+    #[inline(always)]
+    pub(crate) fn kernel_haircut_equity(
+        capital: u128,
+        pnl: i128,
+        fee_credits: i128,
+        positive_support: u128,
+    ) -> V16Result<i128> {
+        let capital = i128::try_from(capital).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let fee_debt =
+            i128::try_from(fee_credits.unsigned_abs()).map_err(|_| V16Error::ArithmeticOverflow)?;
+        if pnl <= 0 {
+            return capital
+                .checked_add(pnl)
+                .and_then(|v| v.checked_sub(fee_debt))
+                .ok_or(V16Error::ArithmeticOverflow);
+        }
+        let positive_support_i128 =
+            i128::try_from(positive_support).map_err(|_| V16Error::ArithmeticOverflow)?;
+        capital
+            .checked_add(positive_support_i128)
+            .and_then(|v| v.checked_sub(fee_debt))
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    /// PRODUCTION KERNEL (K/F settlement, a gain against an outstanding loss): how
+    /// much of a new gain's face is kept and what the account's PnL becomes, once
+    /// the support the gain could draw has been applied to the old loss
+    /// (`support_consumed <= old_loss`, `remaining_loss = old_loss -
+    /// support_consumed`). The face burned is `burn_candidate`, or, when
+    /// `burn_all` (a Live gain without a source domain) or any loss still
+    /// remains, only the part of the new face above `old_loss` (fork rule: the
+    /// part that nets against the loss is the counterparty's loss realized
+    /// against a debt already owed and needs no source backing; upstream burns
+    /// the whole face here). A burn above the new face is an error. The PnL
+    /// becomes the kept face less the remaining loss. Pure scalar;
+    /// `apply_signed_kf_delta_to_pnl` calls exactly this for the arithmetic.
+    #[inline(always)]
+    pub(crate) fn kernel_gain_against_loss_after_support(
+        new_face_support: u128,
+        burn_candidate: u128,
+        burn_all: bool,
+        old_loss: u128,
+        remaining_loss: u128,
+    ) -> V16Result<(u128, i128)> {
+        let mut junior_face_burned = burn_candidate;
+        if burn_all || remaining_loss != 0 {
+            junior_face_burned = new_face_support.saturating_sub(old_loss);
+        }
+        if junior_face_burned > new_face_support {
+            return Err(V16Error::ArithmeticOverflow);
+        }
+        let retained_face = new_face_support
+            .checked_sub(junior_face_burned)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let retained_i128 =
+            i128::try_from(retained_face).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let remaining_i128 =
+            i128::try_from(remaining_loss).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let new_pnl = retained_i128
+            .checked_sub(remaining_i128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((junior_face_burned, new_pnl))
+    }
+
     /// PRODUCTION KERNEL (liveness rank): the B-settlement leg advance.
     /// b_snap moves FORWARD by exactly delta_b — the well-founded rank
     /// component for the B-settlement progress theorem: each successful
@@ -10776,13 +10897,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     // over-pays winners out of value its owner can still withdraw (or, when the
     // final validate_shape catches it, deadlocks the close permanently).
     fn residual(&self) -> u128 {
-        self.header.vault.get().saturating_sub(
-            self.header
-                .c_tot
-                .get()
-                .saturating_add(self.header.insurance.get())
-                .saturating_add(self.backing_provider_earnings_total())
-                .saturating_add(self.source_fresh_backing_total_atoms()),
+        // PRODUCTION KERNEL: the vault beyond every senior claim.
+        V16Core::kernel_residual(
+            self.header.vault.get(),
+            self.header.c_tot.get(),
+            self.header.insurance.get(),
+            self.backing_provider_earnings_total(),
+            self.source_fresh_backing_total_atoms(),
         )
     }
 
@@ -15174,29 +15295,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &PortfolioV16View<'_>,
         in_flight: bool,
     ) -> V16Result<i128> {
-        validate_non_min_i128(account.header.pnl.get())?;
-        validate_fee_credits(account.header.fee_credits.get())?;
-        let capital = i128::try_from(account.header.capital.get())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
-        let fee_debt = i128::try_from(account.header.fee_credits.get().unsigned_abs())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
-        if account.header.pnl.get() <= 0 {
-            return capital
-                .checked_add(account.header.pnl.get())
-                .and_then(|v| v.checked_sub(fee_debt))
-                .ok_or(V16Error::ArithmeticOverflow);
+        let pnl = account.header.pnl.get();
+        let fee_credits = account.header.fee_credits.get();
+        validate_non_min_i128(pnl)?;
+        validate_fee_credits(fee_credits)?;
+        let capital = account.header.capital.get();
+        if pnl <= 0 {
+            // PRODUCTION KERNEL: no positive PnL, so no support to read.
+            return V16Core::kernel_haircut_equity(capital, pnl, fee_credits, 0);
         }
+        // The kernel's two conversions come first, as they did before the support was read.
+        i128::try_from(capital).map_err(|_| V16Error::ArithmeticOverflow)?;
+        i128::try_from(fee_credits.unsigned_abs()).map_err(|_| V16Error::ArithmeticOverflow)?;
         let positive_support = if Self::account_has_source_claims(account)? {
-            self.account_source_support_inner(account, account.header.pnl.get() as u128, in_flight)?
+            self.account_source_support_inner(account, pnl as u128, in_flight)?
         } else {
             0
         };
-        let positive_support_i128 =
-            i128::try_from(positive_support).map_err(|_| V16Error::ArithmeticOverflow)?;
-        capital
-            .checked_add(positive_support_i128)
-            .and_then(|v| v.checked_sub(fee_debt))
-            .ok_or(V16Error::ArithmeticOverflow)
+        // PRODUCTION KERNEL: only the realizable support of positive PnL counts.
+        V16Core::kernel_haircut_equity(capital, pnl, fee_credits, positive_support)
     }
 
     fn ensure_account_source_claim_market_id(
@@ -15971,7 +16088,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let remaining_loss = old_loss
             .checked_sub(support_consumed)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let mut junior_face_burned = if let Some(domain) = source_support_domain {
+        let burn_candidate = if let Some(domain) = source_support_domain {
             self.consume_source_domain_credit_for_effective_not_atomic(domain, support_consumed)?
                 .face_burn
                 .min(new_face_support)
@@ -15985,29 +16102,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?;
             self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?
         };
-        if (source_support_domain.is_none()
-            && decode_market_mode(self.header.mode)? == MarketModeV16::Live)
-            || remaining_loss != 0
-        {
-            // Burn only the part of the gain EXCEEDING the outstanding loss. The part
-            // that merely NETS against the loss is the counterparty's loss being
-            // realized against a debt already owed, so it needs no source backing.
-            // Burning it made an underwater account permanently unrecoverable.
-            junior_face_burned = new_face_support.saturating_sub(old_loss);
-        }
-        if junior_face_burned > new_face_support {
-            return Err(V16Error::ArithmeticOverflow);
-        }
-        let retained_face = new_face_support
-            .checked_sub(junior_face_burned)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let retained_i128 =
-            i128::try_from(retained_face).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let remaining_i128 =
-            i128::try_from(remaining_loss).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let new_pnl = retained_i128
-            .checked_sub(remaining_i128)
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        let burn_all = source_support_domain.is_none()
+            && decode_market_mode(self.header.mode)? == MarketModeV16::Live;
+        // PRODUCTION KERNEL: the face a gain keeps against an outstanding loss, and
+        // the PnL it leaves. Burn only the part of the gain EXCEEDING the
+        // outstanding loss: burning the part that nets against the loss made an
+        // underwater account permanently unrecoverable.
+        let (junior_face_burned, new_pnl) = V16Core::kernel_gain_against_loss_after_support(
+            new_face_support,
+            burn_candidate,
+            burn_all,
+            old_loss,
+            remaining_loss,
+        )?;
         if new_pnl > 0 {
             if let Some(domain) = source_domain {
                 self.set_account_pnl_with_source(account, new_pnl, domain)?;
@@ -23369,16 +23476,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn account_no_positive_credit_equity(account: &PortfolioV16View<'_>) -> V16Result<i128> {
-        validate_non_min_i128(account.header.pnl.get())?;
-        validate_fee_credits(account.header.fee_credits.get())?;
-        let capital = i128::try_from(account.header.capital.get())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
-        let fee_debt = i128::try_from(account.header.fee_credits.get().unsigned_abs())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
-        capital
-            .checked_add(account.header.pnl.get().min(0))
-            .and_then(|v| v.checked_sub(fee_debt))
-            .ok_or(V16Error::ArithmeticOverflow)
+        // PRODUCTION KERNEL: capital, less negative PnL, less the fee debt.
+        V16Core::kernel_no_positive_credit_equity(
+            account.header.capital.get(),
+            account.header.pnl.get(),
+            account.header.fee_credits.get(),
+        )
     }
 
     fn ensure_no_positive_credit_initial_margin(account: &PortfolioV16View<'_>) -> V16Result<()> {
