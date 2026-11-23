@@ -79,7 +79,7 @@ fn bound_num_is_atom_aligned(value: u128) -> bool {
     value % BOUND_SCALE == 0
 }
 
-#[cfg(all(not(kani), feature = "fuzz"))]
+#[cfg(any(kani, feature = "fuzz"))]
 pub fn bound_num_is_atom_aligned_for_test(value: u128) -> bool {
     bound_num_is_atom_aligned(value)
 }

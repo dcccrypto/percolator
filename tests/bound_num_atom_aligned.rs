@@ -71,5 +71,14 @@ fn atom_aligned_matches_modulo_on_random_values() {
         let m = (r >> 50) * BOUND_SCALE;
         check(m);
         check(m.wrapping_add(rng.next() as u128 % 3).wrapping_sub(1));
+        // exact multiples spread over the whole fast-path range [0, 2^88), every hi limb size
+        let a = (r % ((1u128 << 88) / BOUND_SCALE)) * BOUND_SCALE;
+        assert!(a >> 88 == 0);
+        check(a);
+        check(a + 1);
+        check(a.saturating_sub(1));
+        let b = ((r >> (40 + rng.next() % 48)) / BOUND_SCALE) * BOUND_SCALE;
+        check(b);
+        check(b + BOUND_SCALE / 2);
     }
 }
