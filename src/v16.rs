@@ -6377,49 +6377,103 @@ impl<'a> PortfolioV16ViewMut<'a> {
     }
 
     fn compact_source_domains(&mut self) {
-        let mut write = 0usize;
-        let mut read = 0usize;
-        let mut ordered = true;
-        let mut previous_domain = None;
-        while read < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            let source = self.header.source_domains[read];
-            if source.is_occupied() {
-                let domain = source.domain.get();
-                if previous_domain.is_some_and(|previous| previous > domain) {
-                    ordered = false;
-                }
-                previous_domain = Some(domain);
-                if write != read {
-                    self.header.source_domains[write] = source;
-                    self.header.source_domains[read] = PortfolioSourceDomainV16Account::default();
-                }
-                write += 1;
-            }
-            read += 1;
+        // Already compact (occupied prefix in ascending domain order, all-zero tail): the
+        // compaction below would only write values equal to the ones already there, so skip it.
+        // Kani verifies the full compaction unchanged; the skip is a CU saving only.
+        #[cfg(not(kani))]
+        if source_domain_table_already_compact(&self.header.source_domains) {
+            return;
         }
-        let occupied = write;
-        while write < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            self.header.source_domains[write] = PortfolioSourceDomainV16Account::default();
+        compact_source_domain_table(&mut self.header.source_domains);
+    }
+}
+
+/// The source-domain compaction (moved verbatim from `PortfolioV16ViewMut::compact_source_domains`):
+/// occupied slots to a prefix, defaults after them, then ascending domain order (upstream c0dec8ce).
+fn compact_source_domain_table(
+    domains: &mut [PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
+) {
+    let mut write = 0usize;
+    let mut read = 0usize;
+    let mut ordered = true;
+    let mut previous_domain = None;
+    while read < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let source = domains[read];
+        if source.is_occupied() {
+            let domain = source.domain.get();
+            if previous_domain.is_some_and(|previous| previous > domain) {
+                ordered = false;
+            }
+            previous_domain = Some(domain);
+            if write != read {
+                domains[write] = source;
+                domains[read] = PortfolioSourceDomainV16Account::default();
+            }
             write += 1;
         }
-        // upstream c0dec8ce: canonical allocation order (ascending domain index) so
-        // bounded one-domain-per-call continuations see one layout.
-        if !ordered {
-            let mut index = 1usize;
-            while index < occupied {
-                let source = self.header.source_domains[index];
-                let mut insert = index;
-                while insert != 0
-                    && self.header.source_domains[insert - 1].domain.get() > source.domain.get()
-                {
-                    self.header.source_domains[insert] = self.header.source_domains[insert - 1];
-                    insert -= 1;
-                }
-                self.header.source_domains[insert] = source;
-                index += 1;
+        read += 1;
+    }
+    let occupied = write;
+    while write < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        domains[write] = PortfolioSourceDomainV16Account::default();
+        write += 1;
+    }
+    // upstream c0dec8ce: canonical allocation order (ascending domain index) so
+    // bounded one-domain-per-call continuations see one layout.
+    if !ordered {
+        let mut index = 1usize;
+        while index < occupied {
+            let source = domains[index];
+            let mut insert = index;
+            while insert != 0 && domains[insert - 1].domain.get() > source.domain.get() {
+                domains[insert] = domains[insert - 1];
+                insert -= 1;
             }
+            domains[insert] = source;
+            index += 1;
         }
     }
+}
+
+/// True when `compact_source_domain_table` would leave every byte unchanged: the occupied slots
+/// form a prefix with no descending domain pair, and every slot after them is all-zero bytes
+/// (`PortfolioSourceDomainV16Account::default()`; one `sol_memcmp_`). Then the compaction loop
+/// only has `write == read`, writes default over default, and does not sort.
+#[cfg(not(kani))]
+fn source_domain_table_already_compact(
+    domains: &[PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
+) -> bool {
+    let mut slot = 0usize;
+    let mut previous_domain: Option<u32> = None;
+    while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let source = &domains[slot];
+        if !source.is_occupied() {
+            break;
+        }
+        let domain = source.domain.get();
+        if previous_domain.is_some_and(|previous| previous > domain) {
+            return false;
+        }
+        previous_domain = Some(domain);
+        slot += 1;
+    }
+    source_domain_tail_is_zero(domains, slot)
+}
+
+/// Test hooks for tests/source_domain_compact_skip.rs (`--features fuzz`): the skip predicate and
+/// the full compaction.
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub fn source_domain_table_already_compact_for_test(
+    domains: &[PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
+) -> bool {
+    source_domain_table_already_compact(domains)
+}
+
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub fn compact_source_domain_table_for_test(
+    domains: &mut [PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
+) {
+    compact_source_domain_table(domains)
 }
 
 impl<'a> PortfolioV16View<'a> {
