@@ -2511,6 +2511,107 @@ impl V16Core {
             .min(provider_principal_num.saturating_sub(fresh_reserved_backing_num))
     }
 
+    /// PRODUCTION KERNEL (source claims, mirror): burning `burn_num` of an
+    /// account's claim on a source domain lowers the account's claim and the
+    /// domain's bound total by the same amount, and the domain's exact total by
+    /// as much of it as it holds. No other field of the domain's record changes.
+    /// The account's claim is checked first. Pure; the claim-burn paths that
+    /// write both sides call exactly this.
+    #[inline(always)]
+    pub(crate) fn kernel_burn_account_source_claim(
+        account_claim_bound_num: u128,
+        source: SourceCreditStateV16,
+        burn_num: u128,
+    ) -> V16Result<(u128, SourceCreditStateV16)> {
+        let account_claim_bound_num = account_claim_bound_num
+            .checked_sub(burn_num)
+            .ok_or(V16Error::CounterUnderflow)?;
+        // The same arithmetic as prepare_source_positive_claim_burn_delta, which is not
+        // called here: its contract requires a burn the domain can cover, and this
+        // kernel also states the error when it cannot.
+        let mut source = source;
+        source.positive_claim_bound_num = source
+            .positive_claim_bound_num
+            .checked_sub(burn_num)
+            .ok_or(V16Error::CounterUnderflow)?;
+        source.exact_positive_claim_num = source
+            .exact_positive_claim_num
+            .checked_sub(burn_num.min(source.exact_positive_claim_num))
+            .ok_or(V16Error::CounterUnderflow)?;
+        Ok((account_claim_bound_num, source))
+    }
+
+    /// PRODUCTION KERNEL (source liens, the account's side of a new lien): a lien of
+    /// `required_face_num` face backed by `required_backing_num` from one backing
+    /// source raises the account's liened face and its reserved effective credit,
+    /// and the liened face and backing of that source, by exactly those amounts.
+    /// The first counterparty backing of a slot starts its utilization-fee clock
+    /// at `current_slot`. Nothing else in the record changes. Pure; `create`
+    /// paths of source-credit liens call exactly this for the account record.
+    #[inline(always)]
+    pub(crate) fn kernel_account_source_lien_delta(
+        mut source: PortfolioSourceDomainV16Account,
+        backing_source: SourceCreditBackingSourceV16,
+        required_face_num: u128,
+        required_backing_num: u128,
+        effective_credit: u128,
+        current_slot: u64,
+    ) -> V16Result<PortfolioSourceDomainV16Account> {
+        let prior_counterparty_backing = source.source_lien_counterparty_backing_num.get();
+        source.source_claim_liened_num = V16PodU128::new(
+            source
+                .source_claim_liened_num
+                .get()
+                .checked_add(required_face_num)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        );
+        source.source_lien_effective_reserved = V16PodU128::new(
+            source
+                .source_lien_effective_reserved
+                .get()
+                .checked_add(effective_credit)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        );
+        match backing_source {
+            SourceCreditBackingSourceV16::Counterparty => {
+                source.source_claim_counterparty_liened_num = V16PodU128::new(
+                    source
+                        .source_claim_counterparty_liened_num
+                        .get()
+                        .checked_add(required_face_num)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+                source.source_lien_counterparty_backing_num = V16PodU128::new(
+                    source
+                        .source_lien_counterparty_backing_num
+                        .get()
+                        .checked_add(required_backing_num)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+                if prior_counterparty_backing == 0 {
+                    source.source_lien_fee_last_slot = V16PodU64::new(current_slot);
+                }
+            }
+            SourceCreditBackingSourceV16::Insurance => {
+                source.source_claim_insurance_liened_num = V16PodU128::new(
+                    source
+                        .source_claim_insurance_liened_num
+                        .get()
+                        .checked_add(required_face_num)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+                source.source_lien_insurance_backing_num = V16PodU128::new(
+                    source
+                        .source_lien_insurance_backing_num
+                        .get()
+                        .checked_add(required_backing_num)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+            }
+        }
+        Ok(source)
+    }
+
     /// PRODUCTION KERNEL (liveness rank): the B-settlement leg advance.
     /// b_snap moves FORWARD by exactly delta_b — the well-founded rank
     /// component for the B-settlement progress theorem: each successful
@@ -13134,23 +13235,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP {
             return Err(V16Error::InvalidLeg);
         }
-        let source = &mut account.header.source_domains[slot];
-        source.source_claim_bound_num = V16PodU128::new(
-            source
-                .source_claim_bound_num
-                .get()
-                .checked_sub(burn_num)
-                .ok_or(V16Error::CounterUnderflow)?,
-        );
-        let mut source_credit = self.source_credit_for_domain(domain)?;
-        source_credit.positive_claim_bound_num = source_credit
-            .positive_claim_bound_num
-            .checked_sub(burn_num)
-            .ok_or(V16Error::CounterUnderflow)?;
-        source_credit.exact_positive_claim_num = source_credit
-            .exact_positive_claim_num
-            .checked_sub(burn_num.min(source_credit.exact_positive_claim_num))
-            .ok_or(V16Error::CounterUnderflow)?;
+        let account_claim_bound_num = account.header.source_domains[slot]
+            .source_claim_bound_num
+            .get();
+        // The account's claim is checked before the domain's record is read, as before.
+        if account_claim_bound_num < burn_num {
+            return Err(V16Error::CounterUnderflow);
+        }
+        // PRODUCTION KERNEL: the account's claim and the domain's totals fall together.
+        let (account_claim_bound_num, source_credit) = V16Core::kernel_burn_account_source_claim(
+            account_claim_bound_num,
+            self.source_credit_for_domain(domain)?,
+            burn_num,
+        )?;
+        account.header.source_domains[slot].source_claim_bound_num =
+            V16PodU128::new(account_claim_bound_num);
         self.set_source_credit_for_domain(domain, source_credit)?;
         account.reset_source_domain_slot_if_empty(slot);
         self.recompute_source_credit_domain_after_mutation(domain)
@@ -14971,58 +15070,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         effective_credit: u128,
         current_slot: u64,
     ) -> V16Result<()> {
-        let prior_counterparty_backing = source.source_lien_counterparty_backing_num.get();
-        source.source_claim_liened_num = V16PodU128::new(
-            source
-                .source_claim_liened_num
-                .get()
-                .checked_add(required_face_num)
-                .ok_or(V16Error::ArithmeticOverflow)?,
-        );
-        source.source_lien_effective_reserved = V16PodU128::new(
-            source
-                .source_lien_effective_reserved
-                .get()
-                .checked_add(effective_credit)
-                .ok_or(V16Error::ArithmeticOverflow)?,
-        );
-        match backing_source {
-            SourceCreditBackingSourceV16::Counterparty => {
-                source.source_claim_counterparty_liened_num = V16PodU128::new(
-                    source
-                        .source_claim_counterparty_liened_num
-                        .get()
-                        .checked_add(required_face_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?,
-                );
-                source.source_lien_counterparty_backing_num = V16PodU128::new(
-                    source
-                        .source_lien_counterparty_backing_num
-                        .get()
-                        .checked_add(required_backing_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?,
-                );
-                if prior_counterparty_backing == 0 {
-                    source.source_lien_fee_last_slot = V16PodU64::new(current_slot);
-                }
-            }
-            SourceCreditBackingSourceV16::Insurance => {
-                source.source_claim_insurance_liened_num = V16PodU128::new(
-                    source
-                        .source_claim_insurance_liened_num
-                        .get()
-                        .checked_add(required_face_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?,
-                );
-                source.source_lien_insurance_backing_num = V16PodU128::new(
-                    source
-                        .source_lien_insurance_backing_num
-                        .get()
-                        .checked_add(required_backing_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?,
-                );
-            }
-        }
+        // PRODUCTION KERNEL: the account record after the lien, written only on Ok.
+        *source = V16Core::kernel_account_source_lien_delta(
+            *source,
+            backing_source,
+            required_face_num,
+            required_backing_num,
+            effective_credit,
+            current_slot,
+        )?;
         Ok(())
     }
 
