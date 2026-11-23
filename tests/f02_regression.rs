@@ -425,7 +425,6 @@ fn route1c_fixed_a_capped_chunk_no_longer_bricks_the_close_or_holds_the_barrier(
         long_header: _long_header,
         mut short_header,
     } = live_pending_close_scenario();
-    header.config.public_b_chunk_atoms = V16PodU128::new(CHUNK_CAP);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut short = PortfolioV16ViewMut::new(&mut short_header);

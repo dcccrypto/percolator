@@ -83,7 +83,6 @@ fn f02_second_chunk_books_fresh_residual_not_stale_ledger() {
     }
 
     // Cap a single chunk far below the opening residual so the close spans >1 chunk.
-    header.config.public_b_chunk_atoms = V16PodU128::new(CHUNK_CAP);
 
     // Taker (long) is the bankrupt side; the loss-bearing side is short (the maker).
     let bankrupt_side = SideV16::Long;

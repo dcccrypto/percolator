@@ -14,7 +14,7 @@ use crate::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, FUNDING_DEN, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
     MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_PROTOCOL_FEE_ABS,
     MAX_RECOVERY_FALLBACK_DEVIATION_BPS, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, MIN_A_SIDE, POS_SCALE,
-    SOCIAL_LOSS_DEN, SOCIAL_WEIGHT_SCALE,
+    PUBLIC_B_CHUNK_ATOMS, SOCIAL_LOSS_DEN, SOCIAL_WEIGHT_SCALE,
 };
 
 pub const V16_MAX_PORTFOLIO_ASSETS_N: usize = 16;
@@ -5874,7 +5874,6 @@ pub struct V16Config {
     pub max_bankrupt_close_chunks: u64,
     pub max_bankrupt_close_lifetime_slots: u64,
     pub asset_activation_cooldown_slots: u64,
-    pub public_b_chunk_atoms: u128,
     pub max_recovery_fallback_deviation_bps: u64,
     pub backing_fee_base_rate_e9_per_slot: u64,
     pub backing_fee_kink_util_bps: u64,
@@ -5955,7 +5954,6 @@ impl V16Config {
             max_bankrupt_close_chunks: 1,
             max_bankrupt_close_lifetime_slots: 1,
             asset_activation_cooldown_slots: 1,
-            public_b_chunk_atoms: MAX_VAULT_TVL,
             max_recovery_fallback_deviation_bps: MAX_RECOVERY_FALLBACK_DEVIATION_BPS,
             backing_fee_base_rate_e9_per_slot: 0,
             backing_fee_kink_util_bps: 8_000,
@@ -6427,14 +6425,6 @@ impl V16Config {
             || self.max_bankrupt_close_chunks == 0
             || self.max_bankrupt_close_lifetime_slots == 0
             || self.asset_activation_cooldown_slots == 0
-            || self.public_b_chunk_atoms == 0
-            // A chunk is a number of collateral atoms, so no useful chunk exceeds the
-            // largest vault. The bound also keeps `(chunk + 1) * SOCIAL_LOSS_DEN` inside
-            // u128: from 340282366920938463 atoms on, every B-settlement step of an
-            // account with a loss weight fails with ArithmeticOverflow (the condition is
-            // exact, proved for kernel_b_settlement_chunk), so a market admitted with
-            // such a chunk would freeze every position on a side after a social loss.
-            || self.public_b_chunk_atoms > MAX_VAULT_TVL
             || self.max_recovery_fallback_deviation_bps > MAX_RECOVERY_FALLBACK_DEVIATION_BPS
             || self.backing_fee_kink_util_bps == 0
             || self.backing_fee_kink_util_bps >= MAX_BACKING_FEE_UTIL_BPS
@@ -9216,7 +9206,11 @@ pub struct V16ConfigAccount {
     pub max_bankrupt_close_chunks: V16PodU64,
     pub max_bankrupt_close_lifetime_slots: V16PodU64,
     pub asset_activation_cooldown_slots: V16PodU64,
-    pub public_b_chunk_atoms: V16PodU128,
+    /// Was `public_b_chunk_atoms`. Since upstream 083a0d08 the chunk is the constant
+    /// `PUBLIC_B_CHUNK_ATOMS`; upstream drops the 16 bytes, this fork keeps them so the market
+    /// header (and every offset the wrapper, stake program and SDK read after it) does not
+    /// move. Written as zero, never read: an existing market's old value is ignored.
+    pub reserved_public_b_chunk_atoms: V16PodU128,
     pub max_recovery_fallback_deviation_bps: V16PodU64,
     pub backing_fee_base_rate_e9_per_slot: V16PodU64,
     pub backing_fee_kink_util_bps: V16PodU64,
@@ -9266,7 +9260,7 @@ impl V16ConfigAccount {
                 value.max_bankrupt_close_lifetime_slots,
             ),
             asset_activation_cooldown_slots: V16PodU64::new(value.asset_activation_cooldown_slots),
-            public_b_chunk_atoms: V16PodU128::new(value.public_b_chunk_atoms),
+            reserved_public_b_chunk_atoms: V16PodU128::new(0),
             max_recovery_fallback_deviation_bps: V16PodU64::new(
                 value.max_recovery_fallback_deviation_bps,
             ),
@@ -9332,7 +9326,6 @@ impl V16ConfigAccount {
             max_bankrupt_close_chunks: self.max_bankrupt_close_chunks.get(),
             max_bankrupt_close_lifetime_slots: self.max_bankrupt_close_lifetime_slots.get(),
             asset_activation_cooldown_slots: self.asset_activation_cooldown_slots.get(),
-            public_b_chunk_atoms: self.public_b_chunk_atoms.get(),
             max_recovery_fallback_deviation_bps: self.max_recovery_fallback_deviation_bps.get(),
             backing_fee_base_rate_e9_per_slot: self.backing_fee_base_rate_e9_per_slot.get(),
             backing_fee_kink_util_bps: self.backing_fee_kink_util_bps.get(),
@@ -14778,7 +14771,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if residual_after_principal_and_insurance == 0 {
             return Ok(false);
         }
-        if self.header.config.public_b_chunk_atoms.get() < residual_after_principal_and_insurance {
+        if PUBLIC_B_CHUNK_ATOMS < residual_after_principal_and_insurance {
             return Ok(true);
         }
         let capacity = self.bankruptcy_residual_single_step_capacity(
@@ -18172,7 +18165,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             leg.b_rem,
             leg.loss_weight,
             target,
-            self.header.config.public_b_chunk_atoms.get(),
+            PUBLIC_B_CHUNK_ATOMS,
             endpoint_loss_atom_budget,
         )
     }
@@ -19737,11 +19730,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let released_obligation_asset = self.auto_crank_selected_assets(&account.as_view())?.4;
             if let Some(asset_index) = released_obligation_asset {
                 self.validate_unconfigured_market_tail()?;
-                self.forfeit_recovery_leg_not_atomic(
-                    account,
-                    asset_index,
-                    self.header.config.public_b_chunk_atoms.get(),
-                )?;
+                self.forfeit_recovery_leg_not_atomic(account, asset_index, PUBLIC_B_CHUNK_ATOMS)?;
                 self.validate_shape_audit_scan()?;
                 account.validate_with_market(&self.as_view())?;
                 return Ok(AutoCrankResultV16 {
@@ -19799,7 +19788,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         self.forfeit_recovery_leg_not_atomic(
                             account,
                             asset_index,
-                            self.header.config.public_b_chunk_atoms.get(),
+                            PUBLIC_B_CHUNK_ATOMS,
                         )?;
                         true
                     } else {
@@ -20085,7 +20074,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 match self.refresh_account_and_certify_not_atomic(
                     account,
                     Some((request.asset_index, request.effective_price)),
-                    self.header.config.public_b_chunk_atoms.get(),
+                    PUBLIC_B_CHUNK_ATOMS,
                     true,
                     &mut s10_budget,
                 )? {
@@ -20127,11 +20116,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 // lands on the gain it offsets instead of arriving as a debt the gain must cure
                 // (upstream #172, 137662a9). No S10 budget: only the refresh crank grants one.
                 self.settle_account_kf_effects_not_atomic(account, false, &mut 0u8)?;
-                let out = self.settle_account_b_chunk(
-                    account,
-                    asset_index,
-                    self.header.config.public_b_chunk_atoms.get(),
-                )?;
+                let out =
+                    self.settle_account_b_chunk(account, asset_index, PUBLIC_B_CHUNK_ATOMS)?;
                 return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(out));
             }
             PermissionlessCrankActionV16::Liquidate(_) => {
@@ -20223,7 +20209,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let outcome = match self.refresh_account_and_certify_not_atomic(
             account,
             None,
-            self.header.config.public_b_chunk_atoms.get(),
+            PUBLIC_B_CHUNK_ATOMS,
             true,
             &mut 0u8,
         )? {
@@ -22245,7 +22231,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             weight_sum,
             rem,
             residual_remaining,
-            self.header.config.public_b_chunk_atoms.get(),
+            PUBLIC_B_CHUNK_ATOMS,
         )
     }
 
@@ -22979,7 +22965,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         match self.refresh_account_and_certify_not_atomic(
             account,
             None,
-            self.header.config.public_b_chunk_atoms.get(),
+            PUBLIC_B_CHUNK_ATOMS,
             false,
             &mut 0u8,
         )? {
@@ -23021,7 +23007,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.refresh_account_and_certify_not_atomic(
                     cp,
                     None,
-                    self.header.config.public_b_chunk_atoms.get(),
+                    PUBLIC_B_CHUNK_ATOMS,
                     false,
                     &mut 0u8,
                 )?,
@@ -23382,10 +23368,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::InvalidConfig);
         }
         self.require_asset_live_reducible(request.asset_index)?;
-        self.settle_account_side_effects_not_atomic(
-            account,
-            self.header.config.public_b_chunk_atoms.get(),
-        )?;
+        self.settle_account_side_effects_not_atomic(account, PUBLIC_B_CHUNK_ATOMS)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
         let before_score = self.risk_score_unchecked(&account.as_view())?;
         let leg = Self::active_leg_for_asset(&account.as_view(), request.asset_index)?;
@@ -23514,7 +23497,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         match self.refresh_account_and_certify_not_atomic(
             account,
             None,
-            self.header.config.public_b_chunk_atoms.get(),
+            PUBLIC_B_CHUNK_ATOMS,
             false,
             &mut 0u8,
         )? {
@@ -24983,7 +24966,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 0
             };
             let step = residual
-                .min(self.header.config.public_b_chunk_atoms.get())
+                .min(PUBLIC_B_CHUNK_ATOMS)
                 .min(self.bankruptcy_residual_single_step_capacity(
                     charge_asset,
                     bankrupt_side,
@@ -25590,10 +25573,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         requested_fee: u128,
     ) -> V16Result<u128> {
-        self.settle_account_side_effects_not_atomic(
-            account,
-            self.header.config.public_b_chunk_atoms.get(),
-        )?;
+        self.settle_account_side_effects_not_atomic(account, PUBLIC_B_CHUNK_ATOMS)?;
         if decode_bool(account.header.b_stale_state)? || Self::has_b_stale_leg(&account.as_view())?
         {
             return Err(V16Error::BStale);
@@ -26209,10 +26189,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
-        self.settle_account_side_effects_not_atomic(
-            account,
-            self.header.config.public_b_chunk_atoms.get(),
-        )?;
+        self.settle_account_side_effects_not_atomic(account, PUBLIC_B_CHUNK_ATOMS)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
         let no_positive = Self::account_no_positive_credit_equity(&account.as_view())?;
         let cert = account.header.health_cert.try_to_runtime()?;
@@ -26521,11 +26498,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)?;
         let requested_fee = raw_fee.try_into_u128().unwrap_or(u128::MAX);
         if decode_market_mode(self.header.mode)? == MarketModeV16::Live && nonflat {
-            if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
-                .settle_account_side_effects_not_atomic(
-                    account,
-                    self.header.config.public_b_chunk_atoms.get(),
-                )?
+            if let PermissionlessProgressOutcomeV16::AccountBChunk(_) =
+                self.settle_account_side_effects_not_atomic(account, PUBLIC_B_CHUNK_ATOMS)?
             {
                 return Err(V16Error::BStale);
             }
@@ -27180,7 +27154,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
             .settle_account_side_effects_not_atomic(
                 account,
-                self.header.config.public_b_chunk_atoms.get(),
+                PUBLIC_B_CHUNK_ATOMS,
             )?
         {
             self.validate_shape()?;
@@ -29371,7 +29345,6 @@ pub fn kani_eq_v16_config_account(a: &V16ConfigAccount, b: &V16ConfigAccount) ->
         && a.max_bankrupt_close_chunks.get() == b.max_bankrupt_close_chunks.get()
         && a.max_bankrupt_close_lifetime_slots.get() == b.max_bankrupt_close_lifetime_slots.get()
         && a.asset_activation_cooldown_slots.get() == b.asset_activation_cooldown_slots.get()
-        && a.public_b_chunk_atoms.get() == b.public_b_chunk_atoms.get()
         && a.max_recovery_fallback_deviation_bps.get()
             == b.max_recovery_fallback_deviation_bps.get()
         && a.backing_fee_base_rate_e9_per_slot.get() == b.backing_fee_base_rate_e9_per_slot.get()

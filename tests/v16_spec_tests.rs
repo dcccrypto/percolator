@@ -11757,7 +11757,6 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
             header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
             header.config.max_accrual_dt_slots = V16PodU64::new(1);
             header.config.min_funding_lifetime_slots = V16PodU64::new(1);
-            header.config.public_b_chunk_atoms = V16PodU128::new(100);
             let mut long_header = account_fixture(1, 211);
             let mut short_header = account_fixture(1, 212);
             {
