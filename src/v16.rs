@@ -4592,10 +4592,38 @@ impl V16Core {
 
     fn validate_source_credit_state_static(state: SourceCreditStateV16) -> V16Result<()> {
         Self::validate_source_credit_state_shape_static(state)?;
-        if state.credit_rate_num != Self::expected_source_credit_rate_num_for_state(state)? {
+        let expected = Self::expected_source_credit_rate_num_for_state(state)?;
+        if state.credit_rate_num != expected
+            && state.credit_rate_num != Self::pre_250_source_credit_rate_num_for_state(state)?
+        {
             return Err(V16Error::InvalidConfig);
         }
         Ok(())
+    }
+
+    /// The rate before #250: available (unliened) backing over the whole claim bound,
+    /// liened face included. It differs from the current rule only while a valid lien is
+    /// outstanding, and is never above it (same numerator, a denominator at least as
+    /// large).
+    ///
+    /// Migration only. A domain written before #250 (or by a wrapper that still computes
+    /// the rate this way) stores this value; `validate_source_credit_state_static`
+    /// accepts it so that such state still decodes, instead of failing every
+    /// instruction that touches the domain. Until the domain is next mutated its
+    /// unliened face is credited at this lower rate, which never credits more than the
+    /// backing holds. Every engine mutation recomputes the rate by the current rule
+    /// (`recompute_source_credit_domain_after_mutation`), so the domain moves to it the
+    /// first time the engine writes it. No other value is accepted: a rate that matches
+    /// neither rule is still `InvalidConfig`.
+    fn pre_250_source_credit_rate_num_for_state(state: SourceCreditStateV16) -> V16Result<u128> {
+        if state.positive_claim_bound_num == 0 {
+            return Ok(CREDIT_RATE_SCALE);
+        }
+        let available = Self::available_backing_num_for_source_credit_state(state)?;
+        if available == 0 {
+            return Ok(0);
+        }
+        Self::source_credit_rate_num(available, state.positive_claim_bound_num)
     }
 
     fn validate_backing_bucket_static(bucket: BackingBucketV16) -> V16Result<()> {

@@ -1571,3 +1571,42 @@ mod rate_kernel {
         assert!(d.available() >= d.source.positive_claim_bound_num);
     }
 }
+
+/// Migration for #250. Before #250 the stored rate was the unliened backing over the WHOLE
+/// claim bound, and percolator-prog's own rate helper still computes it that way. A domain
+/// stored like that, with a valid lien below the full rate, must still decode (before this
+/// it failed with InvalidConfig, so every instruction touching the domain failed), must
+/// credit no more than the current rule, and must move to the current rule the first time
+/// the engine writes the domain. Any other stored value is still rejected.
+#[test]
+fn a_rate_stored_before_250_still_decodes_and_is_rewritten_on_the_next_write() {
+    let (mut w, _) = lien_and_control_worlds(1_030);
+    // 200 of backing for 200 of claims, 75 of it liened: 1.0 now, 125 / 200 before #250.
+    assert_eq!(w.domain_atoms(GAIN_DOMAIN), (200, 200, 75));
+    assert_eq!(w.rate(GAIN_DOMAIN), CREDIT_RATE_SCALE);
+    let pre_250 = 125 * CREDIT_RATE_SCALE / 200;
+    let current = w.markets[0].engine.source_credit_short;
+
+    // Any other stored value is still corrupt state.
+    let mut bogus = current;
+    bogus.credit_rate_num = V16PodU128::new(pre_250 + 1);
+    assert_eq!(bogus.try_to_runtime(), Err(V16Error::InvalidConfig));
+
+    let mut legacy = current;
+    legacy.credit_rate_num = V16PodU128::new(pre_250);
+    w.markets[0].engine.source_credit_short = legacy;
+    assert_eq!(w.rate(GAIN_DOMAIN), pre_250, "a pre-#250 rate decodes");
+    w.exec(|m, _| m.validate_shape()).unwrap();
+
+    // Until the domain is written, W1 is credited at the lower stored rate: conservative.
+    let cert = w.refresh(W1).unwrap();
+    assert_eq!(cert.certified_equity, 1_030 + 62);
+
+    // The next engine write of the domain recomputes it by the current rule.
+    let expiry = w.bucket(GAIN_DOMAIN).expiry_slot;
+    w.exec(|m, _| m.deposit_fresh_counterparty_backing_not_atomic(GAIN_DOMAIN, 1, expiry))
+        .unwrap();
+    assert_eq!(w.rate(GAIN_DOMAIN), CREDIT_RATE_SCALE);
+    assert_eq!(w.refresh(W1).unwrap().certified_equity, 1_030 + 100);
+    w.assert_sound();
+}
