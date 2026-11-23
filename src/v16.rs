@@ -1120,10 +1120,20 @@ impl V16Core {
         if denominator == 0 {
             return Err(V16Error::InvalidConfig);
         }
+        // a * d / d == a exactly (and fits u128), floor or ceil, on either path below. The common
+        // case is an unscaled ADL index (current_a == a_basis); this skips the u128 software divide.
+        if b == denominator {
+            return Ok(a);
+        }
+        if a == denominator {
+            return Ok(b);
+        }
         if let Some(product) = a.checked_mul(b) {
             let quotient = product / denominator;
+            // quotient * denominator <= product, so the multiply is exact; comparing it with the
+            // product is the remainder test without a second software divide (`__umodti3`).
             return quotient
-                .checked_add(u128::from(product % denominator != 0))
+                .checked_add(u128::from(quotient.wrapping_mul(denominator) != product))
                 .ok_or(V16Error::ArithmeticOverflow);
         }
         checked_mul_div_ceil_u256(
@@ -2452,6 +2462,13 @@ impl V16Core {
     fn mul_div_floor_u128_or_wide(a: u128, b: u128, denominator: u128) -> V16Result<u128> {
         if denominator == 0 {
             return Err(V16Error::InvalidConfig);
+        }
+        // a * d / d == a exactly (and fits u128) on either path below.
+        if b == denominator {
+            return Ok(a);
+        }
+        if a == denominator {
+            return Ok(b);
         }
         if let Some(product) = a.checked_mul(b) {
             return Ok(product / denominator);
