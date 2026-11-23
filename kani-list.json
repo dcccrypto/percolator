@@ -301,6 +301,7 @@
       "proof_v16_k_pair_zero_cases_return_zero",
       "proof_v16_mul_div_ceil_u256_is_floor_plus_remainder_indicator",
       "proof_v16_mul_div_floor_u256_matches_small_reference",
+      "proof_v16_mul_div_u128_or_wide_matches_small_reference",
       "proof_v16_risk_notional_ceil_unaligned_ceil_is_correct",
       "proof_v16_scaled_adl_delta_fast_matches_aligned_reference_and_fails_closed",
       "proof_v16_trade_fee_notional_ceil_strictly_exceeds_floor_when_unaligned",

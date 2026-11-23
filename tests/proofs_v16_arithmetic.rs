@@ -410,3 +410,25 @@ fn proof_v16_trade_fee_notional_ceil_strictly_exceeds_floor_when_unaligned() {
     // price are both nonzero (product < POS_SCALE); ceil must not be.
     assert!(ceil >= 1, "ceil-notional is never zero for a nonzero fill");
 }
+
+/// The u128 mul-div helpers (with the `a == d` / `b == d` shortcuts and the ceil remainder test by
+/// multiply) equal plain floor / ceil division on a small domain that includes every shortcut.
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_mul_div_u128_or_wide_matches_small_reference() {
+    let a_raw: u8 = kani::any();
+    let b_raw: u8 = kani::any();
+    let d_raw: u8 = kani::any();
+    kani::assume(a_raw <= 40);
+    kani::assume(b_raw <= 40);
+    kani::assume((1..=40).contains(&d_raw));
+    let (a, b, d) = (a_raw as u128, b_raw as u128, d_raw as u128);
+    kani::cover!(b == d && a != d, "b == d shortcut");
+    kani::cover!(a == d && b != d, "a == d shortcut");
+    kani::cover!(a != d && b != d && (a * b) % d != 0, "inexact quotient");
+    let floor = percolator::v16::kani_mul_div_floor_u128_or_wide(a, b, d);
+    let ceil = percolator::v16::kani_mul_div_ceil_u128_or_wide(a, b, d);
+    assert_eq!(floor, Ok((a * b) / d));
+    assert_eq!(ceil, Ok((a * b) / d + u128::from((a * b) % d != 0)));
+}
