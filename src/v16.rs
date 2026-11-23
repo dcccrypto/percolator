@@ -7115,8 +7115,9 @@ struct ParNettingBatchV16 {
     netted_num: u128,
     transfer_num: u128,
     expiry_slot: u64,
-    /// Resolved mode (upstream 78d180f2): the twin's face is cancelled without a
-    /// move, and backing moved from a domain at rate 1 is booked in whole atoms.
+    /// Resolved mode (upstream 78d180f2): moved backing is booked in whole atoms.
+    /// Upstream also cancels the twin's face without a move; this fork moves the
+    /// twin's loser-paid share (see `net_slot_face_at_par_not_atomic`).
     whole_atoms: bool,
 }
 
@@ -17654,21 +17655,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         };
         let mut transfer_num = owed_num.min(movable_num);
+        // upstream S1 (d5485eab): on the twin only the share its losers paid in
+        // follows the cancelled face, so what a provider fronted stays with the
+        // provider (Live and Resolved).
+        if !require_full_backing && transfer_num != 0 {
+            transfer_num = transfer_num.min(self.twin_loser_paid_share_num(
+                face_domain,
+                netted_num,
+                credit.positive_claim_bound_num,
+            )?);
+        }
         if batch.whole_atoms {
             // Resolved mode (upstream 78d180f2: whole atoms). Upstream cancels the
             // twin's face without a move and places stranded loser payments later
             // (its part 2, which needs a55aceb3's bounded Resolved K/F settlement).
-            // Here the twin's backing moves now, but only its loser-paid share:
-            // provider principal stays in the twin domain. The pooled share cannot
+            // Here the twin's loser-paid share (capped above, as in Live) moves
+            // now, and provider principal stays in the twin domain. The pooled share cannot
             // tell whether those losers paid before or after the reversal, so a
             // partial reversal can still move a few atoms a provider is owed.
-            if !require_full_backing {
-                transfer_num = transfer_num.min(self.twin_loser_paid_share_num(
-                    face_domain,
-                    netted_num,
-                    credit.positive_claim_bound_num,
-                )?);
-            }
             transfer_num -= transfer_num % BOUND_SCALE;
         }
         if require_full_backing && transfer_num != netted_num {

@@ -1318,8 +1318,8 @@ provider-receivable / consumed in lockstep as above) and booked for `L` by the
 same rule as the paragraph above. The account-side effect is unchanged: the same
 face is burned and the lien shrinks by the same amounts. Only whole atoms are
 consumed; a fraction of an atom is un-pledged in place. The exceptions are those
-of upstream's netting (v2.2: the unliened twin netting above has no loser-paid cap, so
-the twin rule here is stricter than it). Face held in `L` itself moves nothing: its backing already
+of upstream's netting (the unliened twin netting above has the same loser-paid cap, upstream
+S1 d5485eab). Face held in `L` itself moves nothing: its backing already
 sits where the loss is owed. For face in the twin domain `T` only the share its
 losers paid in follows, `burned face * loser_paid_T / claims_T`, rounded up to a
 whole atom and never more than the lien's backing or `T`'s loser-paid backing,

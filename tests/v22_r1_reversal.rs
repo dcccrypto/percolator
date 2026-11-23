@@ -1135,6 +1135,9 @@ fn lien_heavy_provider_world(seed: u64, ntr: usize, legs: usize, p: u64, pt: u64
 /// where the base engine, which kept the loser cash as a cushion, holds 5,599,922 (5,699,125
 /// before upstream's K/F netting chain, #387).
 ///
+/// Since the i457 fix ported upstream S1's loser-paid cap to the Live twin netting, this seed no
+/// longer shows the residual (see the asserts). The test name is kept so the history is findable.
+///
 /// Accepted residual pending the founder's rule-A decision (rule A versus "never worse than
 /// base", i.e. no move out of a bucket in which a provider holds principal). A change of rule
 /// must show up here as a change to this test.
@@ -1147,14 +1150,19 @@ fn rule_a_residual_provider_ends_short_of_principal_where_base_stays_above_seed_
     let (op81, op82, op113) = (80, 81, 112);
     // identical up to the move
     assert_eq!(s10[op81], base[op81], "both engines agree until the move");
-    assert_eq!(s10[op81][0], (10_124_675, 2_925_000));
-    // the move: 2,441,725 of loser cash leaves the long bucket, which stays above its principal
-    assert_eq!(s10[op82][0], (7_682_950, 2_925_000), "S10 moved 2,441,725 out, fresh still above principal");
-    assert_eq!(base[op82][0], (10_124_675, 2_925_000), "the base engine moved nothing");
-    // later consumption: the provider is short on S10 and not on base
-    assert_eq!(s10[op113][0], (3_257_400, 3_632_500), "S10: fresh 375,100 below the ledger principal");
-    assert_eq!(base[op113][0], (5_599_922, 3_632_500), "base: fresh above the ledger principal");
-    let (f, p) = s10[op113][0];
-    assert_eq!(p - f, 375_100, "the accepted residual, in atoms");
-    assert!(base[op113][0].0 >= base[op113][0].1, "base stays above");
+    // Upstream S1's loser-paid cap on the Live twin netting (d5485eab, ported with the i457
+    // fix) changes this world before the move: op 81 reads 8,667,635 (10,124,675 without the
+    // cap). The move still happens: 3,100,810 of loser cash leaves the long bucket.
+    assert_eq!(s10[op81][0], (8_667_635, 2_925_000));
+    assert_eq!(s10[op82][0], (5_566_825, 2_925_000), "S10 moved 3,100,810 out, fresh still above principal");
+    assert_eq!(base[op82][0], (8_667_635, 2_925_000), "the base engine moved nothing");
+    // With the cap the provider is no longer left short: at op 113 both engines hold exactly the
+    // ledger principal (without the cap S10 was 375,100 short here, 3,257,400 vs 3,632,500), and
+    // no operation in the whole trace leaves either domain's provider below its principal.
+    assert_eq!(s10[op113][0], (3_632_500, 3_632_500), "S10: fresh back at the ledger principal");
+    assert_eq!(base[op113][0], (3_632_500, 3_632_500), "base: fresh at the ledger principal");
+    let short = |t: &Vec<[(u128, u128); 2]>| {
+        t.iter().map(|o| o[0].1.saturating_sub(o[0].0).max(o[1].1.saturating_sub(o[1].0))).max().unwrap()
+    };
+    assert_eq!((short(&s10), short(&base)), (0, 0), "no provider below principal at any operation");
 }
