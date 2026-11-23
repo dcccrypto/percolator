@@ -81,7 +81,8 @@ fn random_table(r: &mut XorShift) -> Table {
         3 if n < CAP => {
             // an occupied slot after a gap
             let at = n + r.below((CAP - n) as u64) as usize;
-            t[at] = occupied(r, r.below(64) as u32);
+            let d = r.below(64) as u32;
+            t[at] = occupied(r, d);
         }
         4 => {
             // one random byte anywhere
