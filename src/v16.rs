@@ -704,6 +704,12 @@ fn liquidation_leg_maintenance_requirement(
         .ok_or(V16Error::ArithmeticOverflow)
 }
 
+/// How far an account would still be from maintenance after a liquidation step:
+/// the certificate's maintenance requirement with the leg's old contribution
+/// replaced by its new one, against the certified equity less the fee the step
+/// charges. With negative post-step equity the distance is the whole maintenance
+/// requirement plus the shortfall below zero; otherwise what the requirement
+/// exceeds the equity by. The liquidation sizes its close with it.
 fn liquidation_projected_health_deficit_from_parts(
     certified_equity: i128,
     certified_maintenance_req: u128,
@@ -1021,6 +1027,11 @@ pub fn kani_liquidation_partial_search_hi(
     liquidation_partial_search_hi(config, old_abs_q, effective_price)
 }
 
+/// A new position of `abs_q` on `side` adds itself to that side's totals: the
+/// effective open interest and the raw basis sum rise by `abs_q`, the stored
+/// position count by one and the loss-weight sum by `loss_weight`. The other side
+/// and every other field of the asset are untouched. (The side cap is checked on
+/// the net result of both legs of a trade, by `kernel_trade_side_oi_cap_gate`.)
 fn add_open_interest_for_new_position(
     asset: &mut AssetStateV16,
     side: SideV16,
@@ -7863,6 +7874,12 @@ pub struct AccrualStepV16 {
 /// of compounding the cap at caller-selected transaction boundaries. The remainder is the
 /// numerator left after division by `MAX_MARGIN_BPS`; carrying it across calls prevents permanent
 /// low-price target pinning.
+/// The bound this step puts on the oracle: one step moves the effective price toward the
+/// target, never past it, by at most `(cap_anchor * max_change_bps + remainder_before) /
+/// MAX_MARGIN_BPS`, and carries the exact remainder of that division (below `MAX_MARGIN_BPS`). An
+/// unexposed asset (no open interest) jumps to the target; nothing moves when the price is at the
+/// target or the cap is zero. Summed over steps, the movement therefore never exceeds
+/// `cap_anchor * max_change_bps * steps / MAX_MARGIN_BPS`, whatever prices the oracle reports.
 pub fn canonical_accrual_price_step_v16(
     current: u64,
     target: u64,
