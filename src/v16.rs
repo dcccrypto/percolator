@@ -9233,6 +9233,22 @@ fn slot_resolved_payout_blockers_v16(slot: &EngineAssetSlotV16Account) -> V16Res
         .ok_or(V16Error::CounterOverflow)
 }
 
+/// Which sides `begin_zero_oi_residue_resets` resets: zero effective OI, no pending
+/// obligation, not already ResetPending, and either a stored position or a scaled A index.
+fn zero_oi_reset_sides(asset: &AssetStateV16Account) -> V16Result<(bool, bool)> {
+    let (mode_long, mode_short) =
+        (decode_side_mode(asset.mode_long)?, decode_side_mode(asset.mode_short)?);
+    let reset_long = asset.oi_eff_long_q.get() == 0
+        && asset.pending_obligation_count_long.get() == 0
+        && mode_long != SideModeV16::ResetPending
+        && (asset.stored_pos_count_long.get() != 0 || asset.a_long.get() != ADL_ONE);
+    let reset_short = asset.oi_eff_short_q.get() == 0
+        && asset.pending_obligation_count_short.get() == 0
+        && mode_short != SideModeV16::ResetPending
+        && (asset.stored_pos_count_short.get() != 0 || asset.a_short.get() != ADL_ONE);
+    Ok((reset_long, reset_short))
+}
+
 pub trait MarketSlotV16View {
     fn engine_slot(&self) -> &EngineAssetSlotV16Account;
 }
@@ -19972,9 +19988,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(asset)
     }
 
-    /// Test hook for tests/asset_state_wire_readers.rs (`--features fuzz`): each reader that
-    /// moved to `asset_state_wire`, next to its old body on the full `asset_state` decode. Returns
-    /// (new, old) pairs as debug strings so the test can compare whole `Result`s.
+    /// Test hook for tests/asset_state_wire_readers.rs (`--features fuzz`): six of the readers
+    /// that moved to `asset_state_wire` (the risk-change gate, live-reducible, side mode, band
+    /// side full, target lag, and the zero-OI reset predicate), each next to its old body on the
+    /// full `asset_state` decode. The remaining converted sites are single raw field reads.
+    /// Returns (new, old) pairs as debug strings so the test can compare whole `Result`s.
     #[cfg(all(not(kani), feature = "fuzz"))]
     pub fn asset_wire_readers_vs_reference_for_test(
         &self,
@@ -20033,6 +20051,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 ),
             ));
         }
+        out.push((
+            format!("{:?}", self.asset_state_wire(asset_index).and_then(zero_oi_reset_sides)),
+            format!(
+                "{:?}",
+                self.asset_state(asset_index).map(|asset| {
+                    let reset_long = asset.oi_eff_long_q == 0
+                        && asset.pending_obligation_count_long == 0
+                        && asset.mode_long != SideModeV16::ResetPending
+                        && (asset.stored_pos_count_long != 0 || asset.a_long != ADL_ONE);
+                    let reset_short = asset.oi_eff_short_q == 0
+                        && asset.pending_obligation_count_short == 0
+                        && asset.mode_short != SideModeV16::ResetPending
+                        && (asset.stored_pos_count_short != 0 || asset.a_short != ADL_ONE);
+                    (reset_long, reset_short)
+                })
+            ),
+        ));
         out.push((
             format!("{:?}", self.asset_has_target_effective_lag(asset_index)),
             format!(
@@ -22265,17 +22300,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     fn begin_zero_oi_residue_resets(&mut self, asset_index: usize) -> V16Result<()> {
         self.drop_unowned_side_oi(asset_index)?;
-        let asset = self.asset_state_wire(asset_index)?;
-        let (mode_long, mode_short) =
-            (decode_side_mode(asset.mode_long)?, decode_side_mode(asset.mode_short)?);
-        let reset_long = asset.oi_eff_long_q.get() == 0
-            && asset.pending_obligation_count_long.get() == 0
-            && mode_long != SideModeV16::ResetPending
-            && (asset.stored_pos_count_long.get() != 0 || asset.a_long.get() != ADL_ONE);
-        let reset_short = asset.oi_eff_short_q.get() == 0
-            && asset.pending_obligation_count_short.get() == 0
-            && mode_short != SideModeV16::ResetPending
-            && (asset.stored_pos_count_short.get() != 0 || asset.a_short.get() != ADL_ONE);
+        let (reset_long, reset_short) = zero_oi_reset_sides(self.asset_state_wire(asset_index)?)?;
         if reset_long {
             self.begin_full_drain_reset_inner(asset_index, SideV16::Long)?;
         }

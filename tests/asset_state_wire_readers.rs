@@ -65,6 +65,10 @@ fn corrupt(r: &mut XorShift, slot: &mut EngineAssetSlotV16Account) {
         5 => {
             a.stored_pos_count_long = V16PodU64::new(r.below(6));
             a.stored_pos_count_short = V16PodU64::new(r.below(6));
+            a.oi_eff_long_q = V16PodU128::new(r.below(2) as u128);
+            a.oi_eff_short_q = V16PodU128::new(r.below(2) as u128);
+            a.pending_obligation_count_long = V16PodU64::new(r.below(2));
+            a.pending_obligation_count_short = V16PodU64::new(r.below(2));
         }
         6 => a.raw_oracle_target_price = V16PodU64::new(PRICE + r.below(3) - 1),
         7 => a.effective_price = V16PodU64::new(PRICE + r.below(3) - 1),
