@@ -17030,8 +17030,8 @@ fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
     // Liveness: the walk leaves some accounts unclosed only because it stops after 80
     // random steps; 3ce4cbd1 has exactly 7 (648, 1649, 2061, 2556, 5124, 5620, 5942), and
     // upstream's K/F netting chain (#387) gives these 6 (1649 and 2556 now close, 1043 is
-    // newly unclosed at step 80; whether it would close with more steps is not checked here).
-    // Any other seed here is a new stuck account (a port of upstream 94979ede (c) adds 131).
+    // newly unclosed at step 80). Any other seed here is a new stuck account (a port of
+    // upstream 94979ede (c) adds 131).
     let mut unclosed = vec![];
     let mut built = 0;
     for seed in 0..6000u64 {
@@ -17044,6 +17044,14 @@ fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
     }
     assert!(built > 5000, "vacuity: {built} scenarios built");
     assert_eq!(unclosed, vec![648, 1043, 2061, 5124, 5620, 5942]);
+    // ... and each of them is out of steps, not stuck: the rollback-faithful walk of the same
+    // scenario, whose drain phase keeps going until every account has had its turn to close,
+    // closes every account and conserves the vault (1043 included).
+    for seed in unclosed {
+        let o = s16ac_walk(seed, 80).expect("scenario builds");
+        assert!(o.closed.iter().all(|c| *c), "seed {seed}: every account closes after the drain");
+        assert_eq!(o.paid.iter().sum::<u128>() + o.vault, o.deposits + o.insurance, "seed {seed}");
+    }
 }
 
 // ---- AUD-S1-6 hunks (a)+(c), 2026-10-20: rollback-faithful Resolved close-order walk ----
