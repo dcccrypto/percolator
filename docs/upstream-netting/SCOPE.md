@@ -16,8 +16,8 @@ which this fork either lacks or implements differently. Per the job's step 0 rul
   `provider_principal_{long,short}`, from S10 / #309 / #310 / #362.
 - Pre-image: `git blame <commit>^` over each hunk of `src/v16.rs` lists which upstream commits wrote the
   lines that each prerequisite commit edits (only lines written after 2026-09-20 are listed).
-- Tests: Toly's test files were copied from 1683b11d and run on the base (see `before.txt`). They are kept under
-  `toly-tests/`, not `tests/`, so the branch still builds.
+- Tests: Toly's test files were copied from 1683b11d and run on the base (see `before.txt`). They were first kept under
+  `toly-tests/`, not `tests/`, so the branch still builds. They now live in `tests/`, and the `toly-tests/` copies were removed.
 
 ## Per commit
 

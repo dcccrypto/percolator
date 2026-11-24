@@ -87,9 +87,9 @@ produce. One of them (`rule_a_...`) pins the fork-only S10 provider-principal le
 | v22_r1_i457::i457_resolved_close_order_does_not_change_payouts | payouts, close order [0,1,2,3] vs [3,2,1,0], peak 0,1,2, reverse_first | equal | [0, 494527388, 1185878296, 1000000619594320] vs [0, 494527386, 1217566000, 1000000725220000] |
 | v22_r1_multi_claimant::r1_multi_claimant_residual_ratchets | resolved solvent worst gap | <= 116,400 | 144,500 |
 | v22_r1_multi_claimant::mixed_liened_and_rich_flippers_ratchets | per-account worst orders | no regression | -13,613,431 |
-| v22_r1_reversal::rule_a_residual_provider_ends_short_of_principal_where_base_stays_above_seed_3000121 | base engine (fresh, S10 ledger principal) at op 113 | (5,699,125, 3,632,500) | (5,599,922, 3,632,500) |
-| v22_r1_settle_order::r1_bankrupt_victim_is_order_independent_and_not_over_credited | (victim, winner) winner-first == victim-first | equal, (-414,343, 329,999) | (-403,993, 329,999) vs (-377,346, 329,999) |
-| v22_r1_settle_order::r1_equal_size_flip_victim_is_liened_and_order_independent | liened victim, both orders | equal | (-603,702, 299,999) vs (-537,447, 299,999) |
+| v22_r1_reversal::rule_a_residual_seed_3000121_provider_no_longer_short_with_s1_cap | base engine (fresh, S10 ledger principal) at op 113 | (5,699,125, 3,632,500) | (5,599,922, 3,632,500) |
+| v22_r1_settle_order::r1_bankrupt_victim_order_dependence_pinned_and_pair_never_gains | (victim, winner) winner-first == victim-first | equal, (-414,343, 329,999) | (-403,993, 329,999) vs (-377,346, 329,999) |
+| v22_r1_settle_order::r1_equal_size_flip_victim_is_liened_and_order_dependence_pinned | liened victim, both orders | equal | (-603,702, 299,999) vs (-537,447, 299,999) |
 | v22_r1_settle_order::r1_liened_victim_is_order_independent_and_pinned | counterparty >= pre-R1 worst order | >= pre-R1 worst | below (message only) |
 | v22_r1_settle_order::r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1 | pinned neutral-rate result 330000 5 200x14 | (-553,486, -518,502) | (-581,887, -518,502) |
 

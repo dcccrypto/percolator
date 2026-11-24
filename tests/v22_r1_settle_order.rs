@@ -599,11 +599,12 @@ fn liened_scenario_try(winner_first: bool, cap: u128, sell: u128, up2: i64, step
 /// neutral rate must not assume it does (it would over-credit the victim). Under R1 both orders
 /// agreed. Upstream's K/F netting chain (#387) makes the victim's result depend on the settle
 /// order (winner-first is 14,866-37,619 atoms lower); the winner is the same in both orders and
-/// the pair never gains. Both orders are pinned, and the name is kept. Not shown any more: that the victim is not
+/// the pair never gains. Both orders are pinned (renamed from
+/// `r1_bankrupt_victim_is_order_independent_and_not_over_credited`). Not shown any more: that the victim is not
 /// over-credited. Victim-first is +36,997 (cap 330k) / +22,571 (cap 400k) above R1's value in
 /// every case, the direction and rough size the bad-debt term used to guard against.
 #[test]
-fn r1_bankrupt_victim_is_order_independent_and_not_over_credited() {
+fn r1_bankrupt_victim_order_dependence_pinned_and_pair_never_gains() {
     // (victim, winner) effective equity, winner-first then victim-first. R1 pinned one value for
     // both orders: (-414,343 / -605,611 / -804,603 / -771,596 / -1,279,126, winner unchanged).
     const PINNED: [((i128, i128), (i128, i128)); 5] = [
@@ -695,7 +696,7 @@ fn r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1() {
     // flip (+3 -> -3) that the buggy classifier treated as not risk-increasing, so it took no
     // initial-margin source lien and was priced here as a NON-liened victim. A flip is
     // risk-increasing (spec), the lien is now created, and the case belongs to the liened class:
-    // see `r1_equal_size_flip_victim_is_liened_and_order_independent` below.
+    // see `r1_equal_size_flip_victim_is_liened_and_order_dependence_pinned` below.
     // Upstream's K/F netting chain (#387) lowers the winner-first victim (R1: -553,486 / -807,740 /
     // -428,054); it stays above the pre-R1 engine.
     const CASES: [((u128, u128, i64, usize), (i128, i128, i128, i128)); 3] = [
@@ -721,10 +722,10 @@ fn r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1() {
 ///
 /// Under upstream's K/F netting chain (#387) the victim's result depends on the settle order
 /// again: -602,382 winner-first (below even the pre-#126 -580,525), -537,447 victim-first (the
-/// pre-#126 value). The counterparty is still untouched in both. Both orders are pinned (the name
-/// is kept), and the lien is now asserted directly, since order independence no longer shows it.
+/// pre-#126 value). The counterparty is still untouched in both. Both orders are pinned (renamed
+/// from `r1_equal_size_flip_victim_is_liened_and_order_independent`), and the lien is now asserted directly, since order independence no longer shows it.
 #[test]
-fn r1_equal_size_flip_victim_is_liened_and_order_independent() {
+fn r1_equal_size_flip_victim_is_liened_and_order_dependence_pinned() {
     assert!(liened_scenario(true, 300_000, 6, 200, 10).2 > 0, "the equal-size flip takes a source lien");
     let wf = liened_scenario_try(true, 300_000, 6, 200, 10).expect("scenario runs");
     let lf = liened_scenario_try(false, 300_000, 6, 200, 10).expect("scenario runs");

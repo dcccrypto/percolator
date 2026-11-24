@@ -1136,13 +1136,14 @@ fn lien_heavy_provider_world(seed: u64, ntr: usize, legs: usize, p: u64, pt: u64
 /// before upstream's K/F netting chain, #387).
 ///
 /// Since the i457 fix ported upstream S1's loser-paid cap to the Live twin netting, this seed no
-/// longer shows the residual (see the asserts). The test name is kept so the history is findable.
+/// longer shows the residual (see the asserts). Renamed from
+/// `rule_a_residual_provider_ends_short_of_principal_where_base_stays_above_seed_3000121`.
 ///
 /// Accepted residual pending the founder's rule-A decision (rule A versus "never worse than
 /// base", i.e. no move out of a bucket in which a provider holds principal). A change of rule
 /// must show up here as a change to this test.
 #[test]
-fn rule_a_residual_provider_ends_short_of_principal_where_base_stays_above_seed_3000121() {
+fn rule_a_residual_seed_3000121_provider_no_longer_short_with_s1_cap() {
     let s10 = lien_heavy_provider_world(3_000_121, 4, 8, 60, 30, 15, 20_000_000, true);
     let base = lien_heavy_provider_world(3_000_121, 4, 8, 60, 30, 15, 20_000_000, false);
     assert!(s10.len() >= 113 && base.len() >= 113, "vacuity: the world ran ({} / {} operations)", s10.len(), base.len());

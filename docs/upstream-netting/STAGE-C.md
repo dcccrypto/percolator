@@ -41,10 +41,10 @@ Got values on this head (expected = test):
 | i457::i457_resolved_close_order_does_not_change_payouts | payouts, close order reversed (peak 0,1,2) | equal | [0, 494527388, 1185878296, 1000000619594320] vs [0, 494527386, 1217566000, 1000000725220000] (unchanged from Stage B1) |
 | multi_claimant::mixed_liened_and_rich_flippers_ratchets | rich flipper inside the protective branch | worst 0 | 15,427,446 |
 | multi_claimant::r1_multi_claimant_residual_ratchets | resolved solvent worst gap | <= 116,400 | 144,500 (unchanged from Stage B1) |
-| reversal::rule_a_residual_provider_ends_short_of_principal_where_base_stays_above_seed_3000121 | base engine at op 113 (fork S10) | (5,699,125, 3,632,500) | (5,599,922, 3,632,500) (unchanged from Stage B1) |
+| reversal::rule_a_residual_seed_3000121_provider_no_longer_short_with_s1_cap | base engine at op 113 (fork S10) | (5,699,125, 3,632,500) | (5,599,922, 3,632,500) (unchanged from Stage B1) |
 | settle_order::r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1 | pinned neutral-rate result | (-553,486, -518,502) | (-581,887, -518,502) |
-| settle_order::r1_equal_size_flip_victim_is_liened_and_order_independent | both settle orders equal | equal | (-602,382, 299,999) vs (-537,447, 299,999) |
-| settle_order::r1_bankrupt_victim_is_order_independent_and_not_over_credited | both settle orders equal | equal | (-398,508, 329,999) vs (-377,346, 329,999) |
+| settle_order::r1_equal_size_flip_victim_is_liened_and_order_dependence_pinned | both settle orders equal | equal | (-602,382, 299,999) vs (-537,447, 299,999) |
+| settle_order::r1_bankrupt_victim_order_dependence_pinned_and_pair_never_gains | both settle orders equal | equal | (-398,508, 329,999) vs (-377,346, 329,999) |
 | settle_order::r1_liened_victim_is_order_independent_and_pinned | pinned result | (73,993, -124,395) | (110,990, -110,990), now the same in both orders |
 
 ### 2b. Full engine suite (default features, 104 test targets incl. lib unit tests and doc-tests): 1,412 passed / 16 failed / 13 ignored
@@ -105,7 +105,8 @@ pass. The 8 failures are the 6 of 2b plus two insurance-backed variants:
 
 ## 3. Not done here
 
-- No fork test was rewritten. One of Toly's tests was completed (2e). The 9 R1 failures and the fork-only pins pin numbers that Toly's rules replace.
+- At Stage C no fork test was rewritten. (Later commits on this PR did move fork pins: the R1 and s16 pins in
+  tests/v16_spec_tests.rs and tests/v22_r1_*.rs, see the PR body. This note is only about Stage C.) One of Toly's tests was completed (2e). The 9 R1 failures and the fork-only pins pin numbers that Toly's rules replace.
   Restating them or keeping R1's guarantees is the owner's decision, as in Stage B1 section 5. The pins:
   r_regression 91 -> 100 (#250); s10 consumed 2,376 -> 5,000 (1683b11d); `source_reclass_same_leg_reversal_insurance_backed`
   (fuzz) 5,000 -> 0 (7d2e243d); the live-mark-reversal risk-epoch pin is one shared `6` but reads 8 (counterparty) and

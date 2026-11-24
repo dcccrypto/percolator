@@ -4639,6 +4639,13 @@ impl V16Core {
     /// (`recompute_source_credit_domain_after_mutation`), so the domain moves to it the
     /// first time the engine writes it. No other value is accepted: a rate that matches
     /// neither rule is still `InvalidConfig`.
+    ///
+    /// End of the window: this acceptance is temporary and must be removed (making the
+    /// pre-#250 value `InvalidConfig` again) once both hold: percolator-prog computes the
+    /// rate by the current rule (its `expected_source_credit_rate_num` still uses this
+    /// formula), and no deployed domain still stores this value. Until then a writer that
+    /// stores this formula by mistake also decodes; the value it stores never credits
+    /// more than the current rule.
     fn pre_250_source_credit_rate_num_for_state(state: SourceCreditStateV16) -> V16Result<u128> {
         if state.positive_claim_bound_num == 0 {
             return Ok(CREDIT_RATE_SCALE);
@@ -22940,6 +22947,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// lien on such a bucket, which the reconciliation moves): a claim on lapsed backing also
     /// makes a refresh refuse (`validate_source_domain_ledger_current`), and a certificate
     /// that counts that backing is not kept, so the next position action refreshes as before.
+    ///
+    /// Coupling: this predicate restates, write by write, what the `net == 0` apply path of
+    /// `settle_account_kf_effects_not_atomic` and the side-effect settlement after it do for
+    /// a settled leg. Any write added to that path (or to the Live netting it skips when the
+    /// net is zero) must be added here too, or a fee sync will keep a certificate the
+    /// settlement would have changed.
     fn fee_sync_settlement_noop_last_asset(
         &self,
         account: &PortfolioV16View<'_>,
