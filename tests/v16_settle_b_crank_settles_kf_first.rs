@@ -160,10 +160,10 @@ fn run_lapsed(loser_first: bool) -> Result<WindDown, String> {
 }
 
 #[test]
-// v2.2 fork: the first crank here is a Refresh, and the provider's bucket sits in the winner's
-// latent favorable domain, not its source roster. Expiring latent-domain backing is upstream #243
-// (ea8cc9c5), which v2.2 rc23 does not have (parked in dcccrypto#311). Without it the Refresh
-// returns Stale / LockActive in both orders, with or without the SettleB K/F step.
+// v2.2 fork: the provider's lapsed bucket sits in the winner's latent favorable domain, not its
+// source roster. Expiring latent-domain backing is upstream #243 (ea8cc9c5), which v2.2 rc23 does
+// not have (parked in dcccrypto#311). On rc23 winner-first fails Stale on the winner's Refresh and
+// loser-first fails LockActive on the loser's first crank, with or without the SettleB K/F step.
 #[ignore = "needs upstream #243 ea8cc9c5 latent-domain expiry (not on v2.2 rc23)"]
 fn v16_settle_b_crank_with_lapsed_provider_backing_is_order_independent() {
     let winner_first = run_lapsed(false);
