@@ -7941,8 +7941,10 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
     // twin reads 8/4 (1683b11d adds the second loss-domain booking), the insurance twin 5/3
     // (7d2e243d nets its face without spending insurance). Before the port both read 6/4.
     // 5/3 is the de-fused signature above: the insurance twin no longer reaches the fused
-    // burn, so only the counterparty twin can still guard it (not re-checked with the mutant).
-    // The insurance twin's pin is a plain characterisation now.
+    // burn, so only the counterparty twin can still guard it. Re-checked 24 Nov on the #402
+    // head: with both call sites de-fused to `epoch_steps = 1` the counterparty twin reads 7
+    // risk-epoch steps instead of 8 and fails. The insurance twin's pin is a plain
+    // characterisation now.
     let (want_risk_epoch_steps, want_credit_epoch_steps) =
         if insurance_backed { (5, 3) } else { (8, 4) };
     let epoch_why = if insurance_backed {
@@ -15955,7 +15957,8 @@ fn source_reclass_same_leg_reversal_counterparty_backed() {
 /// the short's regained 5,000 sits there at credit rate 0 while the insurance keeps its 100,000:
 /// the claim is not backed, an invariant the new rule breaks for this twin. (Before the port the
 /// fork reclassified the insurance spend like counterparty support and the loss domain held the
-/// whole 5,000.)
+/// whole 5,000.) Tracked as open gap G1 in docs/upstream-netting/OPEN-GAPS.md; nothing upstream
+/// (av/master at a6c6e9ad) changes this rule yet.
 #[cfg(feature = "fuzz")]
 #[test]
 fn source_reclass_same_leg_reversal_insurance_backed() {

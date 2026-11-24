@@ -6082,6 +6082,22 @@ pub fn kani_mark_kf_stale_cohorts(
 }
 
 #[cfg(kani)]
+pub fn kani_settle_stranded_loser_backing_resolved<T>(
+    group: &mut MarketGroupV16ViewMut<'_, T>,
+    asset_index: usize,
+    settled_side: SideV16,
+    twin_side_settled: bool,
+) -> V16Result<()> {
+    group
+        .settle_stranded_loser_backing_resolved_not_atomic(
+            asset_index,
+            settled_side,
+            twin_side_settled,
+        )
+        .map(|_| ())
+}
+
+#[cfg(kani)]
 pub fn kani_settle_kf_stale_cohort(
     asset: AssetStateV16,
     side: SideV16,
