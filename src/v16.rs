@@ -21978,12 +21978,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// certificate's validity and the market's loss-stale summary, and if so the asset whose
     /// staleness that summary would end on. It would, for a Live account whose certificate is
     /// current (`account_settlement_skippable_with_current_certificate`) and whose PnL is not
-    /// negative, when no counterparty lien sits on a lapsed Fresh or an Impaired bucket (the
-    /// reconciliation's trigger), and every active leg is settled to its asset: zero K/F delta,
-    /// K and F snapshots and K/F epoch as the settlement would write them, and B at or above its
-    /// target. The settlement applies its entries in ascending (insurance domain, leg slot)
-    /// order, each setting the summary from its own asset, so the summary ends on the asset of
-    /// the largest key.
+    /// negative, when none of its source domains is backed by a lapsed Fresh or an Impaired
+    /// bucket, and every active leg is settled to its asset: zero K/F delta, K and F snapshots
+    /// and K/F epoch as the settlement would write them, and B at or above its target. The
+    /// settlement applies its entries in ascending (insurance domain, leg slot) order, each
+    /// setting the summary from its own asset, so the summary ends on the asset of the largest
+    /// key. The bucket condition covers more than the settlement's own trigger (a counterparty
+    /// lien on such a bucket, which the reconciliation moves): a claim on lapsed backing also
+    /// makes a refresh refuse (`validate_source_domain_ledger_current`), and a certificate
+    /// that counts that backing is not kept, so the next position action refreshes as before
+    /// (upstream 06b7e5be).
     fn fee_sync_settlement_noop_last_asset(
         &self,
         account: &PortfolioV16View<'_>,
@@ -22007,7 +22011,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if source.has_default_sparse_tag() && !source.is_occupied() {
                 break;
             }
-            if source.source_lien_counterparty_backing_num.get() != 0 && source.is_occupied() {
+            if source.is_occupied() {
                 let (raw_status, raw_expiry) =
                     self.backing_bucket_raw_status_expiry_for_domain(source.domain.get() as usize)?;
                 if (raw_status == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
@@ -27805,7 +27809,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // nothing to settle (`fee_sync_settlement_noop_last_asset`) it is not run: its one effect
         // besides the certificate, the market's loss-stale summary of the last entry it applies,
         // is written here, and the current certificate is kept with the charge taken from its
-        // equity (`kernel_cert_equity_after_capital_charge`).
+        // equity (`kernel_cert_equity_after_capital_charge`) when that leaves no liquidation
+        // deficit; otherwise the certificate is voided as the settlement would have voided it.
         let noop_last_asset = if live_nonflat {
             self.fee_sync_settlement_noop_last_asset(&account.as_view())?
         } else {
@@ -27841,29 +27846,47 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let charged = self.charge_account_fee_current_not_atomic(account, requested_fee)?;
         account.header.last_fee_slot = V16PodU64::new(fee_anchor);
-        if let Some((mut certificate, liquidation_equity)) = kept_certificate {
-            let (certified_equity, _) = V16Core::kernel_cert_equity_after_capital_charge(
-                certificate.certified_equity,
-                certificate.certified_maintenance_req,
-                charged,
-            )?;
-            // Fork (haircut-order fix B): the deficit comes from the liquidation equity, as in
-            // `compute_account_health_cert_with_price_override`; it is linear in capital too
-            // (the support reads no capital), so it also falls by exactly `charged`.
-            let (_, certified_liq_deficit) = V16Core::kernel_cert_equity_after_capital_charge(
-                liquidation_equity,
-                certificate.certified_maintenance_req,
-                charged,
-            )?;
-            certificate.certified_equity = certified_equity;
-            certificate.certified_liq_deficit = certified_liq_deficit;
-            certificate.valid = true;
-            account.header.health_cert = HealthCertV16Account::from_runtime(&certificate);
-            // v2.2 band: a capital debit carried on the prior certificate's requirements may
-            // only mark liquidation-pending, never certify (as `charge_account_backing_fee`).
-            self.band_observe_cert_not_atomic(account, &certificate, false)?;
+        match kept_certificate {
+            Some((mut certificate, liquidation_equity)) => {
+                let (certified_equity, _) = V16Core::kernel_cert_equity_after_capital_charge(
+                    certificate.certified_equity,
+                    certificate.certified_maintenance_req,
+                    charged,
+                )?;
+                // Fork (haircut-order fix B): the deficit comes from the liquidation equity, as
+                // in `compute_account_health_cert_with_price_override`; it is linear in capital
+                // too (the support reads no capital), so it also falls by exactly `charged`.
+                let (_, certified_liq_deficit) = V16Core::kernel_cert_equity_after_capital_charge(
+                    liquidation_equity,
+                    certificate.certified_maintenance_req,
+                    charged,
+                )?;
+                if certified_liq_deficit == 0 {
+                    certificate.certified_equity = certified_equity;
+                    certificate.certified_liq_deficit = certified_liq_deficit;
+                    certificate.valid = true;
+                    account.header.health_cert = HealthCertV16Account::from_runtime(&certificate);
+                    // v2.2 band: a capital debit carried on the prior certificate's requirements
+                    // may only mark liquidation-pending, never certify (as
+                    // `charge_account_backing_fee`). The kept certificate is healthy, so this
+                    // writes nothing today; it stays so the hook sees every certificate write.
+                    self.band_observe_cert_not_atomic(account, &certificate, false)?;
+                    // No second account validation (upstream 06b7e5be): this call validated the
+                    // account on entry and has since written only the account's capital, last
+                    // fee slot and certificate, and the market's `c_tot`, `insurance` and
+                    // loss-stale summary. `validate_with_market` reads none of them;
+                    // `validate_shape` below checks the two totals.
+                } else {
+                    // Only a healthy certificate is kept. A charge that leaves a liquidation
+                    // deficit voids it as the settlement would have (the held certificate with
+                    // its validity cleared), so the account is refreshed before it can be
+                    // liquidated and no transaction carries both the charge and a liquidation.
+                    account.header.health_cert.valid = 0;
+                    account.validate_with_market(&self.as_view())?;
+                }
+            }
+            None => account.validate_with_market(&self.as_view())?,
         }
-        account.validate_with_market(&self.as_view())?;
         self.validate_shape()?;
         Ok(charged)
     }
