@@ -349,10 +349,11 @@ fn sweep(worlds: u64, seed0: u64) -> Deep {
 ///
 /// Upstream's K/F netting chain (#387, the #250 lien-aware rate) replaces R1's numbers: the order
 /// spread of the total falls to 0 (the total is the same in every settle order), but the maker's
-/// worst order is now -124,633,648, below the pre-R1 worst. The name is kept; the floor below is
+/// worst order is now -124,633,648, below the pre-R1 worst. Renamed from
+/// `deep_book_maker_is_never_below_the_pre_r1_worst_order`; the floor below is
 /// the measured value under the new maths, and the pre-R1 bound no longer holds.
 #[test]
-fn deep_book_maker_is_never_below_the_pre_r1_worst_order() {
+fn deep_book_maker_worst_order_pinned_at_the_netting_floor() {
     let d = sweep(700, 5);
     eprintln!("DEEPBOOK ran {} liened_worlds {} sum_maker_min {} sum_total_spread {} gains {}", d.ran, d.liened_worlds, d.sum_maker_min, d.sum_total_spread, d.gains);
     assert!(d.ran >= 150 && d.liened_worlds * 10 >= d.ran * 8, "the worlds must carry liens");

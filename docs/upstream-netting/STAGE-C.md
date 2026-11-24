@@ -37,7 +37,7 @@ Got values on this head (expected = test):
 
 | test | assertion | expected | got on 342dae14 |
 |---|---|---|---|
-| deep_book::deep_book_maker_is_never_below_the_pre_r1_worst_order | sum of maker's worst order (372 worlds, 360 liened) | >= -78,538,861 | -124,633,648 (the same number #311 measured for #250 alone) |
+| deep_book::deep_book_maker_worst_order_pinned_at_the_netting_floor | sum of maker's worst order (372 worlds, 360 liened) | >= -78,538,861 | -124,633,648 (the same number #311 measured for #250 alone) |
 | i457::i457_resolved_close_order_does_not_change_payouts | payouts, close order reversed (peak 0,1,2) | equal | [0, 494527388, 1185878296, 1000000619594320] vs [0, 494527386, 1217566000, 1000000725220000] (unchanged from Stage B1) |
 | multi_claimant::mixed_liened_and_rich_flippers_ratchets | rich flipper inside the protective branch | worst 0 | 15,427,446 |
 | multi_claimant::r1_multi_claimant_residual_ratchets | resolved solvent worst gap | <= 116,400 | 144,500 (unchanged from Stage B1) |

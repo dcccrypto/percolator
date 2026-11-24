@@ -7191,8 +7191,8 @@ struct ParNettingBatchV16 {
     transfer_num: u128,
     expiry_slot: u64,
     /// Resolved mode (upstream 78d180f2): moved backing is booked in whole atoms.
-    /// Upstream also cancels the twin's face without a move; this fork moves the
-    /// twin's loser-paid share (see `net_slot_face_at_par_not_atomic`).
+    /// As upstream, the twin's face is cancelled without a move (its transfer is 0);
+    /// what is stranded is placed later (`settle_stranded_loser_backing_resolved_not_atomic`).
     whole_atoms: bool,
 }
 
@@ -14806,9 +14806,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// atoms; the rest is un-pledged in place as before).
     ///
     /// The lien is backing reserved for this account alone, so all of it goes,
-    /// with the exceptions upstream's unliened netting has (`net_slot_face_at_par_not_atomic`;
-    /// v2.2 note: this fork's unliened twin netting does not carry upstream's S1 loser-paid
-    /// cap, so here the twin rule below is stricter than the unliened one):
+    /// with the exceptions upstream's unliened netting has (`net_slot_face_at_par_not_atomic`,
+    /// which also carries upstream's S1 loser-paid cap on the twin):
     /// - face held in `loss_domain` itself: its backing already sits where the
     ///   loss is owed (#252), nothing moves;
     /// - face in the leg's twin domain is a gain the reversal undoes, so only the
@@ -17441,8 +17440,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///
     /// 1. same-leg reversal: the account's unliened face in the twin domain
     ///    `(asset, opposite(side))` -- that leg's never-paid gain -- cancels the
-    ///    loss one for one, moving floor(face * twin_rate) of twin backing to
-    ///    `loss_domain`;
+    ///    loss one for one, moving ceil(face * twin_rate) of twin backing to
+    ///    `loss_domain`, capped at the share the twin's losers paid in (upstream S1);
+    ///    in Resolved mode nothing moves (the twin's face is cancelled without a move);
     /// 2. fully backed face (rate 1) in any other source domain is realized one
     ///    for one, its backing moving to `loss_domain`; fully backed face in
     ///    `loss_domain` itself cancels one for one with nothing to move (#252:

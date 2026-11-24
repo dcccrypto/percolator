@@ -82,7 +82,7 @@ produce. One of them (`rule_a_...`) pins the fork-only S10 provider-principal le
 
 | test | assertion | expected | got |
 |---|---|---|---|
-| v22_r1_deep_book::deep_book_maker_is_never_below_the_pre_r1_worst_order | sum of maker's worst order >= pre-R1 worst (175 of 187 worlds liened) | >= -78,538,861 | -80,615,589 |
+| v22_r1_deep_book::deep_book_maker_worst_order_pinned_at_the_netting_floor | sum of maker's worst order >= pre-R1 worst (175 of 187 worlds liened) | >= -78,538,861 | -80,615,589 |
 | v22_r1_deep_book::liened_domain_multi_claimant_ratchets | same, liened multi-claimant | >= pre-R1 worst | below (message only) |
 | v22_r1_i457::i457_resolved_close_order_does_not_change_payouts | payouts, close order [0,1,2,3] vs [3,2,1,0], peak 0,1,2, reverse_first | equal | [0, 494527388, 1185878296, 1000000619594320] vs [0, 494527386, 1217566000, 1000000725220000] |
 | v22_r1_multi_claimant::r1_multi_claimant_residual_ratchets | resolved solvent worst gap | <= 116,400 | 144,500 |
