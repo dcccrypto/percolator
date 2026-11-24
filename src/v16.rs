@@ -27877,6 +27877,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     // deficit voids it as the settlement would have (the held certificate with
                     // its validity cleared), so the account is refreshed before it can be
                     // liquidated and no transaction carries both the charge and a liquidation.
+                    // Fork: no v2.2 band observe here, as on the settlement path (#405 ran one).
                     account.header.health_cert.valid = 0;
                     account.validate_with_market(&self.as_view())?;
                 }
