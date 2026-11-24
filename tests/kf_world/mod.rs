@@ -481,9 +481,9 @@ impl World {
             }
             // The whole bucket if the engine allows it, else its resolved surplus.
             let free = b.fresh_unliened_backing_num / BOUND_SCALE;
-            // v2.2 has no `resolved_counterparty_backing_surplus` view (upstream-only API);
-            // only the whole-bucket withdrawal is attempted.
-            let surplus = 0u128;
+            let surplus = self
+                .op(|m, _| m.resolved_counterparty_backing_surplus(d))
+                .unwrap_or(0);
             for amount in [free, surplus] {
                 if amount != 0
                     && self

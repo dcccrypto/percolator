@@ -256,6 +256,64 @@ A full account refresh computes, for every domain where the account currently ow
 
 The plan MUST be built from every active leg before any newly observed K/F delta is applied. Its canonical order is `(negative phase first, source_domain ascending, canonical leg_slot ascending)`. A plan entry MAY cache the arithmetic delta computed while building that plan because the canonical account representation has at most one leg per asset and applying an earlier entry cannot mutate another asset's K/F target. Immediately before application, the implementation MUST reload the leg and asset, recompute the inexpensive live K/F target, and reject unless it matches the cached target; it MUST also recompute and match the phase and source domain encoded in the key. This is ordering, not netting: each negative delta reserves available capital in its own source domain, and a same-refresh positive delta cannot erase that loss before reservation. Positive face that existed before the refresh remains subject to the ordinary source-support and face-burn rules when a new loss is applied.
 
+**Resolved-mode settlement over source claims is bounded per call.** A Resolved close MUST NOT settle, in one call, the final K/F of more than `RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL` (2) legs of an account that holds source claims and has a loss among more than that many unsettled legs. Such a call settles that many of the unsettled legs, commits, and returns progress without detaching a leg or paying out; later calls settle the rest, and the last chunk is settled by the ordinary settlement, which then continues with B, fees, negative PnL and detach as before. An account that holds no source claim, or has no loss left to settle, or has at most that many unsettled legs, settles every leg in one call as before. The chunk plan is built from the unsettled legs only and taken in the canonical order above. A settled leg's entry in the full plan has zero net and moves no value, so the chunks followed by the ordinary settlement apply exactly the sequence of settlements one call would apply: an account whose close is not interleaved with another account's ends in the same state, and negative PnL a chunk leaves is settled from principal only after the account's last leg, as in one call. Rationale: with losses over source claims, one call that settles every leg costs work for each losing leg and for each claim its loss burns through. At the largest portfolio shape that does not fit in a transaction, and an account that cannot settle its legs keeps the market's payout blockers set, so no positive PnL anywhere in the market is paid. Resolved mode has no health certificate that needs an account's legs settled together. Live refresh is unchanged: there the plan is built from every active leg and applied in full.
+
+**Resolved-mode placement of stranded loser payments is bounded per call.** A Resolved close MUST NOT make more than `RESOLVED_STRANDED_PLACEMENTS_PER_CALL` (4) placements of stranded loser payments (§2.2, "Stranded loser payments (Resolved)") in one call. A placement belongs after the K/F settlement of the leg whose asset holds the payment. When the call has made that many and comes to a leg whose asset may need another, that placement waits for the next call, which passes over every settled leg again. "May" is decided from stored values alone: a side of the asset has no stored leg left unsettled, its twin domain holds at least one whole atom of loser-paid backing beyond its claim bound and its provider's principal, and either the other side has no unsettled stored leg as well or that side's domain is still owed at least one whole atom by losers. The same test, when it fails, is how a call knows without further work that an asset has nothing to place. If the next leg in the canonical order is a loss, the K/F settlement stops before it: a loss can burn face at a rate the waiting placement would change. Otherwise the remaining legs, which are gains or already settled and read no rate, are settled in the same call, so that a waiting placement does not keep the account's other legs unsettled. Either way a call with a placement waiting commits and returns progress without settling B, charging fees, detaching a leg or paying out, so no leg leaves its asset with a placement waiting on it. Placements therefore happen before everything whose outcome they can change, and an account whose close is not interleaved with another account's ends in the same state as with no bound. A call that leaves a placement waiting has made the bound's worth, and a placement only takes stranded backing out of its domain, so the calls end. Rationale: a placement rewrites the ledgers of both domains of an asset, and an account can hold a leg on every asset of its portfolio with a payment stranded on each. Unbounded, that work is added to the settlement of every leg in the same call. The bound is at least twice the number of legs that the smallest multi-asset accounts hold, so that a two-leg account never waits.
+
+The two Resolved-mode rules below are ported from upstream 78d180f2 (upstream §5.1.1 text, placed here in §2.2).
+
+Netting of a loss first settled in Resolved mode. A K/F loss that is first
+settled after resolution is netted by the same rules, with these differences.
+Every payment to `L` is booked by the resolved booking rule of the next
+paragraph instead of being added to `L` as it stands, so `L`'s bucket need not
+be able to take it and what `L` cannot take stays junior residual; only whole
+atoms move. The twin's face is cancelled without a move: whether the twin's
+loser-paid backing answers for the cancelled face depends on whether its losers
+paid before or after the reversal, which a pooled share cannot tell, and the
+settlement of stranded backing below places it once that is known. Partially
+backed face is kept, and the loss paid from free capital, only where the face
+sits in `L` itself at a rate strictly between 0 and 1: there the rate is below
+par because `L`'s losers, this account among them, have not all paid yet, and
+burning the face would spend `x / rate` of it for `x` of loss, so that what the
+holder was paid would depend on which permissionless close ran first. Face in
+any other domain below rate 1, and face with nothing behind it (credit rate 0),
+is not kept: it is left to the support-and-burn path as before, which prices it
+at its domain's rate (a rate that an insolvent payer left below 1 is what that
+face is worth) or, at rate 0, cancels it against the loss one for one.
+Nothing here runs in Recovery mode. While a domain-loss barrier is pending on
+either side of the asset no payment is made; the cancellations, which move
+nothing, still apply.
+
+Stranded loser payments (Resolved). A Resolved close settles K/F leg by leg
+and passes over the legs it finds settled. After each leg it settles or passes
+over, for each side `s` of that leg's asset that has no stored leg left
+unsettled: the
+losers of `s` have paid all they will pay into `D_s = (asset, s)` and the
+winners of `s` have registered every claim they will hold on the twin
+`D_t = (asset, opposite(s))`. Loser-paid backing of `D_t` beyond its claim bound
+and beyond its provider's principal, `max(0, fresh reserved - provider principal
+- claim bound)` capped by the bucket's unliened principal and rounded down to
+whole atoms, is then stranded: it paid for a gain that reversed before its
+winners were settled, or for face that was cancelled against its holder's own
+loss. It MUST move to `D_s`, where the other side's regain is claimed and nobody
+else will fund it, up to what `D_s` is still owed by losers,
+`max(0, claim bound + provider principal - fresh reserved)`; it joins `D_s` as
+loser-paid principal (refilling the provider receivable first) at `D_s`'s expiry
+if its bucket is Fresh and unlapsed, at the lifetime the engine gives the backing
+it creates (never past the resolved backing horizon) if it is Empty or Expired,
+and not at all if it is Impaired, lapsed, or that expiry has already passed.
+Once the other side has no unsettled stored leg either, no claim can still
+appear on either domain, and whatever stranded backing was not moved MUST join
+the junior pool at once instead of when the bucket lapses. Provider principal
+and backing that a claim on `D_t` owns never move; `V`, `C_tot` and `I` are
+flat; the bucket of `D_t` must be Fresh and unlapsed; nothing moves while a
+domain-loss barrier is pending on either side of the asset or once the payout
+snapshot is captured. Without this rule the regain is paid at the junior rate,
+or by a provider in `D_s` that is never repaid, while the stranded payment
+lapses into the junior pool; and while a junior claim is outstanding every
+provider bucket of the market group holds back a reserve for it. One close call
+makes a bounded number of these placements (§2.2).
+
 A backing reservation may be funded only by:
 - senior capital `C_i`;
 - already realized nonjunior quote gains;
@@ -268,6 +326,8 @@ Open positive PnL that is not converted into a source-credit lien is not backing
 Backing freshness is maintained with bounded buckets. The v16.8 public profile uses exactly one freshness bucket per source domain. Any future multi-bucket profile MUST either refill the bucket holding the consumed receivable or recompute the source aggregate before admitting new backing; it MUST NOT compare a source-wide receivable against an unrelated empty bucket.
 
 Provider withdrawals of counterparty backing keep the domain at the full credit rate, which counts registered claims only, and a gain becomes a claim only when its account is refreshed. In Live mode, while any stored position on the domain's asset has not settled the asset's latest K/F change (`stale_account_count_long` or `stale_account_count_short` nonzero), a withdrawal of counterparty backing MUST NOT exceed the domain's provider principal (deposits less earlier withdrawals). Fresh backing beyond that principal was paid in by the domain's losers and may be owed to a gain the watermark cannot see yet. Once every position is settled the watermark alone governs again. (upstream 827a125f)
+
+**Resolved surplus withdrawal** (upstream c3988149). After resolution, forfeited Fresh principal raises the common payout rate of haircut receipts, so external withdrawal must not take backing that a claim could still receive. `withdraw_resolved_counterparty_backing_surplus_not_atomic` allows a domain's provider to withdraw, at any time before expiry and regardless of open portfolios, at most `floor((fresh_unliened − reserve) / BOUND_SCALE)` atoms, where `reserve = positive_claim_bound_num(domain) + need`. Here `need = BOUND_SCALE · max(0, ceil(B / BOUND_SCALE) − R)`, with `R` the ledger's `snapshot_residual` and `B = terminal_claim_exact_receipts_num + terminal_claim_bound_unreceipted_num`. Before snapshot capture, it uses `(residual(), pnl_pos_bound_tot_num)`, only on a payout-ready market with no source claims. Otherwise the call is rejected. The ordinary withdrawal checks still apply. Because `R` never falls and `B` never rises after capture, `need` never grows. Expiry of the kept reserve alone sets the rate to full, so every claimant receives exactly what expiry of the whole bucket would have paid, and the surplus would only have reached insurance recredit or unallocated surplus. Each bucket keeps the whole `need` independently of other buckets, so the rule does not depend on provider exit order. The kept reserve stays pledged until it expires or the need falls to zero.
 
 In Resolved mode a loss booked into a terminal domain (no claim and no creditor leg left) funds the junior pool, except that a domain that is not Impaired first takes, until the payout snapshot is captured, what repays its provider: min(provider receivable, provider principal - fresh reserved backing). The provider that fronted a winner's gain is owed the loser's payment whichever account closes first. (upstream 5e3af071)
 
@@ -401,6 +461,28 @@ available_backing_num_after <= available_backing_num_before
 credit_rate_num_after <= credit_rate_num_before unless positive_claim_bound_num also decreased by an independently valid bounded recomputation
 ```
 A pure expiry transition that increases available backing or credit rate is invalid and MUST revert or recover. A before/after inequality alone is insufficient unless the recomputed aggregate equalities also hold.
+
+Credit rate (upstream c7ae2256, #250). `credit_rate_num` is the rate at which UN-LIENED claim face is credited, so it is the unliened backing over the claim bound that this backing is still owed to:
+
+```text
+available_backing_num =
+    (fresh_reserved_backing_num - valid_liened_backing_num)
+  + (insurance_credit_reserved_num - valid_liened_insurance_num - impaired_liened_insurance_num)
+
+unliened_claim_bound_num =
+    max(0, positive_claim_bound_num - valid_liened_backing_num - valid_liened_insurance_num)
+
+if positive_claim_bound_num == 0:                       credit_rate_num = CREDIT_RATE_SCALE
+else if available_backing_num == 0:                     credit_rate_num = 0
+else if available_backing_num >= unliened_claim_bound_num: credit_rate_num = CREDIT_RATE_SCALE
+else: credit_rate_num = floor(available_backing_num * CREDIT_RATE_SCALE / unliened_claim_bound_num)
+```
+
+A valid lien locks at least as much face as the backing it pledges and locked face draws no soft credit, so a lien's pledged backing and the same amount of claim bound leave the rate together; leaving lien-covered face in the denominator would count a claim its own lien already covers against the remaining backing a second time. The haircut part of a lien created below the full rate (`face_claim_locked - backing_reserved`) stays in `unliened_claim_bound_num`, and impaired liens are not deducted; both only lower the rate. With `total_backing_num = fresh_reserved_backing_num + insurance_credit_reserved_num - impaired_liened_insurance_num`, every state MUST satisfy: liens plus all soft credit on unliened face fit in `total_backing_num`; `total_backing_num >= positive_claim_bound_num` and `available_backing_num > 0` imply `credit_rate_num == CREDIT_RATE_SCALE`; `credit_rate_num <= min(CREDIT_RATE_SCALE, floor(total_backing_num * CREDIT_RATE_SCALE / positive_claim_bound_num))`. Creating a lien MUST NOT raise `credit_rate_num`. Limit: in a domain that is under-backed when a lien is created, only the lien's backing leaves the denominator (no per-domain liened-face aggregate is stored), so other claimants are credited below the lien-free rate while that lien is outstanding: never an over-credit.
+
+Migration from the pre-#250 rate. Before #250 the stored rate was `available_backing_num` over the whole `positive_claim_bound_num` (liened face included), and percolator-prog's own rate helper still computes it so. A stored `credit_rate_num` equal to that value for the same state MUST still decode; any other value that differs from the rule above MUST be rejected. The pre-#250 value is never above the rule above, so until the domain is next written its unliened face is credited at that lower rate, which never credits more than the backing holds (the `credit_rate_num == CREDIT_RATE_SCALE` implication above is the one invariant such a domain does not yet meet). Every engine write of a domain recomputes `credit_rate_num` by the rule above, so the domain moves to it the first time the engine writes it.
+
+The provider exit gate does not follow the lien-aware rate (upstream 596b3d98). A withdrawal of unliened counterparty backing MUST leave `available_backing_num >= positive_claim_bound_num`: the unliened backing left behind covers the whole claim bound, lien-covered face included. With no lien outstanding this is exactly "the rate stays full". With liens it is stricter (the rate is already full once total backing covers the claims), so a provider's surplus stays in place by the pledged amount until the liens are released. The gate has always had this watermark; the rate change alters how claims are credited, not what a provider may take out.
 
 Insurance may contribute to source credit only through a canonical live insurance-credit reservation recorded in `InsuranceLedger.source_credit_reserved_num[D]`. `SourceCreditState[D].insurance_credit_reserved_num` is a derived view of that canonical ledger entry, not a second writer.
 
@@ -1209,6 +1291,113 @@ If `price_move_active`, before mutating any K/F/price/slot/consumption state, re
 ```text
 abs(oracle_price - P_last) * 10_000 <= cfg_max_price_move_bps_per_slot * dt * P_last
 ```
+
+Same-leg reversal netting (Live). Before the support-and-burn rule above, a
+newly observed negative K/F delta on a leg whose loss books into domain
+`L = (asset, side)` MUST first cancel, one for one, the account's unliened
+positive face in the twin domain `T = (asset, opposite(side))` -- the unrealized
+gain of that same leg, which was never paid out. The netted amount is
+`n = min(loss, positive face, unliened T claim)`; the account's T claim, T's
+claim bound and `PNL` all fall by exactly `n`, and only `loss - n` continues
+through support-and-burn and capital reservation. Pricing this give-back at
+T's stored credit rate would make the outcome depend on whether T's losers
+were settled before the reversal. Together with the cancelled face, T's
+counterparty backing that supported it moves to `L`:
+`n * available_T / claims_T`, computed in one step and rounded UP to a whole
+atom toward `L` (never more than `n`; capped by T's unliened bucket principal),
+so `L` is never left a fractional atom short while the remainder strands in T. T books it exactly as ordinary
+support consumption (spent / provider-receivable / consumed lockstep, so
+provider attribution is unchanged) and it re-enters as fresh principal of `L`
+rather than the junior pool (`V`, `C_tot`, `I` flat). A Fresh `L` bucket keeps
+its expiry; an Empty/Expired one inherits T's bucket expiry, so the moved
+principal never outlives its source commitment and a provider top-up at that
+expiry still merges. The
+transfer is skipped (netting still applies) when either side of the asset has
+a pending domain-loss barrier, T's bucket is stale, or L's bucket cannot accept
+fresh principal; skipping only raises T's rate. Because the transfer is at or
+below T's rate, no remaining T claimant's rate falls, no account is credited
+more than its position's PnL, and liened or impaired T face is never netted.
+After that netting, still before support-and-burn: (a) unliened face in any
+other source domain whose credit rate is exactly 1 is realized one for one, its
+counterparty backing (booked as ordinary support consumption) moving to `L`.
+Unliened face the account holds in `L` itself at credit rate exactly 1 is the
+same case with nothing to move: the claim on `L` and the new debt to `L` are
+the same money, so `min(remaining loss, positive face, whole unliened L claim)`
+of the two cancel one for one (the account's `L` claim, `L`'s claim bound and
+`PNL` fall together) while `L`'s backing is left exactly where it is, where it
+backs the gain this loss pays for. Nothing is consumed (no spent,
+provider-receivable or consumed-lien entry) and nothing reaches the junior
+pool; `L`'s remaining claimants keep rate 1 because claims fall and backing
+does not. No principal moves, so this cancellation does not depend on a
+domain-loss barrier or on `L`'s bucket accepting fresh principal; it is skipped
+only while `L`'s bucket has lapsed without being expired (its stored rate no
+longer holds). Face in `L` below rate 1 is partially backed face under (b);
+(b) if the account holds unliened face in a domain with credit rate below 1,
+the whole remaining loss is paid from free capital directly into `L` backing
+(`C_tot -= x`, `L` principal `+= x`, `V` flat) and that face is kept -- it is
+never burned afterwards by the same loss. Burning it instead
+would spend `x / rate` face for `x` of loss and strand the difference in the
+source domain once its losers book. Health is unchanged either way (`C - x +
+P*r` equals `C + (P - x/r)*r`). Only a loss beyond free capital, or one met by
+liened face, takes the support-and-burn path.
+
+Loss-domain booking of consumed support. A K/F loss is owed to `L` whether the
+account pays it from capital or by giving up claims. Counterparty backing that
+the support-and-burn path consumes from the account's own source claims toward
+a K/F loss -- whatever the netting (in Live, and in Resolved mode by §2.2 "Netting of a
+loss first settled in Resolved mode") left to that path -- and, in
+Resolved mode, the backing that netting itself realizes at par, MUST NOT be left
+in the junior pool while `L` can take it. The source
+domain books it exactly as ordinary support consumption (spent /
+provider-receivable / consumed lockstep), and the consumed atoms are booked
+for `L` by the same rule that books the capital-paid part of the same loss:
+in Live all of it joins `L` as loser-paid principal (refilling `L`'s provider
+receivable first) unless `L`'s bucket is Impaired; in Resolved mode nothing is
+booked for a terminal domain (Impaired, or no claim and no creditor leg left),
+otherwise `L` takes what the resolved loss-backing capacity allows (the whole
+amount while `L`'s bucket is Fresh, unlapsed and funded; otherwise its support
+gap plus the provider receivable already advanced; v2.2: that cap applies
+only once `L`'s creditor claims are final, before that `L` takes the whole
+amount). v2.2 also does not expire a lapsed but still Fresh `L` bucket here
+(F-LIVE-2): while it is lapsed and unexpired, the consumed atoms stay junior
+residual. Whatever that rule does
+not book stays junior residual, where consumption already put it; `V`,
+`C_tot` and `I` are flat throughout. Insurance-funded support and junior-pool
+(haircut) support are not counterparty backing and are not moved, and nothing
+is taken back out of the junior pool once the resolved payout snapshot is
+captured. Without this a provider in `L` pays the opposite side's gain from
+its principal and is never repaid, and the consumed backing is retired at
+terminal. The face burned by that path, and the rate it is burned at, are
+unchanged.
+
+Liened face that a Live K/F loss burns (upstream 1683b11d). The support-and-burn path burns liened
+face after unliened face. The counterparty backing behind burned liened face is
+reserved for the account alone and is what the account pays that part of its
+loss with, so it MUST leave with the loss: instead of being un-pledged into its
+bucket it is consumed from the lien (valid liened to consumed, with spent /
+provider-receivable / consumed in lockstep as above) and booked for `L` by the
+same rule as the paragraph above. The account-side effect is unchanged: the same
+face is burned and the lien shrinks by the same amounts. Only whole atoms are
+consumed; a fraction of an atom is un-pledged in place. The exceptions are those
+of upstream's netting (the unliened twin netting above has the same loser-paid cap, upstream
+S1 d5485eab). Face held in `L` itself moves nothing: its backing already
+sits where the loss is owed. For face in the twin domain `T` only the share its
+losers paid in follows, `burned face * loser_paid_T / claims_T`, rounded up to a
+whole atom and never more than the lien's backing or `T`'s loser-paid backing,
+so what a provider fronted stays with the provider (v2.2: `loser_paid_T` is `T`'s
+fresh reserved backing beyond the S10 provider-principal mirror, which falls on expiry
+or impairment as upstream's principal does). Nothing is consumed while
+either side of either asset has a pending domain-loss barrier, while the face's
+bucket is not Fresh and unlapsed, or while `L`'s bucket cannot accept fresh
+principal; the lien is then un-pledged in place (or retired, for an impaired
+lien) as before. Insurance-backed liens are released as before. In Resolved mode
+and on every other path that burns liened face (forfeit, conversion, close) the
+lien is un-pledged in place. Without this rule the backing stays in a domain
+that no longer has a claim on it while the opposite side's gain is unbacked, or
+is paid by a provider in `L` that is never repaid. Under the lien-aware credit
+rate (section 2) a partial lien does not lower its domain's rate, so rule (b)
+does not shield a partly liened account: every loss beyond its unliened face
+reaches liened face.
 
 Then update stress consumption:
 

@@ -554,15 +554,18 @@ fn r1_liened_victim_is_order_independent_and_pinned() {
             .iter()
             .position(|x| *x == (cap, sell, up2, st2))
             .unwrap();
-        // S5 (option B, protect the counterparty): equal to the pre-R1 engine's LOSER-FIRST result,
-        // which is the base's WORST order for the counterparty in all six scenarios.
+        // Upstream's K/F netting chain (#387): the pair is exactly zero-sum in every scenario and
+        // both orders agree; the counterparty is still never below the pre-R1 worst order. (R1's
+        // S5 option B pinned the pre-R1 engine's LOSER-FIRST result: (73,993, -124,395),
+        // (31,533, -68,530), (52,661, -98,213), (42,863, -79,939), (24,834, -49,238),
+        // (8,282, -25,966).)
         const PINNED: [(i128, i128); 6] = [
-            (73_993, -124_395),
-            (31_533, -68_530),
-            (52_661, -98_213),
-            (42_863, -79_939),
-            (24_834, -49_238),
-            (8_282, -25_966),
+            (110_990, -110_990),
+            (68_530, -68_530),
+            (89_658, -89_658),
+            (68_530, -68_530),
+            (47_405, -47_405),
+            (25_966, -25_966),
         ];
         // the pre-R1 engine's worst counterparty equity over both orders (874fe33a)
         const BASE_WORST_COUNTERPARTY: [i128; 6] = [-124_395, -68_530, -98_213, -79_939, -49_238, -25_966];
@@ -593,26 +596,33 @@ fn liened_scenario_try(winner_first: bool, cap: u128, sell: u128, up2: i64, step
 }
 
 /// A victim whose loss outruns its capital and face (bad debt). The bad debt never books, so the
-/// neutral rate must not assume it does (it would over-credit the victim). Both orders agree and
-/// the numbers are pinned: dropping the bad-debt term moves the victim by ~+20,000 atoms.
+/// neutral rate must not assume it does (it would over-credit the victim). Under R1 both orders
+/// agreed. Upstream's K/F netting chain (#387) makes the victim's result depend on the settle
+/// order (winner-first is 14,866-37,619 atoms lower); the winner is the same in both orders and
+/// the pair never gains. Both orders are pinned (renamed from
+/// `r1_bankrupt_victim_is_order_independent_and_not_over_credited`). Not shown any more: that the victim is not
+/// over-credited. Victim-first is +36,997 (cap 330k) / +22,571 (cap 400k) above R1's value in
+/// every case, the direction and rough size the bad-debt term used to guard against.
 #[test]
-fn r1_bankrupt_victim_is_order_independent_and_not_over_credited() {
-    // (victim, winner) effective equity, pinned from the verified neutral-rate run. Dropping the
-    // bad-debt term (assuming the whole loss books) moves these by tens of thousands of atoms.
-    const PINNED: [(i128, i128); 5] = [
-        (-414_343, 329_999),
-        (-605_611, 329_999),
-        (-804_603, 329_999),
-        (-771_596, 399_999),
-        (-1_279_126, 399_999),
+fn r1_bankrupt_victim_order_dependence_pinned_and_pair_never_gains() {
+    // (victim, winner) effective equity, winner-first then victim-first. R1 pinned one value for
+    // both orders: (-414,343 / -605,611 / -804,603 / -771,596 / -1,279,126, winner unchanged).
+    const PINNED: [((i128, i128), (i128, i128)); 5] = [
+        ((-398_508, 329_999), (-377_346, 329_999)),
+        ((-599_888, 329_999), (-568_614, 329_999)),
+        ((-805_225, 329_999), (-767_606, 329_999)),
+        ((-763_891, 399_999), (-749_025, 399_999)),
+        ((-1_275_891, 399_999), (-1_256_555, 399_999)),
     ];
     for (n, &(cap, sell, up2, st2)) in [(330_000u128, 7u128, 200i64, 6usize), (330_000, 7, 200, 8), (330_000, 7, 200, 10), (400_000, 8, 200, 8), (400_000, 8, 200, 12)].iter().enumerate() {
         let wf = liened_scenario_try(true, cap, sell, up2, st2).expect("scenario runs");
         let lf = liened_scenario_try(false, cap, sell, up2, st2).expect("scenario runs");
         eprintln!("R1BANKRUPT cap {cap} sell {sell} {up2}x{st2}: {wf:?} {lf:?}");
-        assert_eq!(wf, lf, "bankrupt victim: settle order changes effective equity");
-        assert_eq!(wf, PINNED[n], "bankrupt victim: pinned result moved");
-        assert!(wf.0 + wf.1 <= 4, "pair gained {}", wf.0 + wf.1);
+        assert_eq!(wf.1, lf.1, "bankrupt victim: settle order changes the winner");
+        assert_eq!((wf, lf), PINNED[n], "bankrupt victim: pinned result moved");
+        for r in [wf, lf] {
+            assert!(r.0 + r.1 <= 4, "pair gained {}", r.0 + r.1);
+        }
     }
 }
 
@@ -667,9 +677,10 @@ fn r1_resolved_close_is_unchanged() {
     let wf = resolved_payouts(true);
     let lf = resolved_payouts(false);
     eprintln!("R1RESOLVED winner-first {wf:?} victim-first {lf:?}");
-    // pre-R1 values (874fe33a). Resolved close is itself order dependent (pre-existing, not R1);
-    // this test only pins that the R1 change does not touch it.
-    assert_eq!(wf, (999_999_999_998_674, 999_999_999_942_508));
+    // pre-R1 values (874fe33a) were order dependent: winner-first (999_999_999_998_674,
+    // 999_999_999_942_508) left 58,818 short. With the Resolved K/F netting (i457 fix) the
+    // winner's loss is netted in the close too, so both orders pay the same and sum to the deposits.
+    assert_eq!(wf, (1_000_000_000_057_492, 999_999_999_942_508));
     assert_eq!(lf, (1_000_000_000_057_492, 999_999_999_942_508));
 }
 
@@ -685,11 +696,13 @@ fn r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1() {
     // flip (+3 -> -3) that the buggy classifier treated as not risk-increasing, so it took no
     // initial-margin source lien and was priced here as a NON-liened victim. A flip is
     // risk-increasing (spec), the lien is now created, and the case belongs to the liened class:
-    // see `r1_equal_size_flip_victim_is_liened_and_order_independent` below.
+    // see `r1_equal_size_flip_victim_is_liened_and_order_dependence_pinned` below.
+    // Upstream's K/F netting chain (#387) lowers the winner-first victim (R1: -553,486 / -807,740 /
+    // -428,054); it stays above the pre-R1 engine.
     const CASES: [((u128, u128, i64, usize), (i128, i128, i128, i128)); 3] = [
-        ((330_000, 5, 200, 14), (-553_486, -518_502, -643_128, -518_502)),
-        ((330_000, 5, 200, 18), (-807_740, -747_130, -877_922, -747_130)),
-        ((330_000, 5, 200, 12), (-428_054, -410_804, -531_165, -410_804)),
+        ((330_000, 5, 200, 14), (-581_887, -518_502, -643_128, -518_502)),
+        ((330_000, 5, 200, 18), (-829_974, -747_130, -877_922, -747_130)),
+        ((330_000, 5, 200, 12), (-460_721, -410_804, -531_165, -410_804)),
     ];
     for &((cap, sell, up2, st2), (fwf, flf, bwf, blf)) in &CASES {
         let wf = liened_scenario_try(true, cap, sell, up2, st2).expect("scenario runs");
@@ -706,10 +719,16 @@ fn r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1() {
 /// -537,447 victim-first). With the flip correctly risk-increasing the lien is created and the
 /// victim is priced at the protective rate: the same result in both settle orders (-551,220), the
 /// counterparty untouched in both. Red with the side-flip fix reverted.
+///
+/// Under upstream's K/F netting chain (#387) the victim's result depends on the settle order
+/// again: -602,382 winner-first (below even the pre-#126 -580,525), -537,447 victim-first (the
+/// pre-#126 value). The counterparty is still untouched in both. Both orders are pinned (renamed
+/// from `r1_equal_size_flip_victim_is_liened_and_order_independent`), and the lien is now asserted directly, since order independence no longer shows it.
 #[test]
-fn r1_equal_size_flip_victim_is_liened_and_order_independent() {
+fn r1_equal_size_flip_victim_is_liened_and_order_dependence_pinned() {
+    assert!(liened_scenario(true, 300_000, 6, 200, 10).2 > 0, "the equal-size flip takes a source lien");
     let wf = liened_scenario_try(true, 300_000, 6, 200, 10).expect("scenario runs");
     let lf = liened_scenario_try(false, 300_000, 6, 200, 10).expect("scenario runs");
-    assert_eq!(wf, lf, "a liened victim's settle order must not change effective equity");
-    assert_eq!(wf, (-551_220, 299_999), "pinned (side-flip fix)");
+    assert_eq!(wf.1, lf.1, "the counterparty is the same in both settle orders");
+    assert_eq!((wf, lf), ((-602_382, 299_999), (-537_447, 299_999)), "pinned (#387)");
 }

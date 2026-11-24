@@ -627,12 +627,12 @@ fn r_regression_fresh_unexpired_backing_still_supports_in_full() {
     );
     // On a LIVE bucket both terms of `account_source_realizable_support` pay:
     //   * the gated lien term, in full            -> LIEN_EFFECTIVE            = 10
-    //   * the unliened claim term, haircut by the
-    //     domain's post-lien credit rate:
-    //     claim_num = 100*BS - 10*BS = 90*BS, rate = (100-10)/100 of scale,
-    //     credited = 90 * 0.9                     -> UNLIENED_CLAIM_SUPPORT    = 81
-    // If the fix had gated a live bucket, this certificate would read 81.
-    const UNLIENED_CLAIM_SUPPORT: u128 = 81;
+    //   * the unliened claim term, at the domain's lien-aware credit rate (#250):
+    //     claim_num = 100*BS - 10*BS = 90*BS; the rate is unliened backing over
+    //     unliened claim, (100-10)/(100-10) = full scale,
+    //     credited = 90 * 1                       -> UNLIENED_CLAIM_SUPPORT    = 90
+    // If the fix had gated a live bucket, this certificate would read 90.
+    const UNLIENED_CLAIM_SUPPORT: u128 = 90;
     assert_eq!(
         cert.certified_equity as u128,
         UNLIENED_CLAIM_SUPPORT + LIEN_EFFECTIVE,

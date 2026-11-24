@@ -49,9 +49,11 @@ compile_error!("features `x1-diff` / `x1-mutant-noclamp` are test-only and must 
 
 /// v2.2 Phase 4 items 1 + 2: pure band / rent arithmetic (see module docs).
 pub mod band_rent;
-#[cfg(kani)]
+// Under `fuzz` the module is public too, so fuzz-gated tests can reach the kernel
+// helpers by path (upstream #250 `tests/v16_lien_claim_rate.rs` uses `percolator::v16::*`).
+#[cfg(any(kani, feature = "fuzz"))]
 pub mod v16;
-#[cfg(not(kani))]
+#[cfg(not(any(kani, feature = "fuzz")))]
 mod v16;
 #[cfg(kani)]
 pub mod wide_math;
@@ -100,6 +102,7 @@ pub use v16::{
     BANKRUPTCY_HLOCK_ACTIVE_BIT, BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS,
     PORTFOLIO_LEG_V16_EMPTY_ACCOUNT, PORTFOLIO_SOURCE_DOMAIN_CAP,
     PROVIDER_PROTECTION_OBSERVED_ASSET_CAP, PROVIDER_PROTECTION_OBSERVED_MAX_ASSET_INDEX,
+    RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL, RESOLVED_STRANDED_PLACEMENTS_PER_CALL,
     TERMINAL_SLAB_SCAN_ASSETS_PER_CALL, V16_ACCOUNT_VERSION, V16_EMPTY_ACTIVE_BITMAP,
     V16_LAYOUT_DISCRIMINATOR, V16_MAX_ACCRUAL_PATH_STEPS, V16_MAX_PORTFOLIO_ASSETS_N,
 };
