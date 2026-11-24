@@ -738,7 +738,8 @@ proptest! {
 // the target's certificate validity cleared runs the full settlement; every byte of the market and
 // both accounts must match except the target's certificate. A kept certificate must be current, equal
 // to the certificate held before the sync with the charge taken from its equity, and a full refresh
-// of the post-state must succeed and differ from a refresh of the state before by the charge alone.
+// of the post-state must succeed, equal the kept certificate (deficit 0) and differ from a refresh of
+// the state before by the charge alone.
 fn fee_skip_group() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
     let (market_id, _, _, _) = ids();
     let mut cfg = V16Config::public_user_fund_with_market_slots(3, 3, 0, 10);
@@ -899,15 +900,17 @@ proptest! {
                             && held.cert_risk_epoch == before.0.risk_epoch.get()
                             && held.cert_asset_set_epoch == before.0.asset_set_epoch.get();
                         if advanced && !kept.valid && held_current && nonflat_before {
-                            let charged = *main_result.as_ref().unwrap();
-                            let equity = held.certified_equity - charged as i128;
-                            let deficit = if equity < 0 {
-                                equity.unsigned_abs()
-                            } else {
-                                held.certified_maintenance_req.saturating_sub(equity as u128)
-                            };
-                            if deficit != 0 {
-                                deficit_voids += 1;
+                            // Count the voids of an unhealthy post-state, as a full refresh of it
+                            // reports (not modelled from certified equity: the keep path reads
+                            // liquidation equity).
+                            let mut probe: FeeSkipState = (main.0, main.1.clone(), main.2, main.3);
+                            let (h, m, a, b) = &mut probe;
+                            let mut market = MarketGroupV16ViewMut::new(h, m);
+                            let mut view = PortfolioV16ViewMut::new(if target_a { a } else { b });
+                            if let Ok(cert) = market.full_account_refresh_not_atomic(&mut view) {
+                                if cert.certified_liq_deficit != 0 {
+                                    deficit_voids += 1;
+                                }
                             }
                         }
                         // A sync whose anchor did not advance returns before touching the account;
@@ -925,19 +928,18 @@ proptest! {
                             // ...and is the certificate held before the sync with the charge taken
                             // from its equity (the capital charge is the sync's only write that
                             // equity reads).
+                            // Its deficit is not derived from certified equity: the keep path reads
+                            // liquidation equity, so a kept certificate is a healthy one (deficit 0,
+                            // checked above) and the full refresh below must agree.
                             let mut expected = held;
                             expected.certified_equity = held.certified_equity - charged as i128;
-                            expected.certified_liq_deficit = if expected.certified_equity < 0 {
-                                expected.certified_equity.unsigned_abs()
-                            } else {
-                                held.certified_maintenance_req.saturating_sub(expected.certified_equity as u128)
-                            };
+                            expected.certified_liq_deficit = 0;
                             prop_assert_eq!(kept, expected);
                             // A full refresh of the post-state succeeds (a certificate that counts
                             // lapsed backing, which a refresh refuses, is not kept), as does one of
-                            // the state before the sync, and the two differ by the charge alone; so
-                            // when the held certificate was exact, so is the kept one. (No backing
-                            // here: a refresh collects no utilization fee.)
+                            // the state before the sync, and the two differ by the charge alone; the
+                            // kept certificate is the post-state refresh. (No backing here: a refresh
+                            // collects no utilization fee.)
                             let refresh = |state: &mut FeeSkipState| {
                                 let (h, m, a, b) = state;
                                 let mut market = MarketGroupV16ViewMut::new(h, m);
@@ -951,14 +953,16 @@ proptest! {
                             prop_assert!(refreshed_after.is_ok(), "the kept certificate's post-state refreshes: {:?}", refreshed_after);
                             match (refreshed_before, refreshed_after) {
                                 (Ok(cert_before), Ok(cert_after)) => {
+                                    // A full refresh of the post-state agrees that the account is
+                                    // healthy, as the kept certificate says.
+                                    prop_assert_eq!(cert_after.certified_liq_deficit, 0, "the post-state refresh is healthy");
                                     let mut charged_before = cert_before;
                                     charged_before.certified_equity = cert_before.certified_equity - charged as i128;
-                                    charged_before.certified_liq_deficit = if charged_before.certified_equity < 0 {
-                                        charged_before.certified_equity.unsigned_abs()
-                                    } else {
-                                        cert_before.certified_maintenance_req.saturating_sub(charged_before.certified_equity as u128)
-                                    };
+                                    charged_before.certified_liq_deficit = 0;
                                     prop_assert_eq!(cert_after, charged_before);
+                                    // The kept certificate is the one a full refresh of the
+                                    // post-state writes.
+                                    prop_assert_eq!(kept, cert_after);
                                     refreshable += 1;
                                     if held == cert_before {
                                         exact += 1;
@@ -968,7 +972,6 @@ proptest! {
                                         {
                                             exact_positive += 1;
                                         }
-                                        prop_assert_eq!(kept, cert_after);
                                     }
                                 }
                                 (b, a) => prop_assert!(false, "refresh before {:?}, after {:?}", b, a),
