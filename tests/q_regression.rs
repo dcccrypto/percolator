@@ -255,21 +255,43 @@ fn unexpired_live_fixture() -> LiveFixture {
     live_fixture(50, 5)
 }
 
+/// Cranks until the B chunk lands and returns that crank. Since upstream f1d6b3f7 the B-chunk
+/// crank first expires a lapsed backing bucket in the account's roster, one domain per call, and
+/// returns `SourceBackingExpired`; the next crank books the B chunk. Each crank before the chunk
+/// must be exactly that expiry of `CP_DOMAIN`, and there is at most one of them.
 fn drive_loss_via_auto_crank(
     market: &mut MarketGroupV16ViewMut<'_, u64>,
     long: &mut PortfolioV16ViewMut<'_>,
 ) -> AutoCrankResultV16 {
     let now = market.header.current_slot.get();
-    market
-        .permissionless_auto_crank_not_atomic(
-            long,
-            AutoCrankWorkV16 {
-                now_slot: now,
-                observations: &[],
-                resolved_close_fee_rate_per_slot: 0,
-            },
-        )
-        .expect("the Live loss must still settle -- the fix must not deadlock the burn")
+    let mut expiries = 0;
+    loop {
+        let result = market
+            .permissionless_auto_crank_not_atomic(
+                long,
+                AutoCrankWorkV16 {
+                    now_slot: now,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("the Live loss must still settle -- the fix must not deadlock the burn");
+        match result.outcome {
+            AutoCrankOutcomeV16::Progressed(
+                PermissionlessProgressOutcomeV16::SourceBackingExpired { domain },
+            ) => {
+                assert_eq!(domain, CP_DOMAIN, "only the lapsed roster bucket expires");
+                assert_eq!(
+                    result.selected,
+                    AutoCrankPlanV16::SettleBChunk { asset_index: ASSET },
+                    "the B-chunk crank expires the bucket before it settles"
+                );
+                expiries += 1;
+                assert_eq!(expiries, 1, "one expiry, then the B chunk");
+            }
+            _ => return result,
+        }
+    }
 }
 
 fn chunk_loss(result: &AutoCrankResultV16) -> u128 {

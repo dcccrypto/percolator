@@ -228,3 +228,105 @@ fn v16_settle_b_crank_after_the_loser_backing_lapses_keeps_the_winner_whole() {
     assert_eq!(wind_down.payouts[1], 11_000_000);
     assert_eq!(wind_down.retired, 0);
 }
+
+// ---- v2.2 fork addition (not upstream) ----
+
+use percolator::{
+    AutoCrankObservationV16, AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankWorkV16,
+    BackingBucketStatusV16, PermissionlessProgressOutcomeV16,
+};
+//
+// v2.2 already settled K/F before the B chunk (#310, port of 137662a9), so the three upstream
+// cases above pass here with or without f1d6b3f7. What f1d6b3f7 adds for v2.2 is the expiry
+// step: the B chunk now expires a lapsed backing bucket in the account's source roster before it
+// settles K/F against it, as the refresh does. This case puts the winner's gain domain in its
+// roster (an early refresh), lets the provider's backing there lapse after the liquidation, and
+// checks that the B-chunk crank expires that bucket before it books anything.
+
+fn run_roster_lapse(
+    loser_first: bool,
+) -> (Vec<AutoCrankOutcomeV16>, BackingBucketStatusV16, WindDown) {
+    let mut w = World::with_config(1, &[1_000_000, W_DEP], |cfg| {
+        cfg.initial_margin_bps = 1_000;
+        cfg.maintenance_margin_bps = 500;
+        cfg.max_price_move_bps_per_slot = 400;
+        cfg.max_abs_funding_e9_per_slot = 0;
+    });
+    let domain = World::loss_domain(0, false);
+    let expiry = w.slot + 5;
+    w.op(|m, _| m.deposit_fresh_counterparty_backing_not_atomic(domain, 300_000, expiry))
+        .expect("provider deposit");
+    w.provider[domain] += 300_000;
+    w.trade(1, 0, 0, UNITS);
+    let mut px = PX0;
+    for k in 0..4 {
+        px = px * 104 / 100;
+        w.step(0, px, 0);
+        if k == 2 {
+            // The winner's gain is credited from `domain`, which enters its source roster.
+            w.crank(1);
+        }
+    }
+    if loser_first {
+        w.crank(0);
+    } else {
+        w.crank(1);
+        w.crank(0);
+    }
+    for _ in 0..5 {
+        w.step(0, px, 0);
+    }
+    assert!(w.slot > expiry, "the provider's backing has lapsed");
+    assert_eq!(w.bucket(domain).status, BackingBucketStatusV16::Fresh);
+    // The winner is B-stale: its next crank is planned as a B chunk.
+    let now_slot = w.slot;
+    let observations = [AutoCrankObservationV16 {
+        asset_index: 0,
+        effective_price: px,
+        funding_rate_e9: 0,
+    }];
+    let first = w
+        .op(|m, a| {
+            m.permissionless_auto_crank_not_atomic(
+                &mut a[1],
+                AutoCrankWorkV16 {
+                    now_slot,
+                    observations: &observations,
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+        })
+        .expect("winner's first crank after the lapse");
+    assert_eq!(
+        first.selected,
+        AutoCrankPlanV16::SettleBChunk { asset_index: 0 }
+    );
+    let status_after_first = w.bucket(domain).status;
+    let outcomes = vec![first.outcome];
+    w.crank(1);
+    w.crank(0);
+    w.crank(1);
+    (outcomes, status_after_first, w.wind_down(&[0, 1]))
+}
+
+#[test]
+fn v16_settle_b_crank_expires_lapsed_roster_backing_before_settling() {
+    let domain = World::loss_domain(0, false);
+    let winner_first = run_roster_lapse(false);
+    let loser_first = run_roster_lapse(true);
+    println!("roster lapse: winner first: {winner_first:?}");
+    println!("roster lapse: loser first:  {loser_first:?}");
+    for (outcomes, status, _) in [&winner_first, &loser_first] {
+        // Before the port the B chunk ran against the lapsed Fresh bucket
+        // (AccountBChunk) and only the following refresh expired it.
+        assert_eq!(
+            outcomes[0],
+            AutoCrankOutcomeV16::Progressed(
+                PermissionlessProgressOutcomeV16::SourceBackingExpired { domain }
+            )
+        );
+        assert_ne!(*status, BackingBucketStatusV16::Fresh);
+    }
+    assert_eq!(winner_first.2, loser_first.2);
+    assert_eq!(winner_first.2.vault_end, 0);
+}
