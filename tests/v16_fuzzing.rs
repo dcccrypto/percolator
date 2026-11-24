@@ -808,6 +808,7 @@ proptest! {
                             &mut a,
                             &mut b,
                             TradeRequestV16 { asset_index: asset, size_q, exec_price: price, fee_bps: 0 },
+                            true,
                         )
                         .map(|_| ())
                 }

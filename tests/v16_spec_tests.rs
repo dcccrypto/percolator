@@ -1635,6 +1635,7 @@ fn v16_fee_sync_skip_writes_every_byte_the_settlement_writes_except_the_certific
                         exec_price: 100,
                         fee_bps: 0,
                     },
+                    true,
                 )
                 .unwrap();
         }
@@ -1732,6 +1733,7 @@ fn v16_fee_sync_settles_a_b_loss_booked_under_a_current_certificate() {
                     exec_price: 100,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
         market
@@ -1825,6 +1827,7 @@ fn v16_fee_sync_reconciles_a_lien_on_backing_that_lapsed_under_a_current_certifi
                     exec_price: 100,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
         market
@@ -1846,6 +1849,7 @@ fn v16_fee_sync_reconciles_a_lien_on_backing_that_lapsed_under_a_current_certifi
                     exec_price: 105,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
         // The same price and no funding, one slot per call, past the backing's expiry.
@@ -1948,6 +1952,7 @@ fn v16_fee_sync_voids_a_certificate_that_counts_lapsed_backing() {
                     exec_price: 100,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
         market
@@ -2049,6 +2054,7 @@ fn v16_fee_sync_keeps_the_refreshed_certificate_of_an_account_with_backed_gains(
                     exec_price: 100,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
         let slot = market.markets[0].engine.asset.slot_last.get();
@@ -2159,6 +2165,7 @@ fn v16_fee_sync_voids_a_certificate_the_charge_leaves_liquidatable() {
                     exec_price: 100,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
         let slot = market.markets[0].engine.asset.slot_last.get();
