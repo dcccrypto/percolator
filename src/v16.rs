@@ -21089,6 +21089,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 // pending K/F first (as settle_account_side_effects_not_atomic does) so a B share
                 // lands on the gain it offsets instead of arriving as a debt the gain must cure
                 // (upstream #172, 137662a9). No S10 budget: only the refresh crank grants one.
+                // The K/F settlement reads the credit state of the domains a gain lands in, so
+                // lapsed backing there is expired first, one domain per call, as the refresh
+                // does (upstream #274, f1d6b3f7).
+                if let Some(domain) = self
+                    .expire_first_lapsed_source_backing_for_account_not_atomic(&account.as_view())?
+                {
+                    self.validate_shape_audit_scan()?;
+                    return Ok(PermissionlessProgressOutcomeV16::SourceBackingExpired { domain });
+                }
                 self.settle_account_kf_effects_not_atomic(account, false, &mut 0u8)?;
                 let out =
                     self.settle_account_b_chunk(account, asset_index, PUBLIC_B_CHUNK_ATOMS)?;
